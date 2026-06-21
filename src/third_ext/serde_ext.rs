@@ -47,15 +47,14 @@ pub mod serde_opt_str {
     where
         D: Deserializer<'de>,
     {
-        serde_str::deserialize(deserializer)
-            .map(Some)
-            .or_else(|err| {
-                if err.to_string().contains("invalid type: null") {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            })
+        // 🌟 优雅修复：利用 Serde 原生的 Option 解析机制，它天生能完美识别 null 和 空值，无需任何硬编码匹配！
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => T::from_str(&s)
+                .map(Some)
+                .map_err(|_| serde::de::Error::custom(format!("parse error: {s:?}"))),
+            None => Ok(None),
+        }
     }
 }
 

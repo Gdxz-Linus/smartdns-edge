@@ -70,46 +70,49 @@ pub fn serve(
                                 log::warn!("error accepting request {}: {}", src_addr, err);
                                 break;
                             }
-                            None => {
-                                break;
+                            None => break,
+                        },
+                        _ = cancellation_token.cancelled() => break,
+                    };
+
+                    let handler = handler.clone();
+                    
+                    // 🌟 核心修复：拿到一个新的 QUIC Stream 后，立刻派发后台处理！
+                    // 主循环秒级回归，疯狂接收该 QUIC 连接发来的下一个并发查询流，彻底实现 QUIC 多路复用。
+                    tokio::spawn(async move {
+                        let bytes = match request_stream.receive_bytes().await {
+                            Ok(bytes) => bytes,
+                            Err(err) => {
+                                log::warn!("error receiving bytes {}", err);
+                                // 🌟 核心修复：即使读取失败，也必须显式向操作系统和内核宣告关闭该 QUIC 子流！
+                                // 否则底层的 Quinn 状态机将永远残留，导致僵尸 Stream 最终耗尽服务器内存。
+                                let _ = request_stream.stop(DoqErrorCode::NoError);
+                                return; // 局部流接收失败，仅退出当前流，保持主 QUIC 连接不断！
                             }
-                        },
-                        _ = cancellation_token.cancelled() => {
-                            // A graceful shutdown was initiated.
-                            break;
-                        },
-                    };
+                        };
 
-                    let bytes = match request_stream.receive_bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            log::warn!("error receiving bytes {}", err);
-                            break;
+                        log::debug!("Received bytes {} from {src_addr} {bytes:?}", bytes.len());
+
+                        let req_message = SerialMessage::binary(bytes, src_addr, Protocol::Quic);
+                        let res_message = handler.send(req_message).await;
+
+                        if let Err(err) = match res_message.try_into() {
+                            Ok(buffer) => request_stream.send_bytes(buffer).await,
+                            Err(err) => Err(err),
+                        } {
+                            log::trace!("quic stream processing failed from {src_addr}: {err}");
                         }
-                    };
 
-                    log::debug!("Received bytes {} from {src_addr} {bytes:?}", bytes.len());
-
-                    let req_message = SerialMessage::binary(bytes.into(), src_addr, Protocol::Quic);
-                    let res_message = handler.send(req_message).await;
-
-                    if let Err(err) = match res_message.try_into() {
-                        Ok(buffer) => request_stream.send_bytes(buffer).await,
-                        Err(err) => Err(err),
-                    } {
-                        log::warn!("quic stream processing failed from {src_addr}: {err}");
-                    }
+                        // DOQ_NO_ERROR (0x0): No error. 完美关闭当前子流。
+                        let _ = request_stream.stop(DoqErrorCode::NoError);
+                    });
 
                     max_requests -= 1;
 
                     if max_requests == 0 {
-                        log::warn!("exceeded request count, shutting down quic conn: {src_addr}");
-                        // DOQ_NO_ERROR (0x0): No error. This is used when the connection or stream needs to be closed, but there is no error to signal.
-                        let _ = request_stream.stop(DoqErrorCode::NoError);
-                        break;
+                        log::warn!("exceeded max request count (100), shutting down quic conn: {src_addr}");
+                        break; // 触发反滥用机制，关闭整个 QUIC 连接
                     }
-
-                    // we'll continue handling requests from here.
                 }
             });
 

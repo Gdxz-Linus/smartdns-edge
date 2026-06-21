@@ -27,13 +27,6 @@ impl NomParser for SpeedCheckMode {
         let none = value(None, tag_no_case("none"));
         let ping = value(Ping, tag_no_case("ping"));
         let tcp = map(preceded(tag_no_case("tcp"), preceded(char(':'), u16)), Tcp);
-        let http = map(
-            preceded(
-                tag_no_case("http"),
-                map(opt(preceded(char(':'), u16)), |r| r.unwrap_or(80)),
-            ),
-            Http,
-        );
         let https = map(
             preceded(
                 tag_no_case("https"),
@@ -42,7 +35,8 @@ impl NomParser for SpeedCheckMode {
             Https,
         );
 
-        alt((none, ping, tcp, https, http)).parse(input)
+        // 🌟 核心修复：清理掉对 http 的解析
+        alt((none, ping, tcp, https)).parse(input)
     }
 }
 
@@ -58,8 +52,7 @@ mod tests {
         assert_eq!(SpeedCheckMode::parse("ping"), Ok(("", Ping)));
         assert_eq!(SpeedCheckMode::parse("Ping"), Ok(("", Ping)));
         assert_eq!(SpeedCheckMode::parse("tcp:96"), Ok(("", Tcp(96))));
-        assert_eq!(SpeedCheckMode::parse("http"), Ok(("", Http(80))));
-        assert_eq!(SpeedCheckMode::parse("http:82"), Ok(("", Http(82))));
+        // 🌟 清理掉对 Http 的测试断言
         assert_eq!(SpeedCheckMode::parse("https"), Ok(("", Https(443))));
         assert_eq!(SpeedCheckMode::parse("https:8443"), Ok(("", Https(8443))));
 

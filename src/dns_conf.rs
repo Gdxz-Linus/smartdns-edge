@@ -63,6 +63,40 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+	// 🌟 新增：专门用于清洗输出文件（日志/缓存/审计）的绝对路径锚定器！
+    #[inline]
+    fn anchor_path(&self, raw_path: PathBuf) -> PathBuf {
+        // 1. 绝对路径保持原样，相对路径基于配置文件所在目录拼接
+        let joined = if raw_path.is_absolute() {
+            raw_path // 👈 请放心，绝对路径就在这里安全着陆，绝无错误拼接！
+        } else {
+            let base_dir = self.conf_file.as_ref().and_then(|f| f.parent())
+                .or(self.conf_dir.as_deref())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            base_dir.join(&raw_path)
+        };
+
+        // 🌟 核心绝杀：Cargo 官方级别的纯内存词法路径清洗 (Lexical Normalization)
+        let mut normalized = std::path::PathBuf::new();
+        for comp in joined.components() {
+            match comp {
+                std::path::Component::CurDir => continue, // 遇到 '.' 直接丢弃
+                std::path::Component::ParentDir => {
+                    // 遇到 '..' 时，只有上一级是普通文件夹才安全退格（防误删盘符或根目录）
+                    if let Some(std::path::Component::Normal(_)) = normalized.components().last() {
+                        normalized.pop();
+                    } else {
+                        normalized.push(comp);
+                    }
+                }
+                _ => normalized.push(comp), // 盘符、根目录、普通名字统统装入
+            }
+        }
+
+        normalized
+    }
+    
+	
     pub fn load<P: AsRef<Path>>(conf_dir: Option<PathBuf>, path: Option<P>) -> Arc<Self> {
         let mut builder = Self::builder();
 
@@ -114,7 +148,11 @@ impl RuntimeConfig {
             let mut candidate_paths = candidate_path.iter().map(Path::new).filter(|p| p.exists());
 
             let Some(path) = candidate_paths.next() else {
-                panic!("No configuation file found.")
+                // 🌟 核心修复 4：拒绝粗暴崩溃！给予用户最清晰的命令行排错指引！
+                eprintln!("\n❌ [ERROR] Configuration file not found!");
+                eprintln!("💡 Hint: Please specify the config file using '-c' (e.g., smartdns run -c ./smartdns.conf).");
+                eprintln!("   Or use 'smartdns service install' to generate a default config.\n");
+                std::process::exit(1);
             };
             Cow::Owned(path.to_path_buf())
         };
@@ -148,9 +186,11 @@ impl RuntimeConfig {
 impl RuntimeConfig {
     /// Print the config summary.
     pub fn summary(&self) {
-        info!(r#"whoami 👉 {}"#, self.server_name());
+        if let Some(user) = self.user() {
+            info!("whoami 👉 {user}");
+        }
 
-        info!(r#"num workers: {}"#, self.num_workers());
+        info!("DNS Engine activated {} concurrent worker threads.", self.num_workers());
 
         for server in self.nameservers.iter() {
             if !server.exclude_default_group && server.group.is_empty() {
@@ -162,10 +202,17 @@ impl RuntimeConfig {
                 .map(|n| self.proxies().get(n))
                 .unwrap_or_default();
 
+            // 🌟 修复：优雅地拼接组名，剥离 [""]
+            let group_str = if server.group.is_empty() {
+                "default".to_string()
+            } else {
+                server.group.join(", ")
+            };
+
             info!(
-                "upstream server: {} [Group: {:?}] {}",
+                "upstream server: {}[Group: {}] {}", // <--- 换回清爽的 {}
                 server.server.to_string(),
-                server.group,
+                group_str,
                 match proxy {
                     Some(s) => format!("over {s}"),
                     None => "".to_string(),
@@ -320,10 +367,11 @@ impl RuntimeConfig {
     /// cache persist file
     #[inline]
     pub fn cache_file(&self) -> PathBuf {
-        self.cache
+        let f = self.cache
             .file
             .to_owned()
-            .unwrap_or_else(|| std::env::temp_dir().join("smartdns.cache"))
+            .unwrap_or_else(|| std::env::temp_dir().join("smartdns.cache"));
+        self.anchor_path(f) // 🌟 套上盾牌！
     }
 
     /// prefetch domain
@@ -346,13 +394,19 @@ impl RuntimeConfig {
     /// cache serve expired TTL
     #[inline]
     pub fn serve_expired_ttl(&self) -> u64 {
-        self.cache.serve_expired_ttl.unwrap_or(0)
+        self.cache.serve_expired_ttl.unwrap_or(86400)
     }
 
     /// reply TTL value to use when replying with expired data
     #[inline]
     pub fn serve_expired_reply_ttl(&self) -> u64 {
         self.cache.serve_expired_reply_ttl.unwrap_or(5)
+    }
+	
+	// 👇 【新增这一段】：提供读取接口，官方默认值为 21600 秒 (6小时)
+    #[inline]
+    pub fn serve_expired_prefetch_time(&self) -> u64 {
+        self.cache.serve_expired_prefetch_time.unwrap_or(21600)
     }
 
     /// List of hosts that supply bogus NX domain results
@@ -448,7 +502,7 @@ impl RuntimeConfig {
 
     #[inline]
     pub fn local_ttl(&self) -> u64 {
-        self.local_ttl.or_else(|| self.rr_ttl_min()).unwrap_or(10)
+        self.local_ttl.or_else(|| self.rr_ttl_min()).unwrap_or(60)
     }
 
     /// Maximum number of IPs returned to the client|8|number of IPs, 1~16
@@ -478,7 +532,7 @@ impl RuntimeConfig {
     }
 
     pub fn log_file(&self) -> PathBuf {
-        match self.log.file.as_ref() {
+        let f = match self.log.file.as_ref() {
             Some(e) => e.to_owned(),
             None => {
                 cfg_if! {
@@ -490,10 +544,10 @@ impl RuntimeConfig {
                     } else {
                         PathBuf::from(r"/var/log/smartdns/smartdns.log")
                     }
-
                 }
             }
-        }
+        };
+        self.anchor_path(f) // 🌟 套上盾牌！
     }
 
     #[inline]
@@ -530,8 +584,8 @@ impl RuntimeConfig {
     }
 
     #[inline]
-    pub fn audit_file(&self) -> Option<&Path> {
-        self.audit.file.as_deref()
+    pub fn audit_file(&self) -> Option<PathBuf> {
+        self.audit.file.as_ref().map(|f| self.anchor_path(f.clone())) // 🌟 套上盾牌！
     }
 
     #[inline]
@@ -734,7 +788,9 @@ impl RuntimeConfigBuilder {
         for (set_name, providers) in &cfg.domain_set_providers {
             let set = domain_sets.entry(set_name.to_string()).or_default();
             for p in providers.iter() {
-                match p.get_domain_set() {
+                // 🌟 核心修复 2：将从配置文件里提取好的全部代理池 (proxy_servers) 
+                // 传给底层下载器！打破次元壁！
+                match p.get_domain_set(&cfg.proxy_servers) {
                     Ok(s) => {
                         log::info!("DoaminSet load {} records into {}", s.len(), p.name());
                         set.extend(s);
@@ -950,14 +1006,14 @@ impl RuntimeConfigBuilder {
         match parser::parse_config(line) {
             Ok((_, Some(config_item))) => match config_item {
                 AuditEnable(v) => self.audit.enable = Some(v),
-                AuditFile(v) => self.audit.file = Some(v),
+                AuditFile(v) => self.audit.file = Some(self.resolve_filepath(v)),
                 AuditFileMode(v) => self.audit.file_mode = Some(v),
                 AuditNum(v) => self.audit.num = Some(v),
                 AuditSize(v) => self.audit.size = Some(v),
                 BindCertFile(v) => self.bind_cert_file = Some(self.resolve_filepath(v)),
                 BindCertKeyFile(v) => self.bind_cert_key_file = Some(self.resolve_filepath(v)),
                 BindCertKeyPass(v) => self.bind_cert_key_pass = Some(v),
-                CacheFile(v) => self.cache.file = Some(v),
+                CacheFile(v) => self.cache.file = Some(self.resolve_filepath(v)),
                 CachePersist(v) => self.cache.persist = Some(v),
                 CacheCheckpointTime(v) => self.cache.checkpoint_time = Some(v),
                 CNAME(v) => rule_group.cnames.push(v),
@@ -980,6 +1036,8 @@ impl RuntimeConfigBuilder {
                 SpeedMode(v) => self.speed_check_mode = v,
                 ServeExpiredTtl(v) => self.cache.serve_expired_ttl = Some(v),
                 ServeExpiredReplyTtl(v) => self.cache.serve_expired_reply_ttl = Some(v),
+				// 【新增这一行】：将解析器翻译出来的值装入容器
+                ServeExpiredPrefetchTime(v) => self.cache.serve_expired_prefetch_time = Some(v),
                 CacheSize(v) => self.cache.size = Some(v),
                 ForceQtypeSoa(v) => {
                     self.force_qtype_soa.insert(v);
@@ -994,7 +1052,7 @@ impl RuntimeConfigBuilder {
                 LogConsole(v) => self.log.console = Some(v),
                 LogNum(v) => self.log.num = Some(v),
                 LogLevel(v) => self.log.level = Some(v),
-                LogFile(v) => self.log.file = Some(v),
+                LogFile(v) => self.log.file = Some(self.resolve_filepath(v)),
                 LogFileMode(v) => self.log.file_mode = Some(v),
                 LogFilter(v) => self.log.filter = Some(v),
                 LogSize(v) => self.log.size = Some(v),
@@ -1015,8 +1073,8 @@ impl RuntimeConfigBuilder {
                         self.loaded_files.insert(v);
                     }
                 }
-                DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(v),
-                ResolvFile(v) => self.resolv_file = Some(v),
+                DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(self.resolve_filepath(v)),
+                ResolvFile(v) => self.resolv_file = Some(self.resolve_filepath(v)),
                 SrvRecord(v) => rule_group.srv_records.push(v),
                 DomainRule(v) => rule_group.domain_rules.push(v),
                 ForwardRule(v) => rule_group.forward_rules.push(v),

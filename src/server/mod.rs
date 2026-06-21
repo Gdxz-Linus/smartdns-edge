@@ -72,13 +72,28 @@ pub fn serve(
 
     let token = match bind_addr_config {
         BindAddrConfig::Udp(bind_addr_config) => {
-            let socket = bind_to(
-                setup_udp_socket,
-                bind_addr_config.sock_addr(),
-                bind_addr_config.device(),
-                "UDP",
-            );
-            udp::serve(socket, dns_handle)
+            let token = CancellationToken::new();
+
+            // 🌟 核心优化：仅在 Linux 下开启极限多路复用，其他系统保持单路以防兼容性问题
+            #[cfg(target_os = "linux")]
+            let workers = cfg.num_workers();
+            #[cfg(not(target_os = "linux"))]
+            let workers = 1;
+
+            // 根据配置的 Worker 线程数，利用 SO_REUSEPORT 让内核帮我们分发 UDP 包
+            for i in 0..workers {
+                let bind_type = if i == 0 { "UDP" } else { "UDP (REUSEPORT)" };
+                let socket = bind_to(
+                    setup_udp_socket,
+                    bind_addr_config.sock_addr(),
+                    bind_addr_config.device(),
+                    bind_type,
+                )?;
+                // 将克隆好的统一 Token 传进去，确保关机时所有线程都能正确结束
+                udp::serve(socket, dns_handle.clone(), token.clone());
+            }
+
+            token
         }
         BindAddrConfig::Tcp(bind_addr_config) => {
             let listener = bind_to(
@@ -86,7 +101,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 "TCP",
-            );
+            )?;
             tcp::serve(listener, dns_handle, Duration::from_secs(idle_time))
         }
         #[cfg(feature = "dns-over-tls")]
@@ -106,7 +121,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 LISTENER_TYPE,
-            );
+            )?;
 
             tls::serve(
                 listener,
@@ -123,7 +138,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 LISTENER_TYPE,
-            );
+            )?;
 
             let app = app.clone();
 
@@ -146,7 +161,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 LISTENER_TYPE,
-            );
+            )?;
 
             let app = app.clone();
 
@@ -175,7 +190,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 LISTENER_TYPE,
-            );
+            )?;
 
             let app = app.clone();
             h3::serve(app, listener, dns_handle, server_cert_resolver)?
@@ -197,7 +212,7 @@ pub fn serve(
                 bind_addr_config.sock_addr(),
                 bind_addr_config.device(),
                 LISTENER_TYPE,
-            );
+            )?;
 
             quic::serve(
                 listener,
@@ -244,17 +259,20 @@ impl From<CancellationToken> for ServerHandle {
 
 #[derive(Debug, Clone)]
 pub struct DnsHandle {
-    sender: mpsc::UnboundedSender<IncomingDnsMessage>,
+    // 🌟 修复 1：使用有界发送器，拒绝无底洞
+    sender: mpsc::Sender<IncomingDnsMessage>,
     opts: ServerOpts,
 }
 
 pub type IncomingDnsMessage = (SerialMessage, ServerOpts, oneshot::Sender<SerialMessage>);
 
-pub type IncomingDnsRequest = mpsc::UnboundedReceiver<IncomingDnsMessage>;
+// 🌟 修复 2：使用有界接收器
+pub type IncomingDnsRequest = mpsc::Receiver<IncomingDnsMessage>;
 
 impl DnsHandle {
     pub fn new() -> (IncomingDnsRequest, Self) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        // 🌟 修复 3：最高缓冲 20000 个待处理请求（约占用 10MB 内存），超出直接丢包，抗死 DDoS！
+        let (tx, rx) = mpsc::channel(20000);
         (
             rx,
             Self {
@@ -266,25 +284,43 @@ impl DnsHandle {
 
     pub async fn send<T: Into<SerialMessage>>(&self, message: T) -> SerialMessage {
         let message = message.into();
+        let addr = message.addr();
+        let protocol = message.protocol();
         let (tx, rx) = oneshot::channel();
 
-        if let Err(err) = self.sender.send((message, self.opts.clone(), tx)) {
-            let message = err.0.0;
-            let addr = message.addr();
-            let protocol = message.protocol();
-            let mut response_message = DnsRequest::try_from(message)
-                .map(|req| req.to_response())
-                .unwrap_or_else(|_| Message::query().to_response());
-            response_message.set_response_code(ResponseCode::Refused);
-            return SerialMessage::raw(response_message, addr, protocol);
+        // 🌟 修复 4：使用 try_send。如果队列满了，触发 Load Shedding (系统降载)
+        if let Err(err) = self.sender.try_send((message, self.opts.clone(), tx)) {
+            let message = match err {
+                tokio::sync::mpsc::error::TrySendError::Full((msg, _, _)) => msg,
+                tokio::sync::mpsc::error::TrySendError::Closed((msg, _, _)) => msg,
+            };
+            crate::log::trace!("System overloaded or closed, dropped DNS request from {}", addr);
+            
+            if protocol == crate::libdns::Protocol::Udp {
+                // 🌟 核心修复 1：在 UDP 协议下，遇到超载直接生成空字节包！
+                // 这将通知外层 Socket 触发沉默丢包（Silent Drop），彻底防止沦为 DDoS 反射放大器！
+                return SerialMessage::binary(vec![], addr, protocol);
+            } else {
+                // TCP / TLS / QUIC 等面向连接的协议，依然老老实实返回 Refused 以优雅关闭流
+                let mut response_message = DnsRequest::try_from(message)
+                    .map(|req| req.to_response())
+                    .unwrap_or_else(|_| Message::query().to_response());
+                response_message.set_response_code(ResponseCode::Refused);
+                return SerialMessage::raw(response_message, addr, protocol);
+            }
         }
 
         match rx.await {
             Ok(msg) => msg,
             Err(_) => {
-                let mut response_message = Message::query().to_response();
-                response_message.set_response_code(ResponseCode::Refused);
-                response_message.into()
+                // 内部超时或因为某种原因被抛弃
+                if protocol == crate::libdns::Protocol::Udp {
+                    SerialMessage::binary(vec![], addr, protocol)
+                } else {
+                    let mut response_message = Message::query().to_response();
+                    response_message.set_response_code(ResponseCode::Refused);
+                    SerialMessage::raw(response_message, addr, protocol)
+                }
             }
         }
     }

@@ -7,7 +7,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, FromRequest, Request, State},
+    extract::{ConnectInfo, Request, State},
 };
 use serde::{Deserialize, Serialize};
 
@@ -118,8 +118,11 @@ async fn process(
             SerialMessage::raw(message, addr, Protocol::Https)
         }
         _ => {
-            let bytes = Bytes::from_request(req, &state).await?;
-            SerialMessage::binary(bytes.into(), addr, Protocol::Https)
+            // 🌟 核心防线：抛弃存在隐患的 FromRequest 默认提取器，直接读取底层 Body！
+            // 强行施加 64KB 物理截断（DNS 协议理论最大极限），超过该字节数底层的读取器会直接抛错掐断流。
+            // 这巧妙规避了 Axum `Router::merge` 会静默丢失 Layer 的深坑，精准且彻底地封死了 DoH 的 OOM 攻击面！
+            let bytes = axum::body::to_bytes(req.into_body(), 65536).await?;
+            SerialMessage::binary(bytes, addr, Protocol::Https)
         }
     };
 

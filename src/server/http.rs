@@ -21,7 +21,7 @@ pub fn serve(
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
 
-    log::debug!("registered HTTP: {:?}", listener);
+    log::debug!("HTTP listener successfully registered on {}", listener.local_addr().unwrap());
 
     let state = Arc::new(ServeState { app, dns_handle });
 

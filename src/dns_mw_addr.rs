@@ -5,8 +5,6 @@ use crate::dns::*;
 use crate::libdns::proto::rr::{RData, RecordType};
 use crate::middleware::*;
 
-use crate::libdns::resolver::TtlClip;
-
 #[derive(Debug)]
 pub struct AddressMiddleware;
 
@@ -21,19 +19,43 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
         let query_type = req.query().query_type();
 
         if let Some(rdatas) = handle_rule_addr(query_type, ctx) {
-            let local_ttl = ctx.cfg().local_ttl();
+            let local_ttl = ctx.cfg().local_ttl() as u32;
+
+            // 🌟 提取 rr-ttl 和 rr-ttl-min，为合成否定缓存 (SOA 拦截) 提供规范的兜底寿命
+            let rr_ttl = ctx.domain_rule.get(|r| r.rr_ttl).map(|i| i as u32)
+                .or_else(|| ctx.cfg().rr_ttl().map(|i| i as u32));
+            let rr_ttl_min = ctx.domain_rule.get(|r| r.rr_ttl_min).map(|i| i as u32)
+                .unwrap_or_else(|| ctx.cfg().rr_ttl_min().unwrap_or(300) as u32);
+            // 如果没配 rr_ttl，就用 min 兜底
+            let intercept_soa_ttl = rr_ttl.unwrap_or(rr_ttl_min);
 
             let query = req.query().original().clone();
             let name = query.name().to_owned();
-            let valid_until = Instant::now() + Duration::from_secs(local_ttl);
+            let valid_until = Instant::now() + Duration::from_secs(local_ttl as u64);
 
-            let lookup = DnsResponse::new_with_deadline(
-                query,
-                rdatas
-                    .into_iter()
-                    .map(|d| Record::from_rdata(name.clone(), local_ttl as u32, d)),
-                valid_until,
-            );
+            // 🌟 核心修复 2：严格遵守 DNS RFC 规范，SOA 萝卜章必须放入 Authority 区，IP 记录放入 Answer 区！
+            let mut answers = Vec::new();
+            let mut authorities = Vec::new();
+
+            for d in rdatas {
+                match d {
+                    RData::SOA(_) => {
+                        // 🌟 使用全局统一兵工厂，配上受外网规则管控的拦截 TTL
+                        let soa_record = crate::dns::forge_soa_record(name.clone(), intercept_soa_ttl);
+                        authorities.push(soa_record);
+                    }
+                    _ => {
+                        // 静态 IP 记录依然乖乖使用 local_ttl
+                        let record = Record::from_rdata(name.clone(), local_ttl, d);
+                        answers.push(record);
+                    }
+                }
+            }
+
+            let mut lookup = DnsResponse::new_with_deadline(query, answers, valid_until);
+            for auth in authorities {
+                lookup.add_authority(auth);
+            }
 
             ctx.source = LookupFrom::Static;
             return Ok(lookup);
@@ -69,30 +91,14 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                     }
                 }
 
-                let rr_ttl_min = ctx
-                    .domain_rule
-                    .get_ref(|r| r.rr_ttl_min.as_ref())
-                    .cloned()
-                    .or_else(|| ctx.cfg().rr_ttl_min())
-                    .map(|i| i as u32);
-
-                let rr_ttl_max = ctx
-                    .domain_rule
-                    .get_ref(|r| r.rr_ttl_max.as_ref())
-                    .cloned()
-                    .or_else(|| ctx.cfg().rr_ttl_max())
-                    .map(|i| i as u32);
                 let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
 
-                if rr_ttl_min.is_some() || rr_ttl_max.is_some() || rr_ttl_reply_max.is_some() {
+                if let Some(reply_max) = rr_ttl_reply_max {
                     for record in records.to_mut() {
-                        if let Some(rr_ttl_min) = rr_ttl_min {
-                            record.set_min_ttl(rr_ttl_min);
-                        }
-                        if let Some(rr_ttl_reply_max) = rr_ttl_reply_max {
-                            record.set_max_ttl(rr_ttl_reply_max);
-                        } else if let Some(rr_ttl_max) = rr_ttl_max {
-                            record.set_max_ttl(rr_ttl_max);
+                        // 如果冰柜给出的寿命大于视觉欺骗的上限，强行涂改成骗客户端的上限
+                        let current_ttl = record.ttl();
+                        if current_ttl > reply_max {
+                            record.set_ttl(reply_max); 
                         }
                     }
                 }

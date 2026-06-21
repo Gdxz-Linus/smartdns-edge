@@ -44,9 +44,17 @@ impl std::ops::AddAssign for DomainRule {
             self.address = rhs.address;
         }
 
-        if rhs.speed_check_mode.is_some() {
-            self.speed_check_mode = rhs.speed_check_mode;
+        // 🌟 核心修复 1：合并测速模式数组，使用纯循环避免触发系统截断 Bug
+        if let Some(rhs_modes) = rhs.speed_check_mode {
+            if let Some(ref mut lhs_modes) = self.speed_check_mode {
+                for mode in rhs_modes.0 {
+                    lhs_modes.push(mode);
+                }
+            } else {
+                self.speed_check_mode = Some(rhs_modes);
+            }
         }
+
         if rhs.dualstack_ip_selection.is_some() {
             self.dualstack_ip_selection = rhs.dualstack_ip_selection;
         }
@@ -54,16 +62,42 @@ impl std::ops::AddAssign for DomainRule {
             self.no_cache = rhs.no_cache;
         }
         if rhs.no_serve_expired.is_some() {
-            self.no_serve_expired = rhs.no_serve_expired
+            self.no_serve_expired = rhs.no_serve_expired;
         }
-
         if rhs.rr_ttl.is_some() {
             self.rr_ttl = rhs.rr_ttl;
         }
         if rhs.rr_ttl_min.is_some() {
             self.rr_ttl_min = rhs.rr_ttl_min;
         }
+        if rhs.rr_ttl_max.is_some() {
+            self.rr_ttl_max = rhs.rr_ttl_max;
+        }
+        if rhs.cname.is_some() {
+            self.cname = rhs.cname;
+        }
+        if rhs.srv.is_some() {
+            self.srv = rhs.srv;
+        }
+        if rhs.https.is_some() {
+            self.https = rhs.https;
+        }
+        if rhs.response_mode.is_some() {
+            self.response_mode = rhs.response_mode;
+        }
+        // 🌟 核心修复 2：合并 nftset 数组，同样使用纯循环避免被系统截断
+        if let Some(rhs_nft) = rhs.nftset {
+            if let Some(ref mut lhs_nft) = self.nftset {
+                for nft in rhs_nft {
+                    lhs_nft.push(nft);
+                }
+            } else {
+                self.nftset = Some(rhs_nft);
+            }
+        }
 
-        self.rr_ttl_max = rhs.rr_ttl_min.or(self.rr_ttl_max);
+        if rhs.subnet.is_some() {
+            self.subnet = rhs.subnet;
+        }
     }
 }

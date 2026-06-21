@@ -78,40 +78,41 @@ impl NomParser for DomainSetHttpProvider {
         let mut url = None;
         let mut interval = None;
         let mut content_type = Default::default();
+        let mut proxy = None; // 🌟 增加 proxy 变量
 
         let one = alt((
             map(
                 options::parse_value(alt((tag_no_case("name"), tag_no_case("n"))), String::parse),
-                |v| {
-                    name = Some(v);
-                },
+                |v| name = Some(v),
             ),
             map(
                 options::parse_value(
                     alt((tag_no_case("url"), tag_no_case("u"))),
                     map_res(is_not(" \t\r\n"), Url::parse),
                 ),
-                |v| {
-                    url = Some(v);
-                },
+                |v| url = Some(v),
             ),
             map(
                 options::parse_value(
                     alt((tag_no_case("interval"), tag_no_case("i"))),
                     NomParser::parse,
                 ),
-                |v: usize| {
-                    interval = Some(v);
-                },
+                |v: usize| interval = Some(v),
             ),
             map(
                 options::parse_value(
                     alt((tag_no_case("type"), tag_no_case("t"))),
                     DomainSetContentType::parse,
                 ),
-                |t| {
-                    content_type = t;
-                },
+                |t| content_type = t,
+            ),
+            // 🌟 教解析器认识 -proxy 和 -p 参数
+            map(
+                options::parse_value(
+                    alt((tag_no_case("proxy"), tag_no_case("p"))),
+                    String::parse,
+                ),
+                |v| proxy = Some(v),
             ),
         ));
 
@@ -125,6 +126,7 @@ impl NomParser for DomainSetHttpProvider {
                     url,
                     interval,
                     content_type,
+                    proxy, // 🌟 装填进结构体
                 },
             ));
         }
@@ -221,6 +223,7 @@ mod tests {
                     url: Url::parse("https://example.com/ads.txt").unwrap(),
                     interval: None,
                     content_type: Default::default(),
+                    proxy: None, // 🌟 修复：补上 proxy 字段，满足 Rust 结构体完整性检查
                 })
             ))
         );
@@ -234,6 +237,7 @@ mod tests {
                     url: Url::parse("https://example.com/ads.txt").unwrap(),
                     interval: Some(3600),
                     content_type: Default::default(),
+                    proxy: None, // 🌟 修复
                 })
             ))
         );
@@ -249,6 +253,7 @@ mod tests {
                     url: Url::parse("https://example.com/ads.txt").unwrap(),
                     interval: Some(3600),
                     content_type: Default::default(),
+                    proxy: None, // 🌟 修复
                 })
             ))
         );

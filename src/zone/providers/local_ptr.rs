@@ -3,35 +3,21 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use crate::dns::{DnsContext, DnsError, DnsRequest, DnsResponse, Name, RData, RecordType};
-use crate::infra::ipset::IpSet;
-use crate::libdns::proto::rr::rdata::PTR;
+use crate::dns::{DefaultSOA, DnsContext, DnsError, DnsRequest, DnsResponse, Name, RData, RecordType};
 use crate::zone::ZoneProvider;
+use crate::libdns::proto::rr::rdata::PTR;
 
 pub struct LocalPtrZoneProvider {
-    server_net: IpSet,
     server_names: BTreeSet<Name>,
 }
 
 impl LocalPtrZoneProvider {
     pub fn new() -> Self {
-        let server_net = {
-            use local_ip_address::list_afinet_netifas;
-            let ips = list_afinet_netifas().unwrap_or_default();
-            IpSet::new(ips.into_iter().map(|(_, ip)| ip.into()))
-        };
+        let mut server_names = BTreeSet::new();
+        server_names.insert(Name::from_str("smartdns.").unwrap());
+        server_names.insert(Name::from_str("whoami.").unwrap());
 
-        let server_names = {
-            let mut set = BTreeSet::new();
-            set.insert(Name::from_str("smartdns.").unwrap());
-            set.insert(Name::from_str("whoami.").unwrap());
-            set
-        };
-
-        Self {
-            server_net,
-            server_names,
-        }
+        Self { server_names }
     }
 }
 
@@ -49,38 +35,51 @@ impl ZoneProvider for LocalPtrZoneProvider {
         let query = req.query();
         let name: &Name = query.name().borrow();
 
-        let mut is_current_server = false;
+        // 1. 匹配本机特有域名
         if self.server_names.contains(name) {
-            is_current_server = true;
-        } else if let Ok(net) = name.parse_arpa_name() {
-            is_current_server = self.server_net.overlap(&net);
+            return Ok(Some(DnsResponse::from_rdata(
+                query.original().to_owned(),
+                RData::PTR(PTR(ctx.cfg().server_name())),
+            )));
+        }
 
-            if !is_current_server {
-                let is_private_ip = match net.addr() {
-                    IpAddr::V4(ip) => ip.is_private(),
-                    IpAddr::V6(ip) => {
-                        const fn is_unique_local(ip: std::net::Ipv6Addr) -> bool {
-                            (ip.segments()[0] & 0xfe00) == 0xfc00
-                        }
-                        is_unique_local(ip)
-                    }
-                };
-
-                if is_private_ip {
-                    let mut res = DnsResponse::empty();
-                    res.add_query(query.original().to_owned());
-                    return Ok(Some(res));
+        // 2. 解析 ARPA 格式，利用纯数学规则拦截私网反向查询
+        if let Ok(net) = name.parse_arpa_name() {
+            let ip = net.addr();
+            
+            // 🌟 核心修复：抛弃僵化的网卡 IP 抓取，改用数学法则覆盖全量私网网段！
+            // 无论宿主机增加多少虚拟网卡或 VPN，只要落在私有网段内，100% 绝对拦截！
+            let is_private_ip = match ip {
+                IpAddr::V4(v4) => {
+                    v4.is_private() || v4.is_loopback() || v4.is_link_local()
                 }
+                IpAddr::V6(v6) => {
+                    let segments = v6.segments();
+                    v6.is_loopback() 
+                        || (segments[0] & 0xffc0) == 0xfe80 // fe80::/10 链路本地
+                        || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 唯一本地地址 (ULA)
+                }
+            };
+
+            if is_private_ip {
+                // 🌟 上帝视角防御：一旦命中私有 IP，强制返回 NXDOMAIN + SOA
+                // 这将阻断任何泄露到外网的可能，并迫使客户端缓存这个“否定结果”，避免泛洪
+                use crate::libdns::proto::op::ResponseCode;
+                let mut res = DnsResponse::empty();
+                res.add_query(query.original().to_owned());
+                res.set_response_code(ResponseCode::NXDomain);
+                
+                let soa = crate::dns::Record::from_rdata(
+                    crate::dns::Name::root(), 
+                    3600, 
+                    crate::dns::RData::default_soa()
+                );
+                res.add_authority(soa);
+                
+                return Ok(Some(res));
             }
         }
 
-        if !is_current_server {
-            return Ok(None);
-        }
-
-        Ok(Some(DnsResponse::from_rdata(
-            query.original().to_owned(),
-            RData::PTR(PTR(ctx.cfg().server_name())),
-        )))
+        Ok(None)
     }
 }

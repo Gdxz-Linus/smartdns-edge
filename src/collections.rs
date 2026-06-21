@@ -1,10 +1,11 @@
 use std::{collections::HashMap, ops::Deref};
-
-use crate::{config::WildcardName, libdns::proto::rr::Name, third_ext::HashCode};
+use crate::{config::WildcardName, libdns::proto::rr::Name};
 
 pub struct DomainMap<T> {
-    map: HashMap<u64, T>,
-    wildcards: HashMap<u64, Vec<WildcardName>>, // hash => wildcard names
+    // 🌟 核心修复 1：抛弃危险的 u64 hash，使用绝对安全的 WildcardName 内存比对！
+    map: HashMap<WildcardName, T>,
+    // 🌟 对于通配符索引，使用真实的 Name 作为 Key
+    wildcards: HashMap<Name, Vec<WildcardName>>, 
 }
 
 impl<T> DomainMap<T> {
@@ -26,41 +27,36 @@ impl<T> DomainMap<T> {
         let mut lvl = 0;
         let mut last = name.clone();
         loop {
-            {
-                if lvl == 0 {
-                    let wildcard_name = WildcardName::Full(name);
-                    if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
-                        return Some(v);
-                    }
-                    name = wildcard_name.into();
+            if lvl == 0 {
+                let wildcard_name = WildcardName::Full(name.clone());
+                if let Some(v) = self.map.get(&wildcard_name) {
+                    return Some(v);
                 }
+            }
 
-                if lvl == 1 {
-                    let w = name.hash_code();
-                    if let Some(wildcards) = self.wildcards.get(&w) {
-                        for w in wildcards.iter() {
-                            if w.is_match(&last) {
-                                if let Some(v) = self.map.get(&w.hash_code()) {
-                                    return Some(v);
-                                }
+            if lvl == 1 {
+                // 🌟 精准比对，杜绝哈希冲突
+                if let Some(wildcards) = self.wildcards.get(&name) {
+                    for w in wildcards.iter() {
+                        if w.is_match(&last) {
+                            if let Some(v) = self.map.get(w) {
+                                return Some(v);
                             }
                         }
                     }
                 }
+            }
 
-                if lvl >= 1 {
-                    let wildcard_name = WildcardName::Suffix(name);
-                    if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
-                        return Some(v);
-                    }
-                    name = wildcard_name.into();
-                }
-
-                let wildcard_name = WildcardName::Default(name);
-                if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
+            if lvl >= 1 {
+                let wildcard_name = WildcardName::Suffix(name.clone());
+                if let Some(v) = self.map.get(&wildcard_name) {
                     return Some(v);
                 }
-                name = wildcard_name.into();
+            }
+
+            let wildcard_name = WildcardName::Default(name.clone());
+            if let Some(v) = self.map.get(&wildcard_name) {
+                return Some(v);
             }
 
             if !name.is_fqdn() {
@@ -73,7 +69,6 @@ impl<T> DomainMap<T> {
             }
 
             last = name;
-
             name = last.base_name();
             lvl += 1;
         }
@@ -100,26 +95,26 @@ impl<T> DomainMap<T> {
     pub fn insert(&mut self, name: impl Into<WildcardName>, value: T) -> Option<T> {
         let mut name: WildcardName = name.into();
         name.set_fqdn(true);
-        let k = name.hash_code();
+        
         if name.is_sub() {
             self.wildcards
-                .entry(name.deref().hash_code())
+                .entry(name.deref().clone())
                 .or_default()
-                .push(name);
+                .push(name.clone());
         }
 
-        self.map.insert(k, value)
+        self.map.insert(name, value)
     }
 
     #[inline]
     pub fn remove(&mut self, name: &WildcardName) -> Option<T> {
         if name.is_sub() {
             self.wildcards
-                .entry(name.deref().hash_code())
+                .entry(name.deref().clone())
                 .or_default()
                 .retain(|n| n != name);
         }
-        self.map.remove(&name.hash_code())
+        self.map.remove(name)
     }
 }
 
@@ -135,18 +130,14 @@ impl<T> Default for DomainMap<T> {
 
 impl<T> FromIterator<(WildcardName, T)> for DomainMap<T> {
     fn from_iter<I: IntoIterator<Item = (WildcardName, T)>>(iter: I) -> Self {
-        let mut map: HashMap<u64, T> = Default::default();
-        let mut wildcards: HashMap<u64, Vec<WildcardName>> = Default::default();
+        let mut map: HashMap<WildcardName, T> = Default::default();
+        let mut wildcards: HashMap<Name, Vec<WildcardName>> = Default::default();
         for (n, v) in iter.into_iter() {
-            let k = n.hash_code();
-
             if n.is_sub() {
-                wildcards.entry(n.deref().hash_code()).or_default().push(n);
+                wildcards.entry(n.deref().clone()).or_default().push(n.clone());
             }
-
-            map.insert(k, v);
+            map.insert(n, v);
         }
-
         Self { map, wildcards }
     }
 }
@@ -575,7 +566,7 @@ mod benchmark {
         let mut domains = vec![];
 
         let text =
-            http_client::get("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts")
+            http_client::get("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", None)
                 .unwrap()
                 .text()
                 .unwrap();

@@ -13,7 +13,9 @@ use tokio::net::UdpSocket as TokioUdpSocket;
 use thiserror::Error;
 use url::{ParseError, Url};
 
-pub async fn connect_tcp(
+// 🌟 解耦：传入已经由上层配置好 SO_MARK 和绑定网卡的纯净 Stream，这里只做业务层握手
+pub async fn handshake_tcp(
+    mut stream: TokioTcpStream,
     server_addr: SocketAddr,
     proxy: Option<&ProxyConfig>,
 ) -> io::Result<TcpStream> {
@@ -24,7 +26,6 @@ pub async fn connect_tcp(
         Some(proxy) => match proxy.proto {
             ProxyProtocol::Socks5 => {
                 use async_socks5::Auth;
-                let mut stream = TokioTcpStream::connect(proxy.server).await?;
 
                 let auth = if proxy.username.is_some() {
                     let username = proxy.username.as_deref().unwrap_or_default();
@@ -47,8 +48,6 @@ pub async fn connect_tcp(
             ProxyProtocol::Http => {
                 use async_http_proxy::{http_connect_tokio, http_connect_tokio_with_basic_auth};
 
-                let mut stream = TokioTcpStream::connect(proxy.server).await?;
-
                 if let Some(user) = proxy.username.as_deref() {
                     http_connect_tokio_with_basic_auth(
                         &mut stream,
@@ -66,20 +65,21 @@ pub async fn connect_tcp(
                 Ok(stream)
             }
         },
-        None => TokioTcpStream::connect(server_addr).await,
+        None => Ok(stream),
     }
 }
 
-pub async fn connect_udp(
-    _server_addr: SocketAddr,
-    local_addr: SocketAddr,
+// 🌟 解耦：同理，代理 UDP 流量所需的控制流 TCP Stream，也必须在外部打好防漏流补丁后传进来
+pub async fn handshake_udp(
+    stream: Option<TokioTcpStream>,
+    socket: TokioUdpSocket,
     proxy: Option<&ProxyConfig>,
 ) -> io::Result<UdpSocket> {
     match proxy {
         Some(proxy) => match proxy.proto {
             ProxyProtocol::Socks5 => {
                 use async_socks5::{AddrKind, Auth};
-                let stream = TokioTcpStream::connect(proxy.server).await?;
+                let stream = stream.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TCP stream required for SOCKS5 UDP associate"))?;
 
                 let auth = if proxy.username.is_some() {
                     let username = proxy.username.as_deref().unwrap_or_default();
@@ -93,7 +93,6 @@ pub async fn connect_udp(
                     None
                 };
 
-                let socket = TokioUdpSocket::bind(local_addr).await?;
                 let socket = Socks5Datagram::associate(stream, socket, auth, None::<AddrKind>)
                     .await
                     .map_err(from_socks5_err)?;
@@ -101,10 +100,10 @@ pub async fn connect_udp(
                 Ok(UdpSocket::Proxy(socket))
             }
             ProxyProtocol::Http => {
-                unimplemented!()
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "HTTP proxy does not support UDP"))
             }
         },
-        None => TokioUdpSocket::bind(local_addr).await.map(UdpSocket::Tokio),
+        None => Ok(UdpSocket::Tokio(socket)),
     }
 }
 

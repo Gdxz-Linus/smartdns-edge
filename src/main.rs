@@ -46,8 +46,6 @@ mod server;
 #[cfg(feature = "service")]
 mod service;
 mod third_ext;
-#[cfg(feature = "self-update")]
-mod updater;
 mod zone;
 
 use error::Error;
@@ -79,8 +77,25 @@ include!(concat!(env!("OUT_DIR"), "/build_time_vars.rs"));
 /// The default configuration.
 const DEFAULT_CONF: &str = include_str!("../etc/smartdns/smartdns.conf");
 
+#[cfg(unix)]
+fn maximize_fd_limit() {
+    // 🌟 核心修复：解除 Linux/macOS 默认的 1024 文件描述符并发封印，极大提升网络吞吐上限
+    unsafe {
+        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 {
+            rl.rlim_cur = rl.rlim_max; // 将软限制提升至硬限制
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &rl) != 0 {
+                eprintln!("Warning: Failed to increase FD limit.");
+            }
+        }
+    }
+}
+
 #[cfg(not(windows))]
 fn main() {
+    #[cfg(unix)]
+    maximize_fd_limit(); // 启动时立即提权
+
     Cli::parse().run();
 }
 
@@ -98,7 +113,8 @@ fn main() -> windows_service::Result<()> {
 impl Cli {
     #[inline]
     pub fn run(self) {
-        let _guard = self.log_level().map(log::console);
+        // 🌟 核心修复 1：重命名日志锁，避免被下方的变量同名覆盖！
+        let log_guard = self.log_level().map(log::console);
 
         match self.command {
             Commands::Run {
@@ -107,24 +123,54 @@ impl Cli {
                 pid,
                 ..
             } => {
-                let _guard = pid
-                    .map(|pid| {
-                        use infra::process_guard;
-                        match process_guard::create(pid) {
-                            Ok(guard) => Some(guard),
-                            Err(err @ ProcessGuardError::AlreadyRunning(_)) => {
-                                panic!("{}", err)
-                            }
-                            Err(err) => {
-                                error!("{}", err);
-                                None
-                            }
-                        }
-                    })
-                    .unwrap_or_default();
+                let pid_path = pid
+                    .or_else(|| directory.as_ref().map(|d| d.join("managed").join("smartdns.pid")))
+                    .unwrap_or_else(|| {
+                        std::env::current_exe()
+                            .ok()
+                            .and_then(|exe| exe.parent().map(|p| p.join("managed").join("smartdns.pid")))
+                            .unwrap_or_else(|| std::env::temp_dir().join("smartdns.pid"))
+                    });
+
+                if let Some(parent) = pid_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                // 🌟 核心修复 2：重命名进程锁为 _pid_guard，恢复防多开保护！
+                let _pid_guard = match crate::infra::process_guard::create(&pid_path) {
+                    Ok(guard) => Some(guard),
+                    Err(ProcessGuardError::AlreadyRunning(id)) => {
+                        error!("SmartDNS is already running with PID {}! Only one instance is allowed.", id);
+                        std::process::exit(1);
+                    }
+                    Err(err) => {
+                        error!("Failed to acquire PID lock at {}: {}. Another instance is likely running.", pid_path.display(), err);
+                        std::process::exit(1);
+                    }
+                };
+
+                // 屏幕优先打印起始横幅和 DomainSet 加载信息
                 hello_starting();
                 let cfg = RuntimeConfig::load(directory, conf);
 
+                // 🌟 核心修复 3：精确击杀日志锁！
+                // 因为改了名字，这次绝对不会杀错人，主线程的霸权彻底终结！
+                drop(log_guard);
+
+                // 万物之始，全局通电！
+                let log_dispatch = crate::log::make_dispatch(
+                    cfg.log_file(),
+                    cfg.log_enabled(),
+                    cfg.log_level(),
+                    cfg.log_filter(),
+                    cfg.log_size(),
+                    cfg.log_num(),
+                    cfg.log_file_mode().into(),
+                    cfg.log_config().console(),
+                );
+                tracing::dispatcher::set_global_default(log_dispatch).ok();
+
+                // 此时日志系统已完美交接，这几十行配置摘要将一字不漏印入硬盘文件！
                 cfg.summary();
 
                 #[cfg(target_os = "linux")]
@@ -152,6 +198,12 @@ impl Cli {
                             let out = match status {
                                 service::ServiceStatus::Running(out) => Some(out),
                                 service::ServiceStatus::Dead(out) => Some(out),
+                                // 🌟 核心修复：补上被遗漏的新状态分支，并输出友好的未安装提示！
+                                service::ServiceStatus::NotInstalled => {
+                                    println!("\n❌ SmartDNS service is NOT installed.");
+                                    println!("💡 Hint: Install it via 'smartdns service install'\n");
+                                    None
+                                },
                                 service::ServiceStatus::Unknown => None,
                             };
                             if let Some(out) = out {
@@ -183,35 +235,59 @@ impl Cli {
             Commands::Service { command: _ } => {
                 warn!("please enable `service` feature")
             }
-            Commands::Test { direcory, conf } => {
-                RuntimeConfig::load(direcory, conf);
-            }
-            #[cfg(feature = "self-update")]
-            Commands::Update { yes, version } => {
-                updater::update(yes, version.as_deref()).unwrap();
+            Commands::Test { directory, conf } => {
+                let cfg = RuntimeConfig::load(directory, conf);
+                
+                // 打印出解析到的配置摘要，让用户确信读取成功了
+                crate::hello_starting();
+                cfg.summary();
+                
+                // 🌟 明确告诉用户测试通过！
+                crate::log::info!("✅ Configuration test passed successfully!");
             }
             #[cfg(feature = "resolve-cli")]
             Commands::Resolve(command) => {
-                drop(_guard);
+                drop(log_guard);
                 command.execute();
             }
             #[cfg(all(feature = "resolve-cli", any(unix, windows)))]
-            Commands::Symlink { link } => {
+            Commands::Symlink { mut link } => {
                 let original = std::env::current_exe().expect("failed to get current exe path");
+
+                // 🌟 修复暗坑一：Windows 体验优化！如果用户忘了加 .exe，贴心地自动补全！
+                // 防止用户创建出无法在 CMD/PowerShell 中直接运行的废物链接。
+                #[cfg(windows)]
+                if link.extension().is_none() {
+                    link.set_extension("exe");
+                }
+
                 if link.exists() {
-                    println!("link already exists");
+                    eprintln!("\x1b[33;1m[WARNING]\x1b[0m Symlink or file already exists at: {}", link.display());
                     return;
                 }
 
                 #[cfg(unix)]
-                let res = std::os::unix::fs::symlink(original, link);
+                let res = std::os::unix::fs::symlink(&original, &link);
 
                 #[cfg(windows)]
-                let res = std::os::windows::fs::symlink_file(original, link);
+                let res = std::os::windows::fs::symlink_file(&original, &link);
 
                 match res {
-                    Ok(()) => println!("symlink created"),
-                    Err(err) => println!("failed to create symlink, {err}"),
+                    Ok(()) => println!("\x1b[32;1m[SUCCESS]\x1b[0m Symlink created: {} -> {}", link.display(), original.display()),
+                    Err(err) => {
+                        // 🌟 修复暗坑二：拦截臭名昭著的 Win32 OS Error 1314！
+                        // 不再扔出冰冷的报错，而是用大红字高亮引导用户去提权，彻底解决用户痛点！
+                        #[cfg(windows)]
+                        if err.raw_os_error() == Some(1314) {
+                            eprintln!("\x1b[31;1m[FATAL ERROR]\x1b[0m Privilege not held (OS Error 1314).");
+                            eprintln!("On Windows, creating symbolic links requires \x1b[31;1mAdministrator privileges\x1b[0m or enabling \x1b[32;1mDeveloper Mode\x1b[0m.");
+                            eprintln!("👉 \x1b[33mHint: Please right-click your terminal (PowerShell/CMD) and select 'Run as Administrator', then try again.\x1b[0m");
+                            std::process::exit(1);
+                        }
+                        
+                        eprintln!("\x1b[31;1m[ERROR]\x1b[0m Failed to create symlink: {}", err);
+                        std::process::exit(1);
+                    }
                 }
             }
             #[allow(unreachable_patterns)]
@@ -272,8 +348,14 @@ impl RuntimeConfig {
     }
 }
 
-mod signal {
+// 🌟 核心修复 1：加上 pub，让它对外可见
+pub mod signal {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::LazyLock;
+    use tokio::sync::Notify;
+
+    // 🌟 核心修复 2：暴露出一个安全的、原生的内存关机通知器
+    pub static SHUTDOWN_NOTIFY: LazyLock<Notify> = LazyLock::new(Notify::new);
 
     static TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -297,12 +379,16 @@ mod signal {
 
         #[cfg(not(unix))]
         {
-            ctrl_c().await?;
+            // 🌟 核心修复 3：谁先触发（人为按 Ctrl+C，或系统服务发来原生关机命令），就响应谁！
+            tokio::select! {
+                res = ctrl_c() => { res?; },
+                _ = SHUTDOWN_NOTIFY.notified() => {},
+            }
         }
 
         if !TERMINATING.load(Ordering::Relaxed) {
             TERMINATING.store(true, Ordering::Relaxed);
-            super::info!("terminating...");
+            crate::log::info!("terminating...");
         }
 
         Ok(())

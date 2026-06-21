@@ -8,46 +8,36 @@ use std::{
 };
 use thiserror::Error;
 
-pub async fn ping(dest: PingAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
+// 🌟 核心修复 1：管道入口开放，接收 domain 上下文
+pub async fn ping(dest: PingAddr, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
     match dest {
         PingAddr::Icmp(addr) => icmp::ping(addr, opts).await,
         PingAddr::Tcp(addr) => tcp::ping(addr, opts).await,
-        PingAddr::Http(addr) => http::ping(addr, opts).await,
-        PingAddr::Https(addr) => https::ping(addr, opts).await,
+        // 将 domain 透传给 https 探针
+        PingAddr::Https(addr) => https::ping(addr, domain, opts).await,
     }
 }
 
-pub async fn ping_batch(
-    dests: &[PingAddr],
-    opts: PingOptions,
-) -> Vec<Result<PingOutput, PingError>> {
+pub async fn ping_batch(dests: &[PingAddr], domain: Option<&str>, opts: PingOptions) -> Vec<Result<PingOutput, PingError>> {
     let mut outs = Vec::new();
-
     for dest in dests.iter() {
         outs.push(match dest {
             PingAddr::Icmp(addr) => icmp::ping(*addr, opts).await,
             PingAddr::Tcp(addr) => tcp::ping(*addr, opts).await,
-            PingAddr::Http(addr) => http::ping(*addr, opts).await,
-            PingAddr::Https(addr) => https::ping(*addr, opts).await,
+            PingAddr::Https(addr) => https::ping(*addr, domain, opts).await,
         })
     }
     outs
 }
 
-pub async fn ping_fastest(
-    dests: Vec<PingAddr>,
-    opts: PingOptions,
-) -> Result<PingOutput, PingError> {
+pub async fn ping_fastest(dests: Vec<PingAddr>, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
     use futures_util::future::select_ok;
-    if dests.is_empty() {
-        return Err(PingError::NoAddress);
-    }
+    if dests.is_empty() { return Err(PingError::NoAddress); }
 
     let ping_tasks = dests.iter().map(|dst| match dst {
         PingAddr::Icmp(addr) => icmp::ping(*addr, opts).boxed(),
         PingAddr::Tcp(addr) => tcp::ping(*addr, opts).boxed(),
-        PingAddr::Http(addr) => http::ping(*addr, opts).boxed(),
-        PingAddr::Https(addr) => https::ping(*addr, opts).boxed(),
+        PingAddr::Https(addr) => https::ping(*addr, domain, opts).boxed(),
     });
 
     let res = select_ok(ping_tasks).await;
@@ -114,7 +104,6 @@ impl Default for PingOptions {
 pub enum PingAddr {
     Icmp(IpAddr),
     Tcp(SocketAddr),
-    Http(SocketAddr),
     Https(SocketAddr),
 }
 
@@ -123,7 +112,6 @@ impl PingAddr {
         match self {
             PingAddr::Icmp(ip) => ip,
             PingAddr::Tcp(addr) => addr.ip(),
-            PingAddr::Http(addr) => addr.ip(),
             PingAddr::Https(addr) => addr.ip(),
         }
     }
@@ -150,7 +138,6 @@ impl Display for PingAddr {
         match self {
             PingAddr::Icmp(addr) => write!(f, "icmp://{addr}"),
             PingAddr::Tcp(addr) => write!(f, "tcp://{addr}"),
-            PingAddr::Http(addr) => write!(f, "http://{addr}"),
             PingAddr::Https(addr) => write!(f, "https://{addr}"),
         }
     }
@@ -173,10 +160,6 @@ impl TryFrom<&str> for PingAddr {
         if let Some(sock_addr) = s.strip_prefix("tcp://") {
             let sock_addr = SocketAddr::from_str(sock_addr)?;
             Ok(Self::Tcp(sock_addr))
-        } else if let Some(sock_addr) = s.strip_prefix("http://") {
-            let sock_addr = SocketAddr::from_str(sock_addr)
-                .or_else(|_| IpAddr::from_str(sock_addr).map(|ip| SocketAddr::new(ip, 80)))?;
-            Ok(Self::Http(sock_addr))
         } else if let Some(sock_addr) = s.strip_prefix("https://") {
             let sock_addr = SocketAddr::from_str(sock_addr)
                 .or_else(|_| IpAddr::from_str(sock_addr).map(|ip| SocketAddr::new(ip, 443)))?;
@@ -601,80 +584,6 @@ mod tcp {
     }
 }
 
-mod http {
-    use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
-    use crate::third_ext::FutureTimeoutExt;
-    use std::net::SocketAddr;
-    use std::time::{Duration, Instant};
-    use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-    use tokio::net::TcpStream;
-
-    #[inline]
-    pub async fn ping(sock_addr: SocketAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
-        let PingOptions {
-            times,
-            timeout,
-            all_success,
-            duration_agg,
-        } = opts;
-
-        let mut durations = Vec::new();
-
-        let mut last_err = None;
-
-        for _seq in 0..times {
-            let duration = ping_http(sock_addr)
-                .timeout(timeout)
-                .await
-                .unwrap_or(Err(PingError::Timeout));
-
-            match duration {
-                Ok(dur) => durations.push(dur),
-                Err(err) => {
-                    if all_success {
-                        return Err(err);
-                    } else {
-                        last_err = Some(err);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        let duration = do_agg(durations, duration_agg);
-
-        match duration {
-            Some(v) => Ok(PingOutput {
-                seq: 0,
-                duration: v,
-                destination: PingAddr::Http(sock_addr),
-            }),
-            None => match last_err {
-                Some(err) => Err(err),
-                None => Err(PingError::NoAddress),
-            },
-        }
-    }
-
-    #[inline]
-    pub async fn ping_http(sock_addr: SocketAddr) -> Result<Duration, PingError> {
-        let now = Instant::now();
-        let mut stream = TcpStream::connect(sock_addr).await?;
-        send_ping(&mut stream).await?;
-        Ok(now.elapsed())
-    }
-
-    pub(super) async fn send_ping<S: AsyncRead + AsyncWrite + std::marker::Unpin>(
-        stream: &mut S,
-    ) -> io::Result<bool> {
-        stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await?;
-        let mut plaintext = String::new();
-        let mut reader = BufReader::new(stream);
-        reader.read_line(&mut plaintext).await?;
-        Ok(plaintext.starts_with("HTTP/"))
-    }
-}
-
 mod https {
     use std::{
         net::SocketAddr,
@@ -684,13 +593,38 @@ mod https {
 
     use tokio::net::TcpStream;
     use tokio_rustls::TlsConnector;
+    use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt}; // 🌟 新增 IO 依赖
 
     use crate::third_ext::FutureTimeoutExt;
 
     use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
 
+    // 🌟 核心修复 2：标准的 HTTP/1.1 请求必须携带 Host 头！
+    pub(super) async fn send_ping<S: AsyncRead + AsyncWrite + std::marker::Unpin>(
+        stream: &mut S,
+        domain: Option<&str>,
+    ) -> io::Result<bool> {
+        use tokio::io::AsyncReadExt; 
+        
+        // 抹除域名末尾的 '.'，防止 Host 头和 SNI 解析报错
+        let safe_domain = domain.unwrap_or("").trim_end_matches('.');
+        
+        let request = if safe_domain.is_empty() {
+            "GET / HTTP/1.1\r\nConnection: close\r\n\r\n".to_string()
+        } else {
+            format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", safe_domain)
+        };
+        
+        stream.write_all(request.as_bytes()).await?;
+        
+        let mut buf =[0u8; 5];
+        stream.read_exact(&mut buf).await?;
+        
+        Ok(&buf == b"HTTP/")
+    }
+
     #[inline]
-    pub async fn ping(sock_addr: SocketAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
+    pub async fn ping(sock_addr: SocketAddr, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
         let PingOptions {
             times,
             timeout,
@@ -703,7 +637,7 @@ mod https {
         let mut last_err = None;
 
         for _seq in 0..times {
-            let duration = ping_https(sock_addr)
+            let duration = ping_https(sock_addr, domain) // 👈 透传 domain
                 .timeout(timeout)
                 .await
                 .unwrap_or(Err(PingError::Timeout));
@@ -736,7 +670,7 @@ mod https {
         }
     }
 
-    async fn ping_https(addr: SocketAddr) -> Result<Duration, PingError> {
+    async fn ping_https(addr: SocketAddr, domain: Option<&str>) -> Result<Duration, PingError> {
         use rustls::pki_types::ServerName;
         let now = Instant::now();
         let config = Arc::new({
@@ -750,14 +684,18 @@ mod https {
             config
         });
 
-        let server_name = ServerName::IpAddress(addr.ip().into());
+        // 🌟 核心修复 3：真正的 SNI 注入！
+        let safe_domain = domain.unwrap_or("").trim_end_matches('.');
+        let server_name = ServerName::try_from(safe_domain)
+            .map(|s| s.to_owned()) 
+            .unwrap_or_else(|_| ServerName::IpAddress(addr.ip().into()));
 
         let connector = TlsConnector::from(config);
 
         let sock = TcpStream::connect(addr).await?;
         let mut tls = connector.connect(server_name, sock).await?;
 
-        super::http::send_ping(&mut tls).await?;
+        send_ping(&mut tls, domain).await?; // 👈 透传 domain
         Ok(now.elapsed())
     }
 }

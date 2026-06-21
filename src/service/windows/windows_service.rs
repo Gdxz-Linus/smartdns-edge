@@ -1,5 +1,4 @@
 use super::SERVICE_NAME;
-use crate::log::error;
 use std::{ffi::OsString, time::Duration};
 
 use windows_service::service::{ServiceControlAccept, ServiceExitCode, ServiceState, ServiceType};
@@ -13,13 +12,7 @@ use windows_service::{
 define_windows_service!(ffi_service_main, service_main);
 
 fn service_main(args: Vec<OsString>) {
-    unsafe {
-        // Windows services don't start with a console, so we have to
-        // allocate one in order to send ctrl-C to children.
-        if let Err(err) = windows::Win32::System::Console::AllocConsole() {
-            error!("winapi AllocConsole failed with code {:?}", err);
-        }
-    }
+    // 🌟 核心修复 4：直接删除危险且容易导致假死的 AllocConsole
     let _ = run_service(args);
 }
 
@@ -35,16 +28,10 @@ fn run_service(_args: Vec<OsString>) -> Result<()> {
             // control manager. Always return NoError even if not implemented.
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
 
-            // Handle stop and shutdown
-            ServiceControl::Stop | ServiceControl::Shutdown => {
-                unsafe {
-                    if let Err(err) = windows::Win32::System::Console::GenerateConsoleCtrlEvent(
-                        windows::Win32::System::Console::CTRL_C_EVENT,
-                        0,
-                    ) {
-                        error!("GenerateConsoleCtrlEvent failed {:?}", err);
-                    }
-                }
+            // Handle stop
+            ServiceControl::Stop => {
+                // 🌟 核心修复 5：抛弃模拟按键，直接调用安全的内存通信，瞬间唤醒 Tokio 的退出序列！
+                crate::signal::SHUTDOWN_NOTIFY.notify_waiters();
                 ServiceControlHandlerResult::NoError
             }
 
@@ -62,7 +49,7 @@ fn run_service(_args: Vec<OsString>) -> Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        controls_accepted: ServiceControlAccept::STOP,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),

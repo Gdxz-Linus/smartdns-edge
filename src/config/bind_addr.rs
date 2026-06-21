@@ -1,6 +1,6 @@
 use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::libdns::{Protocol, ProtocolDefaultPort};
 use crate::third_ext::serde_str;
@@ -36,12 +36,11 @@ pub trait IBindConfig {
     fn enabled(&self) -> bool;
     fn server_opts(&self) -> &ServerOpts;
     fn sock_addr(&self) -> SocketAddr {
-        match self.addr() {
-            BindAddr::Localhost => SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.port()).into(),
-            BindAddr::All => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.port()).into(),
-            BindAddr::V4(ip) => (ip, self.port()).into(),
-            BindAddr::V6(ip) => (ip, self.port()).into(),
-        }
+        // 🌟 核心修复：消除双标！
+        // 统一委托给 `BindAddr::ip_addr()` 方法处理。
+        // 这将保证 BindAddr::All 被正确映射为 [::] (Ipv6Addr::UNSPECIFIED)。
+        // 配合底层的 set_only_v6(false)，实现对 0.0.0.0 和 [::] 的双栈全量接管！
+        SocketAddr::new(self.addr().ip_addr(), self.port())
     }
 }
 

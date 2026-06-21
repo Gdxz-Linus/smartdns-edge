@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{log::info, third_ext::PathBufAddExtensionExt};
+use crate::{third_ext::PathBufAddExtensionExt};
 
 pub struct InstallerBuilder {
     items: Vec<InstallItem>,
@@ -369,20 +369,30 @@ impl Installer {
                     },
             } = install_item
             {
-                let mut dest_path = dest_path.to_owned();
+                let dest_path = dest_path.to_owned();
+                let mut skip_write = false;
+                let is_conf = dest_path.file_name().is_some_and(|n| n == "smartdns.conf");
 
                 if dest_path.exists() {
                     match strategy {
                         InstallStrategy::Backup => {
-                            let mut path = dest_path.to_path_buf();
+                            let mut path = dest_path.clone();
                             path.append_extension("bak");
                             fs::copy(dest_path.as_path(), path)?;
                         }
                         InstallStrategy::Preserve => {
-                            dest_path.append_extension("default");
+                            // 🌟 真正的绿色软件：发现存在配置，直接跳过生成，绝不乱塞文件！
+                            skip_write = true;
+                            if is_conf {
+                                println!("💡 Found existing config file, using current settings.");
+                            }
                         }
                         InstallStrategy::Overide => (),
                     }
+                }
+
+                if skip_write {
+                    continue; // 直接跳过后面的写入流程
                 }
 
                 let dest_path = dest_path.as_path();
@@ -416,14 +426,24 @@ impl Installer {
                     }
                 };
 
-                match dest_path.canonicalize() {
+                let display_path = match dest_path.canonicalize() {
                     Ok(path) => {
-                        info!("Installed to {:?}", path);
+                        let s = path.to_string_lossy();
+                        if s.starts_with(r"\\?\") {
+                            s[4..].to_string()
+                        } else {
+                            s.into_owned()
+                        }
                     }
-                    Err(_err) => {
-                        info!("Installed to {:?}", dest_path);
-                    }
+                    Err(_) => dest_path.to_string_lossy().into_owned(),
                 };
+                
+                if is_conf {
+                    // 只在初次真正生成文件时才高亮提示
+                    println!("💡 Generated default config file at \"{}\". Please edit before starting.", display_path);
+                } else {
+                    crate::log::info!("Installed file to \"{}\"", display_path);
+                }
             } else {
                 // directry
                 if install_item.is_directory() && !install_item.path.exists() {
@@ -452,32 +472,31 @@ impl Installer {
 
             if purge || *uninstall_strategy == UninstallStrategy::Remove {
                 if path.is_file() {
-                    #[cfg(windows)]
-                    {
-                        let is_same_file = std::env::current_exe()
-                            .and_then(|exe| same_file::is_same_file(exe, path));
-                        if matches!(is_same_file, Ok(true)) {
-                            self_replace::self_delete()?;
-                        } else {
-                            fs::remove_file(path)?;
-                        }
+                    // 🌟 核心拆弹：容错删除！遇到占用报错只打印日志，绝不中断后续清理！
+                    if let Err(err) = fs::remove_file(path) {
+                        crate::log::warn!("Failed to remove file {:?} (maybe locked): {}", path, err);
+                    } else {
+                        crate::log::info!("File {:?} removed", path);
+                        n += 1;
                     }
-                    #[cfg(unix)]
-                    {
-                        fs::remove_file(path)?;
-                    }
-                    info!("file {:?} removed", path);
                 } else {
-                    fs::remove_dir_all(path)?;
-                    info!("dir {:?} removed", path);
+                    if let Err(err) = fs::remove_dir_all(path) {
+                        crate::log::warn!("Failed to remove dir {:?}: {}", path, err);
+                    } else {
+                        crate::log::info!("Dir {:?} removed", path);
+                        n += 1;
+                    }
                 }
             } else if install_item.is_directory()
                 && matches!(uninstall_strategy, UninstallStrategy::RemoveIfEmpty if path.read_dir().map(|mut i| i.next().is_none()).unwrap_or(false))
             {
-                fs::remove_dir_all(path)?;
-                info!("dir {:?} removed", path);
+                if let Err(err) = fs::remove_dir_all(path) {
+                    crate::log::warn!("Failed to remove empty dir {:?}: {}", path, err);
+                } else {
+                    crate::log::info!("Dir {:?} removed", path);
+                    n += 1;
+                }
             }
-            n += 1;
         }
         Ok(n)
     }

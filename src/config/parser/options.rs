@@ -52,13 +52,27 @@ pub fn parse_flag<
 }
 
 pub fn unkown_value(input: &str) -> IResult<&str, &str> {
-    preceded(
-        alt((tag("="), recognize(pair(opt(char(':')), space1)))),
-        recognize(pair(
-            is_not("-_ \t#"),
-            take_till(|c: char| c.is_whitespace()),
-        )),
-    )
+    alt((
+        // 🌟 核心修复情况 A：当用户明确使用 "=" 赋值时，彻底解除首字符 "-" 的防线！
+        // 完美放行如 `-group=-cn_nodes` 或 `-cert=--base64--` 等合法但极端的配置值。
+        preceded(
+            tag("="),
+            is_not(" \t\r\n#")
+        ),
+        // 🌟 核心修复情况 B：当使用空格分隔时，依然保持对首字符 "-" 的拦截（防吞噬下一个 Flag），
+        // 但保留“孤立减号”的特权通行证（专门用于 -host-name - 等关闭场景）。
+        preceded(
+            recognize(pair(opt(char(':')), space1)),
+            alt((
+                terminated(tag("-"), peek(alt((space1, eof)))),
+                recognize(pair(
+                    // 仅拦截减号开头，保障参数边界安全
+                    is_not("- \t\r\n#"),
+                    take_till(|c: char| c.is_whitespace() || c == '#'),
+                ))
+            ))
+        )
+    ))
     .parse(input)
 }
 

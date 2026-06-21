@@ -14,10 +14,9 @@ pub fn create_service_definition() -> ServiceDefinition {
     let brew = "brew";
 
     let commands = ServiceCommands {
-        install: Some(ServiceCommand {
-            program: brew.into(),
-            args: vec!["install".into(), SERVICE_NAME.into()],
-        }),
+        // 🌟 核心修复 3：直接设为 None。因为用 brew 的用户，必然是通过 brew install 装的。
+        // service_manager() 在执行时会自动进入 start 逻辑（即触发 brew services start），这就足够了！
+        install: None,
         uninstall: Some(ServiceCommand {
             program: brew.into(),
             args: vec!["uninstall".into(), SERVICE_NAME.into()],

@@ -71,7 +71,19 @@ impl std::cmp::Ord for WildcardName {
                 };
                 let a = ord(self);
                 let b = ord(other);
-                a.cmp(&b)
+                
+                // 🌟 修复：如果枚举级别一样，必须进一步比对内部真实的字符串！否则会破坏 BTree/Sort 契约！
+                match a.cmp(&b) {
+                    Equal => {
+                        match (self, other) {
+                            (WildcardName::Sub(w1, _), WildcardName::Sub(w2, _)) => {
+                                w1.0.pattern().cmp(w2.0.pattern())
+                            }
+                            _ => Equal,
+                        }
+                    }
+                    other_cmp => other_cmp,
+                }
             }
         }
     }

@@ -4,7 +4,6 @@ use crate::libdns::proto::{
     op::Query,
     rr::{
         IntoName, RecordType,
-        rdata::opt::{EdnsCode, EdnsOption},
     },
 };
 
@@ -32,45 +31,18 @@ impl DnsMiddlewareHandler {
 
         let mut server_opts = server_opts.clone();
 
-        let client_subnet = req
-            .extensions()
-            .as_ref()
-            .and_then(|s| s.option(EdnsCode::Subnet))
-            .and_then(|s| match s {
-                EdnsOption::Subnet(s) => Some(s),
-                _ => None,
-            })
-            .map(|s| match s.addr() {
-                std::net::IpAddr::V4(addr) => {
-                    IpNet::V4(Ipv4Net::new(addr, s.source_prefix()).unwrap())
-                }
-                std::net::IpAddr::V6(addr) => match addr.to_ipv4_mapped() {
-                    Some(addr) => IpNet::V4(Ipv4Net::new(addr, s.source_prefix()).unwrap()),
-                    None => IpNet::V6(Ipv6Net::new(addr, s.source_prefix()).unwrap()),
-                },
-            });
-
         let client_rules = cfg.client_rules();
-        let rule_group_name = match client_subnet {
-            Some(subnet) => client_rules
-                .iter()
-                .find(|s| s.match_net(&subnet))
-                .map(|s| s.group.as_str()),
-            None => {
-                let mut client_ip = req.src().ip();
-
-                if let IpAddr::V6(addr) = client_ip {
-                    if let Some(addr) = addr.to_ipv4_mapped() {
-                        client_ip = addr.into();
-                    }
-                }
-
-                client_rules
-                    .iter()
-                    .find(|s| s.match_ip(&client_ip))
-                    .map(|s| s.group.as_str())
+        // 🌟 修复：坚决剥夺 ECS 参与本地 ACL 控制的权利，只认真实的请求来源物理 IP
+        let mut client_ip = req.src().ip();
+        if let IpAddr::V6(addr) = client_ip {
+            if let Some(addr) = addr.to_ipv4_mapped() {
+                client_ip = addr.into();
             }
-        };
+        }
+        let rule_group_name = client_rules
+            .iter()
+            .find(|s| s.match_ip(&client_ip))
+            .map(|s| s.group.as_str());
 
         server_opts.rule_group = rule_group_name.map(|s| s.to_string());
 
@@ -132,7 +104,6 @@ impl MiddlewareDefaultHandler<DnsContext, DnsRequest, DnsResponse, DnsError> for
     }
 }
 
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 #[cfg(test)]
 pub use tests::*;
 
