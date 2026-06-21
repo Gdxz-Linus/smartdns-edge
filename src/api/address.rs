@@ -1,7 +1,9 @@
 use std::sync::Arc;
-
 use anyhow::anyhow;
 use serde::Deserialize;
+// 🌟 修复：引入读写锁，细化并发粒度
+use tokio::sync::RwLock;
+use std::sync::LazyLock;
 
 use crate::{
     config::{
@@ -19,12 +21,18 @@ use super::openapi::{
 use super::{ApiError, DataListPayload, ServeState, StatefulRouter};
 use axum::{Json, extract::State, http::StatusCode};
 
+// 🌟 修复：全局异步读写锁，GET 共享，POST/DELETE 排他，防止大粒度阻塞
+static CONFIG_FILE_LOCK: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
+
 pub fn routes() -> StatefulRouter {
     routes![list, create, update, delete].into_router()
 }
 
 #[get("/addresses", tag = "Addresses")]
 async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<AddressRule>> {
+    // 🌟 抢占共享读锁：多个 GET 请求可完全并发，只有写操作时才会被短暂阻塞
+    let _guard = CONFIG_FILE_LOCK.read().await;
+
     let groups = state
         .app
         .cfg()
@@ -47,12 +55,18 @@ async fn create(
     let Some(managed_dir) = cfg.managed_dir() else {
         return Err(ApiError::NotFound("managed_dir not found".to_string()));
     };
+
+    // 🌟 抢占排他写锁：写入期间，其他读写请求全部等待
+    let _guard = CONFIG_FILE_LOCK.write().await;
+
     if !managed_dir.exists() {
-        std::fs::create_dir_all(managed_dir)?;
+        // 🌟 修复 1：全面替换为 tokio::fs 异步 I/O
+        tokio::fs::create_dir_all(&managed_dir).await?;
     }
     let file = managed_dir.join("address.conf");
+    
     if file.exists() {
-        let text = std::fs::read_to_string(&file)?;
+        let text = tokio::fs::read_to_string(&file).await?;
         let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
 
         let rules = config
@@ -81,10 +95,10 @@ async fn create(
             });
         };
 
-        std::fs::write(&file, format!("{config}"))?;
+        safe_write_config(&file, format!("{config}")).await?;
     } else {
         let config = ConfigItem::Address(rule);
-        std::fs::write(&file, format!("{config}"))?;
+        safe_write_config(&file, format!("{config}")).await?;
     }
 
     Ok(StatusCode::CREATED)
@@ -105,6 +119,9 @@ async fn delete(
         return Err(ApiError::NotFound("managed_dir not found".to_string()));
     };
 
+    // 🌟 抢占排他写锁：写入期间，其他读写请求全部等待
+    let _guard = CONFIG_FILE_LOCK.write().await;
+
     if !managed_dir.exists() {
         return Err(ApiError::NotFound(format!("Domain {domain} not found")));
     }
@@ -113,7 +130,8 @@ async fn delete(
         return Err(ApiError::NotFound(format!("Domain {domain} not found")));
     }
 
-    let text = std::fs::read_to_string(&file)?;
+    // 🌟 替换为异步 I/O
+    let text = tokio::fs::read_to_string(&file).await?;
     let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
 
     let idx = config
@@ -136,9 +154,20 @@ async fn delete(
         config.remove(*i);
     }
 
-    std::fs::write(&file, format!("{config}"))?;
+    safe_write_config(&file, format!("{config}")).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// 🌟 核心修复：原子化配置文件写入，杜绝断电/强杀导致的配置清零问题
+async fn safe_write_config(file: &std::path::Path, content: String) -> std::io::Result<()> {
+    // 先写到临时的 .tmp 文件中
+    let tmp_file = file.with_extension("tmp");
+    tokio::fs::write(&tmp_file, content).await?;
+        
+    // 操作系统级原子重命名，只有写入完全成功后才会瞬间覆盖原文件
+    tokio::fs::rename(&tmp_file, file).await?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

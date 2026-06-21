@@ -208,8 +208,8 @@ impl DnsClientBuilder {
             };
 
             debug!(
-                "create nameserver group {:?}, servers {}",
-                group_name,
+                "create nameserver group [{}], servers {}",
+                group_name.as_deref().unwrap_or("default"),
                 server_group.len()
             );
 
@@ -407,8 +407,13 @@ mod name_server_group {
             loop {
                 let (res, _idx, rest) = select_all(tasks).await;
 
-                if matches!(res.as_ref(), Ok(lookup) if !lookup.records().is_empty()) {
-                    return res;
+                // 🌟 只要是合法的成功响应（哪怕是空包）或明确的不存在（NXDomain），立刻斩断等待！
+                if let Ok(lookup) = res.as_ref() {
+                    use crate::libdns::proto::op::ResponseCode;
+                    let rcode = lookup.response_code();
+                    if rcode == ResponseCode::NoError || rcode == ResponseCode::NXDomain {
+                        return res;
+                    }
                 }
 
                 if rest.is_empty() {
@@ -567,9 +572,8 @@ mod name_server {
         connection: Arc<Connection>,
     }
 
-    /// > An EDNS buffer size of 1232 bytes will avoid fragmentation on nearly all current networks.
-    /// > https://dnsflagday.net/2020/
-    const MAX_PAYLOAD_LEN: u16 = 1232;
+    /// 🌟 核心修复 1：将 1232 提升到 4096，包容不守规矩的上游和巨型 DNSSEC 数据包.
+    const MAX_PAYLOAD_LEN: u16 = 4096;
 
     fn build_message(
         query: Query,
@@ -607,14 +611,16 @@ mod name_server {
 
 mod bootstrap {
     use super::*;
-    use crate::{dns_url::DnsUrl, libdns::resolver::config::ResolverConfig};
+    use crate::dns_url::DnsUrl;
+    use std::time::{Duration, Instant}; // 🌟 修复报错：引入标准库的钟表和时间工具！
 
     pub struct BootstrapResolver<T: GenericResolver = NameServerGroup>
     where
         T: Send + Sync,
     {
         resolver: Arc<T>,
-        ip_store: RwLock<HashMap<Query, Arc<[Record]>>>,
+        // 🌟 修复炸弹一：加入 Instant 记录这个 IP 的绝对过期时间
+        ip_store: RwLock<HashMap<Query, (Instant, Arc<[Record]>)>>,
     }
 
     impl<T: GenericResolver + Sync + Send> BootstrapResolver<T> {
@@ -640,9 +646,13 @@ mod bootstrap {
             let query = Query::query(name.clone(), record_type);
             let store = self.ip_store.read().await;
 
-            let lookup = store.get(&query).cloned();
-
-            lookup.map(|records| DnsResponse::new_with_max_ttl(query, records.to_vec()))
+            // 🌟 修复炸弹一：不仅要看有没有，还要看有没有过期！
+            if let Some((valid_until, records)) = store.get(&query) {
+                if Instant::now() < *valid_until {
+                    return Some(DnsResponse::new_with_deadline(query, records.to_vec(), *valid_until));
+                }
+            }
+            None
         }
     }
 
@@ -650,16 +660,24 @@ mod bootstrap {
         pub fn from_system_conf() -> Self {
             let (resolv_config, resolv_opts) =
                 crate::libdns::resolver::system_conf::read_system_conf().unwrap_or_else(|err| {
-                    warn!("read system conf failed, {}", err);
-
-                    use crate::preset_ns::{ALIDNS, CLOUDFLARE};
-
-                    let name_servers = ALIDNS.https().chain(CLOUDFLARE.https()).collect::<Vec<_>>();
-
-                    (
-                        ResolverConfig::from_parts(None, vec![], name_servers),
-                        ResolverOpts::default(),
-                    )
+                    // 🌟 核心修复：贯彻 Fail-Fast 原则，绝不静默兜底撒谎！
+                    // 一旦读取系统网卡 DNS 失败，立刻大声报错并终止程序。
+                    // 强迫用户直面网络配置问题，或引导其使用命令行参数显式指定。
+                    
+                    // 使用 ANSI 转义码在控制台打印高亮的红、黄、绿色文本
+                    eprintln!(
+                        "\n\x1b[31;1m[FATAL ERROR]\x1b[0m Failed to read system DNS from network adapter: {}",
+                        err
+                    );
+                    eprintln!(
+                        "Please check your network settings, or explicitly specify a DNS server using \x1b[33m'-s <IP>'\x1b[0m (e.g., \x1b[32m-s 119.29.29.29\x1b[0m).\n"
+                    );
+                    
+                    // 同时也记录到标准日志中，以防是作为后台服务运行时的静默崩溃
+                    crate::log::error!("read system conf failed: {}", err);
+                    
+                    // 直接中断程序，状态码 1 代表异常退出，绝不放行！
+                    std::process::exit(1);
                 });
             let mut name_servers = vec![];
 
@@ -720,6 +738,11 @@ mod bootstrap {
                             .collect::<Vec<_>>()
                     );
 
+                    // 🌟 【修复炸弹二】：护栏！只有拿到真实 IP，才允许存入账本！
+                if !records.is_empty() {
+                    let min_ttl = lookup.min_ttl().unwrap_or(60);
+                    let valid_until = Instant::now() + Duration::from_secs(min_ttl as u64);
+
                     self.ip_store.write().await.insert(
                         Query::query(
                             {
@@ -729,8 +752,9 @@ mod bootstrap {
                             },
                             record_type,
                         ),
-                        records.into(),
+                        (valid_until, records.into()), 
                     );
+                }
 
                     Ok(lookup)
                 }
@@ -834,24 +858,35 @@ where
             Ipv4Only => self.lookup(name.clone(), RecordType::A).await,
             Ipv6Only => self.lookup(name.clone(), RecordType::AAAA).await,
             Ipv4AndIpv6 => {
-                use futures_util::future::{Either, select};
-                match select(
-                    self.lookup(name.clone(), RecordType::A),
-                    self.lookup(name.clone(), RecordType::AAAA),
-                )
-                .await
-                {
-                    Either::Left((res, _)) => res,
-                    Either::Right((res, _)) => res,
+                use futures_util::future::select_all;
+                use futures_util::FutureExt;
+                let mut tasks = vec![
+                    self.lookup(name.clone(), RecordType::A).boxed(),
+                    self.lookup(name.clone(), RecordType::AAAA).boxed(),
+                ];
+
+                loop {
+                    let (res, _, rest) = select_all(tasks).await;
+                    
+                    // 🌟 修复炸弹一：只有拿到包含真实 IP 的包裹，才算赢得比赛！空包直接无视，等另一个！
+                    if matches!(res.as_ref(), Ok(lookup) if !lookup.records().is_empty()) {
+                        return res;
+                    }
+                    
+                    if rest.is_empty() {
+                        return res; // 如果两个都不通或者都是空包，只能无奈认命返回
+                    }
+                    tasks = rest;
                 }
             }
             Ipv6thenIpv4 => match self.lookup(name.clone(), RecordType::AAAA).await {
-                Ok(lookup) => Ok(lookup),
-                Err(_err) => self.lookup(name.clone(), RecordType::A).await,
+                // 🌟 同理：不能是空包！如果是空包也必须降级去查另一个！
+                Ok(lookup) if !lookup.records().is_empty() => Ok(lookup),
+                _ => self.lookup(name.clone(), RecordType::A).await,
             },
             Ipv4thenIpv6 => match self.lookup(name.clone(), RecordType::A).await {
-                Ok(lookup) => Ok(lookup),
-                Err(_err) => self.lookup(name.clone(), RecordType::AAAA).await,
+                Ok(lookup) if !lookup.records().is_empty() => Ok(lookup),
+                _ => self.lookup(name.clone(), RecordType::AAAA).await,
             },
         }
     }

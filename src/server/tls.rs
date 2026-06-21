@@ -35,7 +35,7 @@ pub fn serve(
 
     let handler = handler.clone();
 
-    log::debug!("registered TLS: {:?}", listener);
+    log::debug!("TLS listener successfully registered on {}", listener.local_addr().unwrap());
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -74,43 +74,62 @@ pub fn serve(
                 log::debug!("starting TLS request from: {}", src_addr);
 
                 // perform the TLS
-                let tls_stream = tls_acceptor.accept(tcp_stream).await;
+                // 🌟 核心修复：为 TLS 握手套上 5 秒绝对枷锁，防 Slowloris 半连接耗尽资源攻击！
+                let tls_stream = tokio::time::timeout(
+                    Duration::from_secs(5), 
+                    tls_acceptor.accept(tcp_stream)
+                ).await;
 
                 let tls_stream = match tls_stream {
-                    Ok(tls_stream) => AsyncIoTokioAsStd(tls_stream),
-                    Err(e) => {
+                    Ok(Ok(tls_stream)) => AsyncIoTokioAsStd(tls_stream),
+                    Ok(Err(e)) => {
                         log::debug!("tls handshake src: {} error: {}", src_addr, e);
+                        return;
+                    }
+                    Err(_) => {
+                        // 超时拦截
+                        log::debug!("tls handshake src: {} timeout (dropped)", src_addr);
                         return;
                     }
                 };
                 log::debug!("accepted TLS request from: {}", src_addr);
-                let (mut buf_stream, mut stream_handle) = tls_from_stream(tls_stream, src_addr);
+                let (mut buf_stream, stream_handle) = tls_from_stream(tls_stream, src_addr);
+
+                // 🌟 核心修复：单连接并发数上限 (防 Pipelining 任务爆炸与 OOM)
+                let conn_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(200));
 
                 while let Ok(Some(message)) = buf_stream.next().timeout(timeout).await {
                     let message = match message {
                         Ok(message) => message,
                         Err(e) => {
-                            log::debug!(
-                                "error in TLS request_stream src: {:?} error: {}",
-                                src_addr,
-                                e
-                            );
-
-                            // kill this connection
-                            return;
+                            log::debug!("error in TLS request_stream src: {:?} error: {}", src_addr, e);
+                            return; // kill this connection
                         }
+                    };
+
+                    // 🚦 申请并发许可，超限触发底层网络层面的背压
+                    let permit = match conn_semaphore.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => break,
                     };
 
                     let (bytes, addr) = message.into_parts();
                     let req_message = SerialMessage::binary(bytes, addr, Protocol::Tls);
-                    let res_message = handler.send(req_message).await;
+                    
+                    let handler = handler.clone();
+                    let mut stream_handle = stream_handle.clone(); 
 
-                    if let Err(err) = res_message
-                        .try_into()
-                        .map(|buffer| stream_handle.send(buffer))
-                    {
-                        log::error!("{:?}", err);
-                    }
+                    tokio::spawn(async move {
+                        let _permit = permit; // 🌟 绑定许可的生命周期
+                        let res_message = handler.send(req_message).await;
+
+                        if let Err(err) = res_message
+                            .try_into()
+                            .map(|buffer| stream_handle.send(buffer))
+                        {
+                            log::trace!("TLS stream sending failed: {:?}", err);
+                        }
+                    });
                 }
             });
 

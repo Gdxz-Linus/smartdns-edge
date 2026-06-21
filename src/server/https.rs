@@ -32,7 +32,7 @@ pub fn serve(
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
 
-    log::debug!("registered HTTPS: {:?}", listener);
+    log::debug!("HTTPS listener successfully registered on {}", listener.local_addr().unwrap());
 
     let tls_config = tls_server_config(b"h2", server_cert_resolver)
         .map_err(|e| io::Error::other(format!("error creating TLS acceptor: {e}")))?;
@@ -89,11 +89,20 @@ pub fn serve(
                 log::debug!("starting HTTPS request from: {}", src_addr);
 
                 // perform the TLS
-                let tls_stream = tls_acceptor.accept(tcp_stream).await;
+                // 🌟 核心修复：同理，防 DoH 的慢速连接死锁
+                let tls_stream = tokio::time::timeout(
+                    std::time::Duration::from_secs(5), 
+                    tls_acceptor.accept(tcp_stream)
+                ).await;
+
                 let socket = match tls_stream {
-                    Ok(tls_stream) => tls_stream,
-                    Err(e) => {
+                    Ok(Ok(tls_stream)) => tls_stream,
+                    Ok(Err(e)) => {
                         log::debug!("https handshake src: {} error: {}", src_addr, e);
+                        return;
+                    }
+                    Err(_) => {
+                        log::debug!("https handshake src: {} timeout (dropped)", src_addr);
                         return;
                     }
                 };

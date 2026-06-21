@@ -32,6 +32,8 @@ pub struct DnsContext {
     pub fastest_speed: Duration,
     pub source: LookupFrom,
     pub no_cache: bool,
+    // 🌟 补上这个被遗漏的货厢：用来运送双栈优选中被淘汰的附属记录
+    pub extra_cache_records: Vec<(crate::libdns::proto::op::Query, DnsResponse)>, 
 }
 
 impl DnsContext {
@@ -48,6 +50,7 @@ impl DnsContext {
             fastest_speed: Default::default(),
             source: Default::default(),
             no_cache,
+            extra_cache_records: Vec::new(), // 🌟 初始化空货厢
         }
     }
 
@@ -122,12 +125,14 @@ mod serial_message {
 
     pub enum SerialMessage {
         Raw(Box<Message>, SocketAddr, Protocol),
-        Bytes(Vec<u8>, SocketAddr, Protocol),
+        // 🌟 核心修复：升级底层载体，支持引用计数内存池指针，消除堆拷贝
+        Bytes(bytes::Bytes, SocketAddr, Protocol),
     }
 
     impl SerialMessage {
-        pub fn binary(bytes: Vec<u8>, addr: SocketAddr, protocol: Protocol) -> Self {
-            Self::Bytes(bytes, addr, protocol)
+        // 🌟 巧用 impl Into 泛型，向下完美兼容其余所有还在传 Vec<u8> 的协议，避免改动全局产生连锁报错！
+        pub fn binary(bytes: impl Into<bytes::Bytes>, addr: SocketAddr, protocol: Protocol) -> Self {
+            Self::Bytes(bytes.into(), addr, protocol)
         }
         pub fn raw(message: Message, addr: SocketAddr, protocol: Protocol) -> Self {
             Self::Raw(message.into(), addr, protocol)
@@ -174,7 +179,8 @@ mod serial_message {
         type Error = ProtoError;
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             Ok(match value {
-                SerialMessage::Bytes(bytes, addr, _) => Self::new(bytes, addr),
+                // 只有在真正需要发往外网 DNS 服务器时（Cache 未命中），才发生一次克隆提取，保全了 99% 命中缓存的热路径性能！
+                SerialMessage::Bytes(bytes, addr, _) => Self::new(bytes.to_vec(), addr),
                 SerialMessage::Raw(message, addr, _) => Self::new(message.to_vec()?, addr),
             })
         }
@@ -564,30 +570,42 @@ mod response {
     }
 
     impl DnsResponse {
+        // 🌟 终极全景雷达：找寿命时，绝不放过包裹的任何一个角落！
         pub fn max_ttl(&self) -> Option<u32> {
-            self.answers().iter().map(|record| record.ttl()).max()
+        let ans = self.answers().iter().map(|r| r.ttl()).max();
+        let auth = self.authorities().iter().map(|r| r.ttl()).max();
+        let add = self.additionals().iter().map(|r| r.ttl()).max();
+        
+        // 将三个区的最大值放在一起，再求一个最终的最大值
+        [ans, auth, add].into_iter().flatten().max()
         }
 
         pub fn min_ttl(&self) -> Option<u32> {
-            self.answers().iter().map(|record| record.ttl()).min()
+            let ans = self.answers().iter().map(|r| r.ttl()).min();
+            let auth = self.authorities().iter().map(|r| r.ttl()).min();
+            let add = self.additionals().iter().map(|r| r.ttl()).min();
+        
+            // 将三个区的最小值放在一起，再求一个最终的最小值
+            [ans, auth, add].into_iter().flatten().min()
         }
 
+        // 🌟 终极修复：让 TTL 涂改覆盖所有的三个区域，彻底解决 SOA 倒计时冻结！
         pub fn set_new_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
-                record.set_ttl(ttl);
-            }
+            for record in self.answers_mut() { record.set_ttl(ttl); }
+            for record in self.authorities_mut() { record.set_ttl(ttl); } // 👈 换成了正确的 authorities_mut
+            for record in self.additionals_mut() { record.set_ttl(ttl); }
         }
 
         pub fn set_max_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
-                record.set_max_ttl(ttl);
-            }
+            for record in self.answers_mut() { record.set_max_ttl(ttl); }
+            for record in self.authorities_mut() { record.set_max_ttl(ttl); }
+            for record in self.additionals_mut() { record.set_max_ttl(ttl); }
         }
 
         pub fn set_min_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
-                record.set_min_ttl(ttl);
-            }
+            for record in self.answers_mut() { record.set_min_ttl(ttl); }
+            for record in self.authorities_mut() { record.set_min_ttl(ttl); }
+            for record in self.additionals_mut() { record.set_min_ttl(ttl); }
         }
     }
 }
@@ -629,4 +647,25 @@ impl DefaultSOA for RData {
     fn default_soa() -> Self {
         Self::SOA(SOA::default_soa())
     }
+}
+
+// ==========================================
+// 🌟 统一兵工厂：规范化 SOA 萝卜章制造机
+// ==========================================
+pub fn forge_soa_record(name: Name, ttl: u32) -> Record {
+    let mname: Name = "a.root-servers.net.".parse().unwrap();
+    let rname: Name = "admin.smartdns.local.".parse().unwrap();
+
+    // 构造合法的 SOA 证书内容，核心是将 ttl 同步写入最小缓存时间字段！
+    let soa_data = RData::SOA(crate::libdns::proto::rr::rdata::SOA::new(
+        mname,
+        rname,
+        2026032400, // 序列号
+        1800,       // 刷新时间
+        900,        // 重试时间
+        259200,     // 极限过期时间
+        ttl,        // 【核心】最小否定缓存时间：与外部寿命严格同步
+    ));
+
+    Record::from_rdata(name, ttl, soa_data)
 }

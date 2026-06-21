@@ -13,7 +13,10 @@ type LogLevelDefault = InfoLevel;
 /// SmartDNS.
 ///
 #[derive(Parser, Debug)]
-#[command(author, version=build_version(), about, long_about = None)]
+// 🌟 终极视觉净化：加上 disable_help_subcommand = true。
+// 直接砍掉 clap 自动生成的冗余 help 命令，彻底抹除 subcommands 的刺眼文案！
+// 用户只需使用底部的 -h 或 --help 即可，让核心命令列表保持极致纯净！
+#[command(author, version=build_version(), about, long_about = None, disable_help_subcommand = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -29,12 +32,28 @@ impl Cli {
             return ResolveCommand::parse().into();
         }
 
+        #[cfg(feature = "resolve-cli")]
+        {
+            // 🌟 核心修复 3：强行拦截 smartdns resolve 命令，让它走原作者写的“高级解析器”，
+            // 否则 clap 遇到 @8.8.8.8 这种 dig 语法会直接报错崩溃！
+            let args: Vec<String> = std::env::args().collect();
+            if args.len() >= 2 && args[1] == "resolve" && !args.contains(&"--help".to_string()) && !args.contains(&"-h".to_string()) {
+                if let Ok(resolve_command) = ResolveCommand::try_parse_from(args) {
+                    return resolve_command.into();
+                }
+            }
+        }
+
         match Self::try_parse() {
             Ok(cli) => cli,
             Err(e) => {
-                #[cfg(feature = "resolve-cli")]
-                if let Ok(resolve_command) = ResolveCommand::try_parse() {
-                    return resolve_command.into();
+                // 🌟 核心修复 1：如果是请求帮助 (help) 或版本号 (--version)，立刻打印并退出！
+                // 绝不允许这些系统指令流向下方“贪婪”的兼容域名解析器。
+                if matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) {
+                    e.exit();
                 }
 
                 if let Ok(cli) = CompatibleCli::try_parse() {
@@ -57,9 +76,12 @@ impl Cli {
         match Self::try_parse_from(itr.clone()) {
             Ok(cli) => cli,
             Err(e) => {
-                #[cfg(feature = "resolve-cli")]
-                if let Ok(resolve_command) = ResolveCommand::try_parse_from(itr.clone()) {
-                    return resolve_command.into();
+                // 🌟 核心修复 2：同理，拦截测试/特定入口传来的 Help 信号
+                if matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) {
+                    e.exit();
                 }
 
                 if let Ok(cli) = CompatibleCli::try_parse_from(itr) {
@@ -87,24 +109,13 @@ pub enum Commands {
         #[arg(short = 'c', long)]
         conf: Option<std::path::PathBuf>,
 
-        /// Configuration directory, default to `/etc/smartdns``
-        #[arg(short = 'd', long)]
+        /// Base directory for configuration and managed files
+        #[arg(short = 'd', long, value_name = "DIR")]
         directory: Option<std::path::PathBuf>,
 
         /// Pid file
         #[arg(short = 'p', long)]
         pid: Option<std::path::PathBuf>,
-    },
-
-    /// Download and install new version.
-    #[cfg(feature = "self-update")]
-    Update {
-        /// Automatic yes to prompts
-        #[arg(short = 'y', long)]
-        yes: bool,
-
-        /// The target version to update to
-        version: Option<String>,
     },
 
     /// Manage the SmartDNS service (install, uninstall, start, stop, restart).
@@ -120,7 +131,8 @@ pub enum Commands {
     /// Create a symbolic link to the SmartDNS binary (drop-in replacement for `dig`, `nslookup`, `resolve` etc.)
     #[cfg(feature = "resolve-cli")]
     Symlink {
-        /// The path to the symlink to create.
+        /// The target name or path for the symlink (e.g. dig.exe, nslookup.exe)
+        #[arg(value_name = "TARGET_NAME")]
         link: std::path::PathBuf,
     },
 
@@ -130,9 +142,9 @@ pub enum Commands {
         #[arg(short = 'c', long)]
         conf: Option<std::path::PathBuf>,
 
-        /// Configuration directory, default to `/etc/smartdns``
-        #[arg(short = 'd', long)]
-        direcory: Option<std::path::PathBuf>,
+        /// Base directory for configuration and managed files
+        #[arg(short = 'd', long, value_name = "DIR")]
+        directory: Option<std::path::PathBuf>,
     },
 }
 

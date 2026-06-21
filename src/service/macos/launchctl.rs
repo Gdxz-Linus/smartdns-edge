@@ -4,9 +4,21 @@ use super::super::{
     service_manager::{ServiceCommand, ServiceCommands, ServiceDefinition},
 };
 
-pub const BIN_PATH: &str = "/usr/local/sbin/smartdns";
-pub const CONF_DIR: &str = "/usr/local/etc/smartdns";
-pub const CONF_PATH: &str = "/usr/local/etc/smartdns/smartdns.conf";
+use cfg_if::cfg_if;
+
+cfg_if! {
+    if #[cfg(target_arch = "aarch64")] {
+        // 🌟 核心修复 1：针对 Apple M1/M2/M3 芯片使用原生标准的 opt 路径
+        pub const BIN_PATH: &str = "/opt/homebrew/sbin/smartdns";
+        pub const CONF_DIR: &str = "/opt/homebrew/etc/smartdns";
+        pub const CONF_PATH: &str = "/opt/homebrew/etc/smartdns/smartdns.conf";
+    } else {
+        // 针对老款 Intel Mac 保持 usr 路径
+        pub const BIN_PATH: &str = "/usr/local/sbin/smartdns";
+        pub const CONF_DIR: &str = "/usr/local/etc/smartdns";
+        pub const CONF_PATH: &str = "/usr/local/etc/smartdns/smartdns.conf";
+    }
+}
 
 const SERVICE_FILE_PATH: &str = "/Library/LaunchDaemons/smartdns-rs.plist";
 const SERVICE_FILE: &str = include_str!("files/Library/LaunchDaemons/smartdns-rs.plist");
@@ -37,7 +49,8 @@ pub fn create_service_definition() -> ServiceDefinition {
         },
         stop: ServiceCommand {
             program: launch_ctl.into(),
-            args: vec!["bootout".into(), ["system/", SERVICE_NAME].concat().into()],
+            // 🌟 核心修复 2：使用与 load 完美配对的 unload，保证所有 macOS 版本 100% 兼容卸载
+            args: vec!["unload".into(), service_file_path.into()],
         },
         restart: None,
         status: Some(ServiceCommand {

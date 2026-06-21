@@ -8,25 +8,29 @@ pub fn bind_to<T: LocalAddr>(
     bind_addr: SocketAddr,
     bind_device: Option<&str>,
     bind_type: &str,
-) -> T {
+) -> io::Result<T> { // 🌟 修复：返回 io::Result
     let device_note = bind_device
         .map(|device| format!("@{device}"))
         .unwrap_or_default();
 
-    log::debug!("binding {} to {:?}{}", bind_type, bind_addr, device_note);
+    crate::log::debug!("binding {} to {:?}{}", bind_type, bind_addr, device_note);
 
     match new_socket(bind_addr, bind_device) {
         Ok(socket) => {
-            let local_addr = socket.local_addr().expect("could not lookup local address");
-            log::info!(
+            let local_addr = socket.local_addr().unwrap_or(bind_addr); // 降级处理，不 expect
+            crate::log::info!(
                 "listening for {} on {:?}{}",
                 bind_type,
                 local_addr,
                 device_note
             );
-            socket
+            Ok(socket) // 🌟 成功则包装在 Ok 中
         }
-        Err(err) => panic!("cound not bind to {bind_type}: {bind_addr}, {err}"),
+        Err(err) => {
+            // 🌟 修复：用 Error 打印日志并向上抛出，绝对不 Panic 杀进程！
+            crate::log::error!("could not bind to {bind_type}: {bind_addr}, {err}");
+            Err(err)
+        }
     }
 }
 
@@ -57,6 +61,12 @@ pub fn setup_udp_socket(bind_addr: SocketAddr, bind_device: Option<&str>) -> io:
         Type::DGRAM,
         Some(Protocol::UDP),
     )?;
+
+    // 🌟 终极物理层提速：暴力突破系统 UDP 收发缓冲区极限！
+    // 默认内核通常只有 64KB~212KB，遇到瞬时高并发或泛洪极易在内核层静默丢包。
+    // 我们强行向系统申请 4MB 的超级大信箱（尽最大努力申请，忽略 OS 权限拒绝，能扩多少扩多少）
+    let _ = socket.set_recv_buffer_size(4 * 1024 * 1024);
+    let _ = socket.set_send_buffer_size(4 * 1024 * 1024);
 
     setup_socket(&socket, bind_device, bind_addr)?;
 
@@ -90,7 +100,10 @@ fn setup_socket<'a, T: Into<SockRef<'a>>>(
         sock_ref.set_tcp_nodelay(true)?;
     }
 
+    // 🌟 核心修复 3：严禁 Windows 系统开启端口复用，把防多开的最后一道底线交还给操作系统内核！
+    #[cfg(not(windows))]
     sock_ref.set_reuse_address(true)?;
+
     #[cfg(not(any(
         target_os = "solaris",
         target_os = "illumos",

@@ -6,7 +6,8 @@ pub trait FromStrOrHex<T: Num> {
 
 impl<T: Num> FromStrOrHex<T> for T {
     fn from_str_or_hex(s: &str) -> Result<T, T::FromStrRadixErr> {
-        if let Some(s) = s.strip_prefix("0x") {
+        // 🌟 修复：同时兼容小写 0x 和大写 0X 的十六进制前缀！
+        if let Some(s) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             T::from_str_radix(s, 16)
         } else {
             T::from_str_radix(s, 10)

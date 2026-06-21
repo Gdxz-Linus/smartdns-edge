@@ -7,7 +7,6 @@ pub enum SpeedCheckMode {
     None,
     Ping,
     Tcp(u16),
-    Http(u16),
     Https(u16),
 }
 
@@ -22,7 +21,6 @@ impl SpeedCheckMode {
             None => return Default::default(),
             Ping => PingAddr::Icmp(ip_addr),
             Tcp(port) => PingAddr::Tcp(SocketAddr::new(ip_addr, port)),
-            Http(port) => PingAddr::Http(SocketAddr::new(ip_addr, port)),
             Https(port) => PingAddr::Https(SocketAddr::new(ip_addr, port)),
         })
     }
@@ -42,13 +40,6 @@ impl std::fmt::Debug for SpeedCheckMode {
             None => write!(f, "None"),
             Ping => write!(f, "ICMP"),
             Tcp(port) => write!(f, "TCP:{port}"),
-            Http(port) => {
-                if *port == 80 {
-                    write!(f, "HTTP")
-                } else {
-                    write!(f, "HTTP:{port}")
-                }
-            }
             Https(port) => {
                 if *port == 443 {
                     write!(f, "HTTPS")
@@ -108,12 +99,13 @@ impl std::ops::DerefMut for SpeedCheckModeList {
     }
 }
 
+
 impl std::default::Default for SpeedCheckModeList {
     fn default() -> Self {
         Self(vec![
+            // 🌟 核心需求：默认改为只做 ping 和 tcp(443) 测速，减轻 HTTPS 握手开销
             SpeedCheckMode::Ping,
-            SpeedCheckMode::Http(80),
-            SpeedCheckMode::Https(443),
+            SpeedCheckMode::Tcp(443),
         ])
     }
 }

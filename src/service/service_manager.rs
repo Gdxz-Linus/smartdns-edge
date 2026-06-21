@@ -10,7 +10,7 @@ use std::{
 // use regex::Regex;
 
 use super::installer::Installer;
-use crate::log::{debug, error, info};
+use crate::log::debug;
 
 #[derive(Debug)]
 pub struct ServiceDefinition {
@@ -52,22 +52,38 @@ impl From<ServiceDefinition> for ServiceManager {
 
 impl ServiceManager {
     pub fn install(&self) -> io::Result<()> {
+        // 🌟 智能防呆：安装前先探针，如果存在直接提示，绝不重复破坏现场！
+        if let Ok(status) = self.status() {
+            if matches!(status, ServiceStatus::Running(_) | ServiceStatus::Dead(_)) {
+                println!("💡 SmartDNS service is already installed.");
+                return Ok(());
+            }
+        }
+
         let _ = self.uninstall(false, true);
 
         // install files.
         self.definition.installer.install()?;
 
         if let Some(install) = self.definition.commands.install.as_ref() {
-            install.spawn()?;
+            if let Err(e) = install.spawn() {
+                return Err(e);
+            }
         }
 
-        info!("Service {} successfully installed", self.definition.name);
         self.start()?;
         Ok(())
     }
 
     pub fn uninstall(&self, purge: bool, quiet: bool) -> io::Result<()> {
-        // try stopping an existing running service.
+        // 🌟 统一拦截：卸载空服务直接报错返回，绝不执行后续 PowerShell
+        if matches!(self.status(), Ok(ServiceStatus::NotInstalled)) {
+            if !quiet {
+                eprintln!("❌ SmartDNS service is NOT installed.");
+            }
+            return Ok(());
+        }
+
         self.try_stop().unwrap_or_default();
 
         if let Some(uninstall) = self.definition.commands.uninstall.as_ref() {
@@ -78,40 +94,63 @@ impl ServiceManager {
             }
         }
 
-        if self.definition.installer.uninstall(purge)? > 0 {
-            info!("Service {} successfully uninstalled", self.definition.name);
-        }
+        let _ = self.definition.installer.uninstall(purge)?;
         Ok(())
     }
 
     pub fn start(&self) -> io::Result<()> {
-        if !matches!(self.status(), Ok(ServiceStatus::Running(_))) {
-            self.definition.commands.start.spawn()?;
-            info!("Successfully started service {}", self.definition.name);
-        } else {
-            info!("Service {} already started", self.definition.name);
+        match self.status() {
+            Ok(ServiceStatus::Running(_)) => {
+                println!("▶️ Service {} already started", self.definition.name);
+            }
+            Ok(ServiceStatus::NotInstalled) => {
+                // 🌟 统一拦截：启动空服务，给出提示并指导安装
+                eprintln!("❌ SmartDNS service is NOT installed.");
+                eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+            }
+            _ => {
+                self.definition.commands.start.spawn()?;
+            }
         }
         Ok(())
     }
 
     pub fn stop(&self) -> io::Result<()> {
-        self.try_stop()?;
-        info!("Successfully stopped service {}", self.definition.name);
+        match self.status() {
+            Ok(ServiceStatus::NotInstalled) => {
+                // 🌟 统一拦截：停止空服务，直接报错，不需要加安装提示
+                eprintln!("❌ SmartDNS service is NOT installed.");
+				eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+            }
+            Ok(ServiceStatus::Dead(_)) => {
+                println!("⏹️ Service {} already stopped", self.definition.name);
+            }
+            _ => {
+                self.definition.commands.stop.spawn()?;
+            }
+        }
         Ok(())
     }
 
     pub fn try_stop(&self) -> io::Result<()> {
-        if !matches!(self.status(), Ok(ServiceStatus::Dead(_))) {
+        // 🌟 核心修正：只在“运行中”才去执行停止动作，避免多重报错！
+        if matches!(self.status(), Ok(ServiceStatus::Running(_))) {
             self.definition.commands.stop.spawn()?;
         }
         Ok(())
     }
 
     pub fn restart(&self) -> io::Result<()> {
+        if matches!(self.status(), Ok(ServiceStatus::NotInstalled)) {
+            // 🌟 统一拦截：重启空服务，给出提示并指导安装
+            eprintln!("❌ SmartDNS service is NOT installed.");
+            eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+            return Ok(());
+        }
+
         match self.definition.commands.restart.as_ref() {
             Some(restart) => {
                 restart.spawn()?;
-                info!("Successfully restarted service {}", self.definition.name);
             }
             None => {
                 self.try_stop().unwrap_or_default();
@@ -121,15 +160,26 @@ impl ServiceManager {
         }
         Ok(())
     }
-
+	
     pub fn status(&self) -> io::Result<ServiceStatus> {
         let status = match self.definition.commands.status.as_ref() {
             Some(cmd) => {
                 let output = cmd.output()?;
-                if output.status.success() {
-                    ServiceStatus::Running(output)
-                } else {
-                    ServiceStatus::Dead(output)
+                // 🌟 精准感知：直接读取底层的退出码 2 来断定服务不存在
+                match output.status.code() {
+                    Some(0) => ServiceStatus::Running(output),
+                    Some(1) => ServiceStatus::Dead(output),
+                    Some(2) => ServiceStatus::NotInstalled,
+                    _ => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if stdout.contains("NOT installed") {
+                            ServiceStatus::NotInstalled
+                        } else if output.status.success() {
+                            ServiceStatus::Running(output)
+                        } else {
+                            ServiceStatus::Dead(output)
+                        }
+                    }
                 }
             }
             None => ServiceStatus::Unknown,
@@ -166,20 +216,31 @@ impl ServiceCommand {
     pub fn spawn(&self) -> io::Result<()> {
         let output = self.output()?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
         if output.status.success() {
+            if !stdout.trim().is_empty() {
+                println!("{}", stdout.trim());
+            }
             Ok(())
         } else {
-            let msg = String::from_utf8(output.stderr)
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| {
-                    String::from_utf8(output.stdout)
-                        .ok()
-                        .filter(|s| !s.trim().is_empty())
-                })
-                .unwrap_or_else(|| "Failed".to_string());
-            error!("{:?}, {}", self.program, msg);
-            Err(io::Error::other(msg))
+            let mut msg = String::new();
+            if !stdout.trim().is_empty() {
+                msg.push_str(stdout.trim());
+            }
+            if !stderr.trim().is_empty() {
+                if !msg.is_empty() { msg.push('\n'); }
+                msg.push_str(stderr.trim());
+            }
+            if msg.trim().is_empty() {
+                msg = "Failed".to_string();
+            }
+            
+            // 🌟 核心修复 3：彻底拔除那个丑陋的 ❌ Error executing ... 前缀！
+            // 让终端直接原汁原味地输出我们在 PowerShell 里精心排版的指导语！
+            eprintln!("{}", msg);
+            Err(io::Error::other("Command failed"))
         }
     }
 
@@ -218,6 +279,7 @@ impl From<ServiceCommand> for Command {
 pub enum ServiceStatus {
     Running(std::process::Output),
     Dead(std::process::Output),
+    NotInstalled, // 🌟 新增：专门识别未安装状态
     Unknown,
 }
 
@@ -232,10 +294,11 @@ mod tests {
             cfg_if! {
                 if #[cfg(target_os="windows")] {
                     ServiceCommand {
-                        program: "cmd.exe".into(),
+                        program: "powershell.exe".into(),
                         args: vec![
-                                "/C".into(),
-                                "ver.exe".into()
+                                "-NoProfile".into(),
+                                "-Command".into(),
+                                "Write-Output 'Windows'".into()
                             ],
                     }
                 } else {

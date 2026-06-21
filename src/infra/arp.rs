@@ -8,6 +8,8 @@ struct ParsedArpEntry {
     mac: MacAddr,
 }
 
+// 🌟 修复 1：直接去掉冗余且会引发 Panic 的 block_in_place，
+// 因为在外层的 app.rs 中已经使用了 spawn_blocking！
 pub fn lookup_client_mac_from_arp(client_ip: IpAddr) -> Option<String> {
     client_ipv4_for_arp(client_ip).and_then(lookup_client_mac_from_arp_v4)
 }
@@ -101,10 +103,35 @@ fn lookup_mac_from_arp_command_output(client_ip: Ipv4Addr, args: &[&str]) -> Opt
     run_arp_command(args).and_then(|output| parse_arp_command_output_mac(&output, client_ip))
 }
 
+// 🌟 修复 2：Windows 平台专属极速原生 API (替代 arp.exe)
 #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
 fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
-    let ip = client_ip.to_string();
-    lookup_mac_from_arp_command_output(client_ip, &["-a", ip.as_str()])
+    // 动态链接 Windows 的 IP 助手 API
+    #[link(name = "iphlpapi")]
+    unsafe extern "system" {
+        fn SendARP(
+            dest_ip: u32,
+            src_ip: u32,
+            p_mac_addr: *mut u8,
+            phy_addr_len: *mut u32,
+        ) -> u32;
+    }
+
+    let dest_ip = u32::from_ne_bytes(client_ip.octets());
+    let mut mac = [0u8; 6];
+    let mut mac_len = 6u32;
+
+    // 🌟 极速调用，不产生任何系统子进程，微秒级返回！
+    let res = unsafe { SendARP(dest_ip, 0, mac.as_mut_ptr(), &mut mac_len) };
+
+    if res == 0 && mac_len == 6 {
+        Some(format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]

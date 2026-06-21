@@ -29,20 +29,26 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
             RecordType::AAAA => {
                 let res = next.clone().run(ctx, req).await;
 
-                let Err(err) = res else {
-                    return res;
+                // 🌟 修复：无论上游是返回 NXDOMAIN(Err) 还是返回了纯 IPv4 的空包(Ok但没AAAA记录)，都必须启动 DNS64 合成！
+                let fallback_needed = match &res {
+                    Err(_) => true,
+                    Ok(lookup) => !lookup.records().iter().any(|r| r.record_type() == RecordType::AAAA),
                 };
+
+                if !fallback_needed {
+                    return res;
+                }
 
                 let mut msg: op::Message = req.deref().clone();
                 let Some(q) = msg.queries_mut().first_mut() else {
-                    return Err(err);
+                    return res; // 无 query，直接退还原响应
                 };
                 q.set_query_type(RecordType::A);
 
                 let req = DnsRequest::new(msg, req.src(), req.protocol());
 
                 let Ok(mut lookup) = next.run(ctx, &req).await else {
-                    return Err(err);
+                    return res;
                 };
 
                 for record in lookup.answers_mut() {
@@ -52,7 +58,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                     let Some(ipv6) = to_dns64(self.ipv6_net, ipv4) else {
                         continue;
                     };
-                    record.set_data(RData::AAAA(ipv6.into()));
+                    // 🌟 核心修复：不能只改数据，我们直接用原域名和寿命生成一条全新的 AAAA 记录，整体覆盖旧的 A 记录，从根本上保证包头类型与数据绝对匹配！
+                    *record = Record::from_rdata(record.name().clone(), record.ttl(), RData::AAAA(ipv6.into()));
                 }
                 if let Some(q) = lookup.queries_mut().first_mut() {
                     q.set_query_type(query_type);

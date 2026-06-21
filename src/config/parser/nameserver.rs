@@ -57,10 +57,13 @@ impl NomParser for NameServerInfo {
                     "check-edns" => nameserver.check_edns = true,
                     "b" | "bootstrap-dns" => nameserver.bootstrap_dns = true,
                     "set-mark" => match v {
-                        Some(m) => nameserver.so_mark = u32::from_str_or_hex(m).ok(),
-                        None => {
-                            log::warn!("expect mark")
+                        Some(m) => {
+                            match u32::from_str_or_hex(m) {
+                                Ok(mark) => nameserver.so_mark = Some(mark),
+                                Err(_) => log::error!("Invalid set-mark value: '{}', ignored!", m), // 🌟 拒绝静默吞错
+                            }
                         }
+                        None => { log::warn!("expect mark") }
                     },
                     "g" | "group" => match v {
                         Some(g) => nameserver.group.push(g.to_string()),
@@ -75,10 +78,13 @@ impl NomParser for NameServerInfo {
                         nameserver.interface = v.map(|p| p.to_string());
                     }
                     "subnet" => match v {
-                        Some(s) => nameserver.subnet = IpNet::parse(s).ok().map(|s| s.1),
-                        None => {
-                            log::warn!("expect suedns client subnetbnet")
+                        Some(s) => {
+                            match IpNet::parse(s) {
+                                Ok(net) => nameserver.subnet = Some(net.1),
+                                Err(_) => log::error!("Invalid subnet value: '{}', ignored!", s), // 🌟 拒绝静默吞错
+                            }
                         }
+                        None => { log::warn!("expect edns client subnet") }
                     },
                     "host-name" => match v {
                         Some(host_name) => {

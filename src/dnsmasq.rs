@@ -12,7 +12,6 @@ use std::io::BufRead;
 use crate::collections::DomainMap;
 use crate::dns::{Name, RData};
 use crate::libdns::proto::rr::RecordType;
-use chrono::{DateTime, Local, NaiveDateTime};
 
 pub struct LanClientStore {
     zone: Option<Name>,
@@ -37,7 +36,7 @@ impl LanClientStore {
         }
     }
 
-    fn cached_clients(&self) -> Option<Arc<DomainMap<ClientInfo>>> {
+    async fn cached_clients(&self) -> Option<Arc<DomainMap<ClientInfo>>> {
         let now = Instant::now();
 
         {
@@ -49,9 +48,11 @@ impl LanClientStore {
             }
         }
 
-        let modified_at = std::fs::metadata(self.file.as_path())
-            .ok()
-            .and_then(|meta| meta.modified().ok());
+        // 🌟 核心修复：把读取硬盘元数据的阻塞操作踢给外包线程池
+        let file_path = self.file.clone();
+        let modified_at = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&file_path).ok().and_then(|meta| meta.modified().ok())
+        }).await.unwrap_or(None);
 
         {
             let mut cache = self.cache.write().unwrap_or_else(|err| err.into_inner());
@@ -67,9 +68,12 @@ impl LanClientStore {
             }
         }
 
-        let refreshed = read_lease_file(self.file.as_path(), self.zone.as_ref())
-            .ok()
-            .map(Arc::new);
+        // 🌟 核心修复：把打开文件解析的大量 I/O 操作踢给外包线程池
+        let file_path = self.file.clone();
+        let zone = self.zone.clone();
+        let refreshed = tokio::task::spawn_blocking(move || {
+            read_lease_file(&file_path, zone.as_ref()).ok().map(Arc::new)
+        }).await.unwrap_or(None);
 
         let mut cache = self.cache.write().unwrap_or_else(|err| err.into_inner());
         if let Some(clients) = refreshed {
@@ -88,10 +92,11 @@ impl LanClientStore {
         }
     }
 
-    pub fn lookup(&self, name: &Name, record_type: RecordType) -> Option<RData> {
+    // 🌟 返回值改成了 Option<Vec<RData>>，这样就能名正言顺地返回空包了
+    pub async fn lookup(&self, name: &Name, record_type: RecordType) -> Option<Vec<RData>> {
         match record_type {
             RecordType::A | RecordType::AAAA => {
-                let store = match self.cached_clients() {
+                let store = match self.cached_clients().await {
                     Some(v) => v,
                     None => return None,
                 };
@@ -99,7 +104,6 @@ impl LanClientStore {
                 let mut name = name.clone();
 
                 if !name.is_fqdn() {
-                    // try add zone
                     if let Some(zone) = self.zone.as_ref() {
                         if let Ok(n) = name.clone().append_name(zone) {
                             name = n;
@@ -120,13 +124,16 @@ impl LanClientStore {
                     _ => None,
                 }) {
                     match client_info.ip {
-                        IpAddr::V4(v) if record_type == RecordType::A => Some(RData::A(v.into())),
+                        IpAddr::V4(v) if record_type == RecordType::A => Some(vec![RData::A(v.into())]),
                         IpAddr::V6(v) if record_type == RecordType::AAAA => {
-                            Some(RData::AAAA(v.into()))
+                            Some(vec![RData::AAAA(v.into())])
                         }
-                        _ => Default::default(),
+                        // 🌟 修复炸弹一：设备在这，但你要找的 IP 类型不对（比如内网电脑没有 IPv6）。
+                        // 绝对不能返回 None（会流向外网泄露），而是返回空数组 vec![]（原地生成空包）！
+                        _ => Some(vec![]),
                     }
                 } else {
+                    // 内网根本没叫这个名字的设备，安全放行给外网
                     None
                 }
             }
@@ -141,13 +148,14 @@ pub struct ClientInfo {
     ip: IpAddr,
     host: Name,
     mac: String,
-    expires_at: NaiveDateTime,
+    expires_at: i64, // 🌟 修复时区Bug：直接存最纯粹的 UNIX 时间戳
 }
 
 impl ClientInfo {
     #[inline]
-    fn is_expires(&self) -> bool {
-        self.expires_at < Local::now().naive_local()
+    fn is_expired(&self, now_ts: i64) -> bool {
+        // 🌟 过期判断：只要大于0 且比当前时间戳小，就是过期了！
+        self.expires_at > 0 && self.expires_at < now_ts
     }
 }
 
@@ -166,11 +174,8 @@ impl FromStr for ClientInfo {
 
         let timestamp = parts
             .next()
-            .map(|timestamp| i64::from_str(timestamp).ok())
-            .unwrap_or_default()
-            .map(|timestamp| DateTime::from_timestamp(timestamp, 0).map(|s| s.naive_utc()))
-            .unwrap_or_default()
-            .unwrap_or_else(|| Local::now().naive_local());
+            .and_then(|timestamp| i64::from_str(timestamp).ok())
+            .unwrap_or(0); // 🌟 直接用原始时间戳，干干净净
 
         let mac = match parts.next() {
             Some(v) => v.to_string(),
@@ -205,13 +210,11 @@ fn read_lease_file<P: AsRef<Path>>(
     zone: Option<&Name>,
 ) -> std::io::Result<DomainMap<ClientInfo>> {
     let file = File::open(path.as_ref())?;
-
     let reader = BufReader::new(file);
-
     let mut map = HashMap::new();
 
-    // let mut keys = vec![];
-    // let mut values = vec![];
+    // 🌟 1. 获取当前的时间戳，准备作为“生死审判”的标准
+    let now_ts = chrono::Utc::now().timestamp(); 
 
     for line in reader.lines() {
         let line = match line {
@@ -221,12 +224,16 @@ fn read_lease_file<P: AsRef<Path>>(
 
         let line = line.trim_start();
 
-        // skip comments and empty line.
         if matches!(line.chars().next(), Some('#') | None) {
             continue;
         }
 
         if let Ok(mut client_info) = ClientInfo::from_str(line) {
+            // 🌟 2. 核心修复：发现是过期的历史设备，直接忽略（continue），绝不进冰柜！
+            if client_info.is_expired(now_ts) { 
+                continue; 
+            }
+			
             if let Some(z) = zone {
                 if let Ok(host) = client_info.host.clone().append_name(z) {
                     client_info.host = host;

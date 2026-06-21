@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Deref, sync::Arc};
 
-use crate::{config::WildcardName, third_ext::HashCode};
+use crate::config::WildcardName;
 use std::sync::LazyLock;
 
 use crate::{
@@ -24,7 +24,7 @@ impl DomainRuleMap {
     }
     #[allow(clippy::too_many_arguments)]
     pub fn create(
-        rule_map: &mut HashMap<u64, Arc<DomainRule>>,
+        rule_map: &mut HashMap<DomainRule, Arc<DomainRule>>, // 🌟 核心修复：直接使用对象比对，绝对安全
         domain_rules: &DomainRules,
         address_rules: &AddressRules,
         forward_rules: &ForwardRules,
@@ -102,9 +102,9 @@ impl DomainRuleMap {
 
         for (name, v) in rule_items {
             let rule = rule_map
-                .entry(v.hash_code())
-                .or_insert_with(move || Arc::new(v))
-                .to_owned();
+                .entry(v.clone()) // 🌟 直接拿结构体做精准匹配
+                .or_insert_with(|| Arc::new(v))
+                .clone();
 
             let zone = rules.find(&name.base_name()).cloned();
 

@@ -40,15 +40,21 @@ impl DnsHostsMiddleware {
 
         {
             let cache = self.0.read().await;
-            if let Some(cache) = cache.as_ref()
-                && now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL
-            {
-                return cache.hosts.clone();
+            if let Some(cache) = cache.as_ref() {
+                if now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL {
+                    return cache.hosts.clone();
+                }
             }
         }
 
-        // Collect file metadata outside the lock to avoid blocking readers/writers.
-        let signature = collect_hosts_signature(hosts_file_pattern);
+        // 把 pattern 转换为字符串，用于跨线程传递
+        let pattern_str = hosts_file_pattern.map(|p| p.as_str().to_string());
+
+        // 🌟 核心修复：外包签名收集（含阻塞的 fs::metadata）
+        let signature = tokio::task::spawn_blocking({
+            let p_str = pattern_str.clone();
+            move || collect_hosts_signature(p_str.as_deref())
+        }).await.unwrap();
 
         {
             let mut cache = self.0.write().await;
@@ -63,10 +69,13 @@ impl DnsHostsMiddleware {
             }
         }
 
-        let refreshed_hosts = Arc::new(match hosts_file_pattern {
-            Some(pattern) => read_hosts(pattern.as_str()),
-            None => Hosts::default(),
-        });
+        // 🌟 核心修复：外包实际的 hosts 文件读取
+        let refreshed_hosts = Arc::new(tokio::task::spawn_blocking(move || {
+            match pattern_str {
+                Some(ref pattern) => read_hosts(pattern),
+                None => Hosts::default(),
+            }
+        }).await.unwrap());
 
         let mut cache = self.0.write().await;
         *cache = Some(HostsCache {
@@ -110,11 +119,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsHostsMiddl
     }
 }
 
-fn collect_hosts_signature(hosts_file_pattern: Option<&glob::Pattern>) -> HostsFileSignature {
+fn collect_hosts_signature(hosts_file_pattern: Option<&str>) -> HostsFileSignature {
     let mut files = Vec::new();
 
     if let Some(pattern) = hosts_file_pattern {
-        match glob::glob(pattern.as_str()) {
+        match glob::glob(pattern) {
             Ok(paths) => {
                 for entry in paths {
                     match entry {
@@ -134,7 +143,7 @@ fn collect_hosts_signature(hosts_file_pattern: Option<&glob::Pattern>) -> HostsF
     }
 
     for path in system_hosts_paths() {
-        append_hosts_file_meta(Path::new(path), &mut files);
+        append_hosts_file_meta(Path::new(&path), &mut files);
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -158,18 +167,19 @@ fn append_hosts_file_meta(path: &Path, files: &mut Vec<HostsFileMeta>) {
 }
 
 #[cfg(unix)]
-fn system_hosts_paths() -> &'static [&'static str] {
-    &["/etc/hosts"]
+fn system_hosts_paths() -> Vec<String> {
+    vec!["/etc/hosts".to_string()]
 }
 
 #[cfg(windows)]
-fn system_hosts_paths() -> &'static [&'static str] {
-    &["C:\\Windows\\System32\\drivers\\etc\\hosts"]
+fn system_hosts_paths() -> Vec<String> {
+    let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    vec![format!("{}\\System32\\drivers\\etc\\hosts", sys_root)]
 }
 
 #[cfg(not(any(unix, windows)))]
-fn system_hosts_paths() -> &'static [&'static str] {
-    &[]
+fn system_hosts_paths() -> Vec<String> {
+    Vec::new()
 }
 
 fn read_hosts(pattern: &str) -> Hosts {

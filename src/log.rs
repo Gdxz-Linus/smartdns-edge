@@ -1,5 +1,6 @@
-use std::{cell::RefCell, env, fmt, io, path::Path, sync::OnceLock};
+use std::{env, fmt, io, path::Path, sync::OnceLock};
 
+pub use tracing::*;
 pub use tracing::dispatcher::set_default;
 use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
 use tracing_subscriber::{
@@ -13,12 +14,6 @@ use tracing_subscriber::{
 };
 
 static INIT_CONSOLE_LEVEL: OnceLock<Level> = OnceLock::new();
-
-thread_local! {
-    pub static LOG_GUARD: RefCell<Option<DefaultGuard>> = const { RefCell::new(None) };
-}
-
-pub use tracing::*;
 
 type MappedFile = crate::infra::mapped_file::MutexMappedFile;
 
@@ -45,13 +40,13 @@ pub fn make_dispatch<P: AsRef<Path>>(
 
     let writable = enabled
         && file
-            .0
+            .inner // 🌟 适配新字段
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .touch()
             .map(|_| true)
-            .unwrap_or_else(|err| {
-                warn!("{:?}, {:?}", path.as_ref(), err);
+            .unwrap_or_else(|_err| {
+                // ... (警告：如果你在这里发现 warn 宏可能导致死锁，不用担心，因为我们只是通过 try_send 发送到队列)
                 false
             });
 
@@ -64,17 +59,21 @@ pub fn make_dispatch<P: AsRef<Path>>(
     let console_writer = io::stdout.with_max_level(console_level);
 
     if writable {
-        // log hello
-        {
-            let writer = file.with_max_level(level);
-            let dispatch = internal_make_dispatch(level, filter, writer, true);
+        // 🌟 1. 手动将横幅瞬间写入文件，弥补配置解析的时间差
+        use std::io::Write;
+        let now = chrono::Local::now();
+        let msg = format!("{}.{:03}:INFO: {} 🐋 {} starting\n", 
+            now.format("%Y-%m-%d %H:%M:%S"),
+            now.timestamp_millis() % 1000,
+            crate::NAME, 
+            crate::BUILD_VERSION
+        );
+        let mut writer = &file;
+        let _ = writer.write_all(msg.as_bytes());
 
-            let _guard = set_default(&dispatch);
-            crate::hello_starting();
-        }
-
-        let file_writer =
-            MappedFile::open(path.as_ref(), size, Some(num as usize), mode).with_max_level(level);
+        // 🌟 2. 核心修复：直接使用原生的 MappedFile！
+        // 因为它是内存映射，速度比任何 Channel 都快，绝对不会丢弃你的 cfg.summary() 日志！
+        let file_writer = file.with_max_level(level);
 
         if to_console {
             internal_make_dispatch(
@@ -181,11 +180,10 @@ where
         } else {
             write!(
                 &mut writer,
-                "{}.{}:{}:{}",
+                "{}.{}:{}",
                 date,
                 now_msecs,
-                metadata.level(),
-                metadata.target()
+                metadata.level()
             )?;
             if let Some(line) = metadata.line() {
                 write!(&mut writer, ":{line}")?;

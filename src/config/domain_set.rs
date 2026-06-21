@@ -17,7 +17,8 @@ pub enum DomainSetProvider {
 pub trait IDomainSetProvider {
     fn name(&self) -> &str;
 
-    fn get_domain_set(&self) -> Result<HashSet<WildcardName>>;
+    // 🌟 核心修复 1：打通参数管道，允许传入代理池
+    fn get_domain_set(&self, proxies: &std::collections::HashMap<String, crate::proxy::ProxyConfig>) -> Result<HashSet<WildcardName>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub struct DomainSetHttpProvider {
     pub url: Url,
     pub interval: Option<usize>,
     pub content_type: DomainSetContentType,
+    pub proxy: Option<String>, // 🌟 新增：专属代理参数
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -46,7 +48,7 @@ impl IDomainSetProvider for DomainSetFileProvider {
         self.name.as_str()
     }
 
-    fn get_domain_set(&self) -> Result<HashSet<WildcardName>> {
+    fn get_domain_set(&self, _proxies: &std::collections::HashMap<String, crate::proxy::ProxyConfig>) -> Result<HashSet<WildcardName>> {
         let mut domain_set = HashSet::new();
         let text = std::fs::read_to_string(&self.file)?;
         read_to_domain_set(&text, &mut domain_set);
@@ -59,11 +61,16 @@ impl IDomainSetProvider for DomainSetHttpProvider {
         self.name.as_str()
     }
 
-    fn get_domain_set(&self) -> Result<HashSet<WildcardName>> {
+    fn get_domain_set(&self, proxies: &std::collections::HashMap<String, crate::proxy::ProxyConfig>) -> Result<HashSet<WildcardName>> {
         use crate::infra::http_client::{self, HttpResponse};
-
         let mut domain_set = HashSet::new();
-        let res = http_client::get(self.url.to_string())?;
+        
+        // 🌟 核心修复：坚决不偷拿！只匹配用户显式指定的 proxy 名称
+        let proxy_str = self.proxy.as_ref()
+            .and_then(|proxy_name| proxies.get(proxy_name))
+            .map(|p| p.to_string());
+
+        let res = http_client::get(self.url.to_string(), proxy_str.as_deref())?;
 
         let text = res.text()?;
         read_to_domain_set(&text, &mut domain_set);

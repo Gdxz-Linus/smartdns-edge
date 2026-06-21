@@ -2,16 +2,17 @@ use std::net::Ipv4Addr;
 
 use nom::{
     IResult, Parser,
-    character::complete::{char, digit1},
-    combinator::{map, map_res, recognize},
+    bytes::complete::take_while_m_n, // 🌟 引入正确的高性能截取器
+    character::complete::char,
+    combinator::{map, map_res},      // 删除了无用的 recognize
     error::context,
-    multi::many_m_n,
     sequence::preceded,
 };
 
 pub fn ipv4(input: &str) -> IResult<&str, Ipv4Addr> {
     fn octal(input: &str) -> IResult<&str, u8> {
-        map_res(recognize(many_m_n(1, 3, digit1)), |s: &str| s.parse()).parse(input)
+        // 🌟 核心修复：精准且零开销地截取 1~3 位数字，无需任何多余的嵌套组合子
+        map_res(take_while_m_n(1, 3, |c: char| c.is_ascii_digit()), |s: &str| s.parse()).parse(input)
     }
 
     context(

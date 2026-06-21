@@ -5,7 +5,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use chrono::prelude::*;
-use smallvec::SmallVec;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::dns::*;
@@ -47,10 +46,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
 
         // debug!("{}", audit.to_string_without_date());
 
-        self.audit_sender
-            .send(audit)
-            .await
-            .unwrap_or_else(|err| warn!("send audit failed,{}", err));
+        // 🌟 核心修复 1：绝不阻塞主业务！如果管道满了直接丢弃日志，保全 DNS 解析性能。
+        if let Err(err) = self.audit_sender.try_send(audit) {
+            crate::log::trace!("Audit channel full or closed, dropping log: {}", err);
+        }
 
         res
     }
@@ -64,22 +63,55 @@ impl DnsAuditMiddleware {
         mode: Option<u32>,
     ) -> Self {
         let audit_file = path.as_ref().to_owned();
-
-        let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(100);
+        
+        // 🌟 扩大缓冲池，配合 try_send 吸收突发流量
+        let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(1024);
 
         tokio::spawn(async move {
             let mut audit_file = MappedFile::open(audit_file, audit_size, Some(audit_num), mode);
-
             const BUF_SIZE: usize = 10;
-            let mut buf: SmallVec<[DnsAuditRecord; BUF_SIZE]> = SmallVec::new();
+            // 改用 Vec 方便利用 std::mem::replace 进行内存腾挪
+            let mut buf: Vec<DnsAuditRecord> = Vec::with_capacity(BUF_SIZE);
+            
+            // 🌟 核心修复 2：加入定时器，每 3 秒强制刷新一次，拒绝“日志黑洞”
+            let mut flush_interval = tokio::time::interval(Duration::from_secs(3));
 
-            while let Some(audit) = audit_rx.recv().await {
-                buf.push(audit);
-                if buf.len() == BUF_SIZE {
-                    if let Err(err) = record_audit_to_file(&mut audit_file, buf.as_slice()) {
-                        warn!("log audit failed {}", err)
+            loop {
+                tokio::select! {
+                    _ = flush_interval.tick() => {
+                        if !buf.is_empty() {
+                            let records_to_write = std::mem::replace(&mut buf, Vec::with_capacity(BUF_SIZE));
+                            
+                            // 🌟 核心修复 1：把 block_in_place 替换为 spawn_blocking。
+                            // 相当于给写磁盘开辟了一条专属的“系统辅道”，绝不霸占 Tokio 的高速主干道！
+                            // 利用 Rust 的 Move 语义将文件句柄带进辅道，写完再带出来，完美绕过借用检查。
+                            audit_file = tokio::task::spawn_blocking(move || {
+                                if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write) {
+                                    warn!("log audit failed {}", err);
+                                }
+                                audit_file // 活干完了，把文件句柄交还给主循环
+                            }).await.unwrap();
+                        }
                     }
-                    buf.clear();
+                    msg = audit_rx.recv() => {
+                        match msg {
+                            Some(audit) => {
+                                buf.push(audit);
+                                if buf.len() >= BUF_SIZE {
+                                    let records_to_write = std::mem::replace(&mut buf, Vec::with_capacity(BUF_SIZE));
+                                    
+                                    // 🌟 核心修复 2：同上，转移至系统辅道执行磁盘 I/O
+                                    audit_file = tokio::task::spawn_blocking(move || {
+                                        if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write) {
+                                            warn!("log audit failed {}", err);
+                                        }
+                                        audit_file
+                                    }).await.unwrap();
+                                }
+                            }
+                            None => break, // 通道关闭，安全退出
+                        }
+                    }
                 }
             }
         });

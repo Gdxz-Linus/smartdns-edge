@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use crate::dns::{DnsContext, DnsError, DnsRequest, DnsResponse, RData, Record};
 use crate::infra::arp::lookup_client_mac_from_arp;
@@ -10,11 +11,105 @@ use crate::zone::ZoneProvider;
 
 const UNKNOWN_CLIENT_MAC: &str = "N/A";
 
-pub struct IdentityZoneProvider;
+pub struct IdentityZoneProvider {
+    // 🌟 一级防御：全局 LRU 缓存，容量 4096，生存期 60 秒
+    arp_cache: Arc<std::sync::Mutex<lru::LruCache<IpAddr, (String, std::time::Instant)>>>,
+    // 🌟 二级防御：基于 IP 的 Single-Flight 并发折叠状态表，彻底消除全局锁
+    inflight_arp: Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>>>,
+}
 
 impl IdentityZoneProvider {
     pub fn new() -> Self {
-        Self
+        Self {
+            arp_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(4096).unwrap(),
+            ))),
+            inflight_arp: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    // 🌟 核心防御引擎：Single-Flight 并发请求折叠
+    async fn get_client_mac(&self, client_ip: IpAddr) -> String {
+        let now = std::time::Instant::now();
+        
+        // 1. 无锁光速尝试读取缓存
+        {
+            let mut cache = self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((mac, expire_at)) = cache.get(&client_ip) {
+                if now < *expire_at {
+                    return mac.clone();
+                }
+            }
+        }
+
+        // 2. 缓存穿透，准备请求操作系统。
+        // 🚨 核心拦截：按 IP 分离的底层收费站！查询相同 IP 的兄弟发对讲机并挂起，查询不同 IP 的直接放行！
+        let rx = {
+            let mut map = self.inflight_arp.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(tx) = map.get(&client_ip) {
+                Some(tx.subscribe()) // 已经有人去查这个 IP 了，领个对讲机坐板凳等结果
+            } else {
+                let (tx, _) = tokio::sync::broadcast::channel(1);
+                map.insert(client_ip, tx);
+                None // 我是第一个到的，我负责去执行耗时的 OS 命令
+            }
+        };
+
+        if let Some(mut receiver) = rx {
+            // 坐在板凳上等待复印件，绝对不发起系统调用！
+            return match receiver.recv().await {
+                Ok(mac) => mac,
+                Err(_) => UNKNOWN_CLIENT_MAC.to_string(), // 意外兜底
+            };
+        }
+
+        // 🌟 3. 给天选之子发放生命周期智能工牌，防止中途异常 panic 导致对讲机永远不响应
+        struct InflightArpGuard {
+            inflight: Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>>>,
+            ip: IpAddr,
+            done: bool,
+        }
+        impl Drop for InflightArpGuard {
+            fn drop(&mut self) {
+                if !self.done {
+                    let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(tx) = map.remove(&self.ip) {
+                        let _ = tx.send(UNKNOWN_CLIENT_MAC.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut inflight_guard = InflightArpGuard {
+            inflight: self.inflight_arp.clone(),
+            ip: client_ip,
+            done: false,
+        };
+
+        // 4. 扔到 blocking 线程池，绝不挂起 Tokio 主线程！
+        let fetched_mac = tokio::task::spawn_blocking(move || {
+            lookup_client_mac_from_arp(client_ip)
+        })
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(|| UNKNOWN_CLIENT_MAC.to_string());
+
+        // 5. 拿到结果，先存入冰柜造福后续请求
+        {
+            let mut cache = self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.put(client_ip, (fetched_mac.clone(), std::time::Instant::now() + std::time::Duration::from_secs(60)));
+        }
+
+        // 6. 用对讲机广播复印件给所有坐在板凳上等待的兄弟，并销毁频道
+        {
+            let mut map = self.inflight_arp.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(tx) = map.remove(&client_ip) {
+                let _ = tx.send(fetched_mac.clone());
+            }
+        }
+        inflight_guard.done = true; // 宣告安全下班
+
+        fetched_mac
     }
 }
 
@@ -42,9 +137,6 @@ impl ZoneProvider for IdentityZoneProvider {
 
         let client_ip = normalize_client_ip(req.src().ip());
         let server_name = trim_fqdn_dot(ctx.cfg().server_name().to_string());
-        let client_mac = || {
-            lookup_client_mac_from_arp(client_ip).unwrap_or_else(|| UNKNOWN_CLIENT_MAC.to_string())
-        };
 
         let res = match canonical {
             CanonicalIdentityQuery::ServerName => txt_response(query, server_name.clone()),
@@ -52,14 +144,16 @@ impl ZoneProvider for IdentityZoneProvider {
                 txt_response(query, crate::BUILD_VERSION.to_string())
             }
             CanonicalIdentityQuery::ClientIp => txt_response(query, client_ip.to_string()),
-            CanonicalIdentityQuery::ClientMac => txt_response(query, client_mac()),
+            
+            // 🌟 安全接入：只有在真正需要查 MAC 的记录时，才去触发带有阵列防御的异步引擎！
+            CanonicalIdentityQuery::ClientMac => txt_response(query, self.get_client_mac(client_ip).await),
             CanonicalIdentityQuery::WhoAmIJson => txt_response(
                 query,
                 build_info_json_text(
                     &server_name,
                     crate::BUILD_VERSION,
                     &client_ip,
-                    &client_mac(),
+                    &self.get_client_mac(client_ip).await,
                 ),
             ),
             CanonicalIdentityQuery::WhoAmIRecords => txt_records_response(
@@ -68,7 +162,7 @@ impl ZoneProvider for IdentityZoneProvider {
                     &server_name,
                     crate::BUILD_VERSION,
                     &client_ip,
-                    &client_mac(),
+                    &self.get_client_mac(client_ip).await,
                 ),
             ),
             CanonicalIdentityQuery::ServerRecords => txt_records_response(
