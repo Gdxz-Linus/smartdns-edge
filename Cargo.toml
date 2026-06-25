@@ -1,7 +1,7 @@
 [package]
 name = "smartdns"
-version = "1.0.2"
-authors = ["YISH <mokeyish@hotmail.com>"]
+version = "1.0.0"
+authors = ["Gdxz <gdxz-Linus@outlook.com>"]
 edition = "2024"
 rust-version = "1.94.0"
 
@@ -12,8 +12,8 @@ description = """
 A cross platform local DNS server written in rust to obtain the fastest website IP for the best Internet experience, support DoT, DoQ, DoH, DoH3.
 """
 
-homepage = "https://github.com/mokeyish/smartdns-rs"
-repository = "https://github.com/mokeyish/smartdns-rs"
+homepage = "https://github.com/Gdxz-Linus/smartdns-rs"
+repository = "https://github.com/Gdxz-Linus/smartdns-rs"
 license = "GPL-3.0-only"
 readme = "README.md"
 
@@ -112,7 +112,6 @@ experimental-phf = [
 # enum_dispatch = { git = "https://gitlab.com/mokeyish/enum_dispatch.git", branch = "master"}
 # axum = { git = "https://github.com/tokio-rs/axum.git", rev = "8854e66" }
 # boomphf ={ path = "./target/patch/boomphf-0.6.0"}
-rustls-pki-types = { git = "https://github.com/mokeyish/pki-types.git", rev = "1.12.0.smartdns.1" }
 
 [dependencies]
 cfg-if = "1"
@@ -210,7 +209,7 @@ wildcard = "0.3.0"
 sysinfo = { version = "0.36", default-features = false, features = ["system"]}
 
 # proxy
-async-socks5 = { version = "0.6.0", git = "https://github.com/mokeyish/async-socks5.git", rev = "f78eec5" }
+async-socks5 = { version = "0.6.0", git = "https://github.com/Gdxz-Linus/async-socks5.git", rev = "f78eec5" }
 async-http-proxy = { version = "1.2.5", features = [
   "runtime-tokio",
   "basic-auth",
