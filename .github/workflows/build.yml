@@ -69,6 +69,9 @@ jobs:
         uses: ./.github/actions/setup
         with:
           rust_target: ${{ matrix.target }}
+          install_patch_crate: "false" 
+          install_wix: "false" 
+          install_cargo_edit: "false" 
 
       - name: Build
         run: just build --release --no-default-features --features ${{ inputs.features }} --target=${{ matrix.target }}
