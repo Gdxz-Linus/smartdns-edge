@@ -79,7 +79,9 @@ jobs:
           USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
 
       - name: Package
-        run: just target=${{ matrix.target }} pack
+        run: |
+          PKG_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          just target=${{ matrix.target }} version=$PKG_VERSION pack
         shell: bash
 
       - name: Compute release label
