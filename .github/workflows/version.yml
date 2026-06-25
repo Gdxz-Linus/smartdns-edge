@@ -34,8 +34,10 @@ jobs:
     - name: Bump version ${{ github.event.inputs.bump }}
       run: |
         just bump ${{ github.event.inputs.bump }}
-        # 自动读取修改后的新版本号（如 v1.0.1）并存入环境变量
-        NEW_VER="v$(just version)"
+        
+        # 🌟 极速解法：直接用原生命令行，秒读 Cargo.toml 里的真实版本号（过滤掉所有垃圾前缀）
+        NEW_VER="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
+        
         echo "version=$NEW_VER" >> "$GITHUB_ENV"
         echo "NEW_VERSION=$NEW_VER" >> "$GITHUB_ENV"
         
