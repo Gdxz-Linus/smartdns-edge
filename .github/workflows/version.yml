@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Bump version'
+        description: '选择升级版本类型 (Patch:修Bug, Minor:新功能, Major:大版本重构)'
         required: true
         type: choice
-        options: [major, minor, patch, rc, beta, alpha]
+        options: [patch, minor, major, rc, beta, alpha]
         default: 'patch'
 
 jobs:
@@ -20,17 +20,19 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal access token.
-        fetch-depth: 0 # otherwise, there would be errors pushing refs to the destination repository.
+        persist-credentials: false 
+        fetch-depth: 0 
 
     - name: Setup
       uses: ./.github/actions/setup
 
+    # 自动修改项目版本号
     - name: Bump version ${{ github.event.inputs.bump }}
       run: |
         just bump ${{ github.event.inputs.bump }}
         echo "version=v$(just version)" >> "$GITHUB_ENV"
         
+    # 自动提交修改并打上 Git Tag
     - name: Commit files
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -38,6 +40,7 @@ jobs:
         git commit -a -m "🔖 Bump version to $version"
         git tag -a $version -m ""
 
+    # 推送带 Tag 的代码到 GitHub
     - name: Push changes
       uses: ad-m/github-push-action@master
       with:
@@ -45,27 +48,10 @@ jobs:
         branch: ${{ github.ref }}
         tags: true
 
+  # 呼叫 build.yml 进行全平台交叉编译并发布到 Releases
   build:
     needs: [ "bump" ]
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.bump.outputs.version }}
       prerelease: ${{ !contains('major, minor, patch', inputs.bump) }}
-
-  publish:
-    needs: [ "bump", "build" ]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.version }}
-
-      - name: Setup
-        uses: ./.github/actions/setup
-
-      - name: Publish to crates.io
-        continue-on-error: true
-        run: just publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
