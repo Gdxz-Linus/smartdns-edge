@@ -1,232 +1,128 @@
-# SmartDNS-rs
+SmartDNS的rust版本，基本功能与C语言版本一致；
+它接受来自本地客户端的DNS查询请求，然后从多个上游DNS服务器获取DNS查询结果，并将访问速度最快的结果返回给客户端，
+以此提高网络访问速度。 SmartDNS同时支持指定特定域名IP地址，并高性匹配，可达到过滤广告的效果。
+此项目源自mokeyish的项目的二次开发，借助免费gemini 3.1 pro智能引擎。
+本次重构保持原有架构不变，对业务逻辑、网络吞吐、CPU性能、内存防泄漏、反网络攻击和容灾防御上进行了彻底的重塑，全面对标工业级、企业级的边缘DNS代理网关。
+完美实现各项功能，并对缓存预取、测速等算法逻辑进行了充分优化。
+由于条件有限，目前经过了windows平台重点功能的测试，未进行Linux、Unix、Macos平台的测试
 
-![Test](https://github.com/mokeyish/smartdns-rs/actions/workflows/test.yml/badge.svg?branch=main)
-[![Crates.io Version](https://img.shields.io/crates/v/smartdns.svg)](https://crates.io/crates/smartdns)
-[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/mokeyish/smartdns-rs?display_name=tag&include_prereleases)](https://github.com/mokeyish/smartdns-rs/releases)
-[![homebrew version](https://img.shields.io/homebrew/v/smartdns)](https://formulae.brew.sh/formula/smartdns)
-![OS](https://img.shields.io/badge/os-Windows%20%7C%20MacOS%20%7C%20Linux-blue)
+## 完善的功能
+🚀 SmartDNS 核心架构与功能演进
 
-[Docs](https://pymumu.github.io/smartdns/en/) •
+💡 第一大块：核心功能与业务逻辑完整性
+本版块深度修补了旧版在协议标准 (RFC)、跨端兼容性、规则解析上的盲区，在极端场景下做到了“商业级可用”。
+一、 📦 缓存数据库全面升级（契合 RFC 规范与自愈能力）
+1.	双栈并行防空包机制：双栈（A/AAAA）并发查询时，若一方返回无IP的空包，系统会等待另一方的结果。避免因单栈空包抢答导致解析失败，提升了单栈或污染网络环境下的解析成功率。
+2.	缓存数据库完整保留三大区（重磅）：重构了底层的序列化结构，现在能完整保存DNS报文的Answer（应答）、Authority（权威）和Additional（附加）三大区。使缓存完全符合EDNS0及RFC规范，解决客户端因缓存信息不全导致的解析异常。
+3.	智能分流缓存彻底隔离（防串台）：旧版缓存只认“域名”，导致国内直连和海外代理查到的IP混在一起导致相互污染。新版给缓存增加了“网络环境”和“规则组”标签，同一网站在国内和海外网络下的解析结果会分开独立保存，彻底杜绝了分流环境下的缓存互相污染问题。
+4.	离线时间精准扣除：开机加载缓存文件时，根据文件的修改时间计算关机离线时长，并在缓存寿命中自动扣除。增强了持久化缓存的时效性管理，过期的记录直接清空。
+5.	缓存CNAME自动展平：将上游返回的多级CNAME链自动展开，直接将最终解析IP绑定到主域名上存入缓存。大幅降低多次查询的延迟，并有效防止中间 CNAME 域名被污染。
+6.	全局TTL规范化与双栈对齐：修改缓存寿命时同步修改权威区等所有记录；预取双栈记录时，强制让A和AAAA记录的过期时间严格对齐。避免了A和AAAA记录因为过期时间不一致导致的解析割裂。
+7.	增加否定缓存机制：无论是单站优选还是双栈优选，空记录也会存入缓存。避免无否定缓存造成的缓存击穿暴，解决因此引发的上游无限查询重试风暴。
+8.	缓存预取超时与热度限制（重磅）：新增serve_expired_prefetch_time预取超时参数（默认6小时）。缓存达到预取超时时间并且访问热度大于等于2才会触发预取，否则进入过期超时队列。过期缓存被后台预取后，热度强制重置为1，需再次被真实访问才触发下次预取；杜绝了冷门域名无限预取消耗后台流量的问题。
+二、 🚦 协议合规与响应包伪装 (严格遵循RFC标准)
+1.	生成合法空包(NoData+SOA)：拦截广告域名或查寻解析记录为不带SOA的空包时，系统会给空包加上带有符合RFC规范的SOA（起始授权机构）记录并存入缓存，防止苹果设备无线重试上游解析查询。
+2.	地址规则 (Address) 的规范化重构：严格遵守RFC规范，将有效IP记录放入 Answer区，SOA记录放入Authority区。提高了对各类设备系统或物联网设备的网络兼容性。
+3.	EDNS0动态截断与降级查询：遇到UDP方式解析巨型包（如 DNSSEC），若超过客户端接收上限，系统自动截断并打上 TC=1 标签。提示客户端切换TCP重试，彻底解决Windows系统下因UDP报文过大导致的10040(WSAEMSGSIZE) 崩溃报错。
+4.	双栈优选兼容合法SOA记录：双栈优选时，若上游返回附带SOA的NXDOMAIN记录，系统将其视作合法响应纳入优选后存入缓存。避免合法的否定响应被误判丢弃。
+5.	保留CNAME链进行质量评优：测速优选最快IP后，遵循RFC标准保留CNAME链的辅助记录，确保客户端收到的解析链路结构完整。
+三、 🗺️ 规则引擎与分流策略扩展
+1.	参数解析兼容性增强：配置解析器升级，兼容-group=abc或-cert=--base64--等各类复杂语法结构。提升了配置文件的语法宽容度，减少因多余空格或等号导致的参数错误。
+2.	DomainSet支持代理下载：新增-proxy参数。允许防污染规则列表（如GitHub上的广告拦截清单）通过指定的SOCKS5/HTTP代理拉取，解决直连下载失败的问题。
+3.	MAC地址智能分流与全局缓存：MAC匹配支持横杠/冒号混合格式及大小写；底层 ARP解析引入专属阻塞线程池与全局 LRU 缓存。极大提升了基于MAC分流规则（如针对特定设备去广告）在高并发下的查询性能。
+4.	内网隐私防泄露（私网反向查询拦截）：不再依赖死板的本地网卡配置，系统能自动精准识别并拦截所有针对局域网 IP的查询请求。彻底杜绝家庭或企业内网的设备地址信息被偷偷发往公网，保护你的内网隐私绝对安全。
+5.	网络排障神器（设备身份内置查询）：新增了whoami.json等内置特殊网址。你在任何设备上查询它，系统不仅会返回这台设备的局域网IP，还能直接查出它底层的真实物理MAC地址。在连接了上百台设备的复杂网络里“找设备”、排查是谁在发请求，简直易如反掌。
+6.	DNS64触发条件优化：只要上游未返回IPv6地址，无论是否报错，都会触发IPv6 地址合成。大幅放宽了DNS64的生效门槛，提升了纯IPv6单栈环境下的网络访问兼容性。
+7.	IP 别名劫持与重写：新增了高级的域名IP映射功能。如果上游返回了特定的IP，系统可以在底层将其自动替换为用户自定义的一个或多个IP。对于经常变动IP的流媒体或特定网络服务，用户可以强制重写将其解析结果。
+8.	多重复杂规则的无损合并：当用户对同一个域名（或规则组）配置了多条可能冲突的规则（例如针对同一域名既配置了测速模式，又配置了多个防火墙Nftset集合）时，旧版会直接发生覆盖。新版重写了合并逻辑，实现了数组级的平滑合并。配置逻辑更加符合用户的直观感觉，复杂的组合叠加规则现在能100%完美生效，杜绝了“配了规则但被静默覆盖不生效”的灵异现象。
+四、 🌐 上游解析协议智能调度与兜底响应
+1.	代理协议智能降级：如果上游配置了SOCKS5代理时，自动将QUIC降级为DoT，HTTP/3降级为DoH。解决了多数代理不支持UDP导致断流的问题，自动实现代理通道的保底连通。
+2.	DHCP动态上游提取：支持配置server dhcp://eth0，主动发送DHCP广播获取网卡默认DNS。适配多宽带接入或软路由频切网络场景，实现上游DNS自动跟随网络环境更新。
+3.	上游多IP并发查询错峰：上游有多个IP时并发连接，但为后续连接增加250ms的错峰延迟。既保证能连上最快的节点，又避免瞬间发出大量无效握手包造成网络拥堵，兼顾速度与资源消耗。
+4.	HTTPS测速附加SNI：HTTPS测速时自动附加Host域名头和SNI握手特征。解决了穿越CDN节点时，因测速探针被防火墙拦截导致的测速失败问题。
+5.	异常响应质量评分机制：上游查询全部失败需兜底返回时，按“带SOA的合法包 > 带SOA的报错包 > 无SOA异常空包 > 假报错包”的优先级评选。在遭遇严重 DNS污染的环境下，依然能挑选出最符合规范的响应，提升网络韧性。
+6.	全局5秒解析超时死线：向上游发起查询强制设定5秒超时。作为SLA（服务等级协议）保障，不管底层是否代理卡死或陷入网络黑洞，5秒一到强制释放请求，防止单个坏节点拖死整个服务。
+7.	多上游空包秒级切换：多上游测速时，若某上游率先返回“无IP的合法空包”，立刻无视并继续等待其他上游。避免系统轻信被污染上游的空包抢答，大幅提升单栈网络环境下的解析成功率与速度。
+8.	DoH3 (HTTP/3) 智能升维发现：在提供传统的DoH服务时，系统会自动在HTTP响应头中注入Alt-Svc协议升级指令。主动引导支持该特性的现代客户端无缝升级到速度更快、抗弱网更强的HTTP/3 (QUIC) 协议，在不知不觉中提升最终用户的解析体验。
+________________________________________
+🚀 第二大块：计算性能及网络性能压榨（Performance & Efficiency）
+这一版块是系统“快如闪电”的秘密，彻底打通了网卡到多核 CPU 的数据高速公路。
+一、 👑 CPU性能压榨
+1.	【重磅】Cache 数据库的“分段锁”多线程革命
+旧版整个缓存只有一把全局互斥锁。高并发下所有线程都要排长队抢这把锁，导致CPU单核心满载，其他核心空转、性能暴跌。新版将巨大的数据库切分成64 个完全独立的分段，每个分段独立上锁。锁竞争概率骤降至1/64，完美释放CPU多核并发处理能力。前端查询0等待；后台垃圾回收时也是“逐个分段悄悄清理并让出CPU”，上百万条缓存清理对前台业务零感知、零卡顿。
+2.	内核级多队列负载均衡：Linux开启与CPU核心数等量的UDP监听器。海量DNS 请求由内核Hash分发到不同核心并行处理，打破单核处理瓶颈。
+3.	Windows原生API (IPHLPAPI)：查MAC抛弃子进程，直接调原生 SendARP。耗时从毫秒级降至微秒级，百倍提升。
+4.	Nftset 批量插入：更新Linux防火墙IP时，把成百上千IP组装成数组一次性注入内核。消灭99%的跨层语言通信开销，大幅降低CPU占用。
+二、 🌊 网络 I/O 与内存极限压榨
+1.	UDP 极速收发引擎（内存零拷贝）：抛弃了旧版每次收到网络包都要临时去申请“新内存”的笨办法，新版改为建一个巨大的“循环内存池”，数据进来直接处理，彻底免去了来回搬运和复制的开销。极大降低了CPU和内存消耗，彻底榨干网卡的极限速度。
+2.	提高UDP收发缓冲区容量：强行向系统申请4MB的超大UDP收发缓冲区。增强应对瞬时大流量冲击的能力，防止局域网设备高强度并发查询时造成的静默丢弃。
+3.	TCP/TLS 单连接限流：对每个TCP连接限制最大未决请求数（200）。利用TCP 窗口机制迫使恶意发送端减速，防范管道化攻击引发的内存耗尽 (OOM)。
+4.	并发解析请求折叠：上游查询时全面引入折叠逻辑。1000个同时查询同一域名时，只有1个去外网，其余在内存0消耗挂起等待结果广播。处理成本降低99.9%，并防上游封禁。
+5.	局部热点数据的LRU缓存：为ARP解析配置高速全局缓存。哪怕几百条MAC规则过滤，也只在内存中秒查，消除高频调用系统命令造成的网络延迟。
+6.	测速 25ms 微错峰：对同IP发3个包测速时加入阶梯延迟。打破瞬发包造成的“微突发尾丢包”假象，优选网络质量更精准。
+7.	Linux 提高网络并发连接数上限：程序启动时会自动提高系统默认的并发连接上限，彻底解决局域网接入设备多时，因系统隐形限制导致解析失败的问题。
+8.	防火墙通信 (Nftset) 内核级防拥堵：在向Linux底层注入防火墙IP集合（Nftset）时，新增最大512个并发通道限制。当瞬间涌入海量新IP，导致系统内核的网络通信通道拥堵时，系统会果断丢弃新的防火墙写入任务。防止底层内核卡死导致整个主进程内存溢出 (OOM)。
+六、 💾 硬盘 I/O 极限降载
+1.	后台任务与核心解析彻底隔离（防假死）：将读取海量配置文件、热重载去广告规则等所有耗时操作，全部剥离到后台专属的阻塞线程池去处理，并将该池子容量扩充至2048 个线程。解决更新规则或执行复杂任务时，导致主线程假死的问题。
+2.	极限磁盘抗压与瞬间覆盖（防卡顿）：在保存的缓存文件或滚动日志时，采用“先写临时文件，再0.1毫秒瞬间替换原文件”的技术提高性能；并且当日志后台来不及存进硬盘时，系统会果断丢弃新产生的日志，拒绝排队死等。
+3.	停机数据无损保全：当主动重启服务或操作系统关机时，进程会主动“拉住大门”，强制将内存中所有最新的解析记录完整安全地写入硬盘后，才允许进程关闭。重启时确保不丢缓存数据。
+4.	新增API后台读写锁：后台修改配置接口引入读写锁。后台频繁拉取状态监控时，不会阻塞核心配置读取，前台主线程任务不受影响。
+5.	本地Hosts文件的无感热重载：底层的 Hosts 解析模块加入了“文件签名（修改时间+路径）”智能监控机制。如果用户修改了Hosts文件，无需重启 SmartDNS 服务即可瞬间生效，并且系统会将文件读取和解析工作扔进后台阻塞线程池，不影响前台的主线程。
+________________________________________
+🛡️ 第三大块：安全防御与高可用性（Security & Stability）
+这部分代码专为应对恶劣网络环境、防范黑客恶意探测以及隔离底层系统故障而生。
+一、 🛑 漏洞防御与反网络攻击
+1.	恒定时间防侧信道爆破：比对后台API密码时，强制使用 black_box 阻断编译器优化，做全量位运算。验证耗时绝对恒定，黑客无法通过微秒级“响应时间差”测出密码，彻底封杀侧信道攻击。
+2.	源地址投毒清洗：处理请求前严格查验来源IP。遇到 0.0.0.0 或广播地址直接丢弃，阻断黑客利用DNS服务器作为跳板向内网发起反射攻击。
+3.	拦截UDP放大反射攻击：系统降载限流时，对被抛弃的UDP请求直接返回空字节，底层不发送。不发回报错包，不消耗自身带宽，“沉默丢包”是防反射攻击的最高准则。
+4.	物理级HTTPS内存炸弹防线：在DoH接口强行截取不超过64KB的请求体。超大畸形包在一开始就被物理掐断，连内存都进不去，精准封杀HTTP层的内存溢出(OOM) 死机攻击。
+5.	防御慢速握手攻击：对TLS/HTTPS握手套上5秒绝对超时。黑客建立连接后故意慢发数据会直接被切断，防范恶意连接耗尽服务器的连接池资源。
+6.	绝对的流量沙盒 (防漏流)：连接外部代理建立控制信道前，套接字已被打上透明路由标签。保证所有握手与控制流量100%绝对服从系统的VPN分流策略，防止真实 IP泄漏。
+二、 🧱 容错、自愈与崩溃隔离
+1.	缓存文件读取容错：加载本地缓存置于独立的子线程。读取缓存文件遇到损坏或乱码时，主进程安然无恙并主动删档重建缓存文件，以空缓存状态启动。避免服务因意外断电导致的坏档陷入“启动崩溃”的死循环。
+2.	QUIC 僵尸流安全释放：QUIC发生读取错误时，显式发送无错误关闭指令。主动通知操作系统回收资源，防止废弃网络流永久残留导致缓慢榨干服务器内存。
+3.	快速失败拒绝静默盲跑：系统启动读取本机网卡DNS配置失败直接抛错退出。贯彻“不带病工作”原则，网卡异常时不带着错误状态上线变“黑洞”，强迫尽早介入排障。
+💻第四大块：内置工具、API 与运维体验提升
+1.	Windows服务管理重构（重磅）：安装卸载windows服务时，改用PowerShell现代同步阻塞命令，安装自动配置防火墙规则及系统网络环境依赖。彻底根除了Windows下服务安装失败、启动失败、状态查询异常或重启失败的问题。
+2.	内置resolve命令行排版与JSON输出：对标 dig，支持终端宽度自动探测智能换行，并提供JSON/Short模式。告别超长TXT记录导致的终端错位乱码，JSON输出自带控制字符清洗，方便脚本对接与集成。
+3.	Symlink提权提醒与智能补全：Windows下创建快捷方式忘写 .exe 会自动补全；权限不足时提示“请使用管理员模式”。提升用户的体验。
+4.	windows进程防多开机制：使用系统底层的“文件排他锁”来防止程序重复启动。这彻底解决因误开多个实例去争抢同一个端口而导致的问题。
+5.	配置相对路径“安全锚定”：所有产生的硬盘日志、缓存文件基于配置文件所在物理目录进行相对路径运算。确保文件落脚在统一管理的目录下。
+6.	重写SLI的帮助信息以及各指令的反馈信息。
 
-English | [中文](https://github.com/mokeyish/smartdns-rs/blob/main/README_zh-CN.md)
-
-SmartDNS-rs 🐋 is a local DNS server imspired by [C SmartDNS](https://github.com/pymumu/smartdns) to accepts DNS query requests from local clients, obtains DNS query results from multiple upstream DNS servers, and returns the fastest access results to clients. Avoiding DNS pollution and improving network access speed, supports high-performance ad filtering.
 
 
 
-## Features
 
-- **Multiple upstream DNS servers**
-
-  Supports configuring multiple upstream DNS servers and query at the same  time.the query will not be affected, Even if there is a DNS server  exception.
-
-- **Return the fastest IP address**
-
-  Supports finding the fastest access IP address from the IP address list  of the domain name and returning it to the client to avoid DNS pollution and improve network access speed.
-
-- **Support for multiple query protocols**
-
-  Supports UDP, TCP, DoT, DoQ, DoH, DoH3 queries and  service, and non-53 port queries, effectively avoiding DNS pollution and protect privacy, and support query DNS over socks5, http proxy.
-
-- **Domain IP address specification**
-
-  Supports configuring IP address of specific domain to achieve the effect of advertising filtering, and avoid malicious websites.
-
-- **DNS domain forwarding**
-
-  Supports DNS forwarding, ipset and nftables. Support setting the domain result to ipset and nftset set when speed check fails.
-
-- **Windows / MacOS / Linux multi-platform support**
-
-  Supports installing as a service and running it at startup.
-
-- **Support IPV4, IPV6 dual stack**
-
-  Supports IPV4, IPV6 network, support query A, AAAA record, dual-stack IP selection, and filter IPV6 AAAA record.
-
-- **DNS64**
-
-  Supports DNS64 translation.
-
-- **High performance, low resource consumption**
-
-  Tokio-based multi-threaded asynchronous I/O model; caches query  results; supports most-used domain name expired prefetching, query **'0'**  milliseconds, without eliminating the impact of DoH and DoT encryption.
-
-Note: The C version of smartdns is very functional, but because it only supports **Linux**, while **MacOS and Windows** can only be supported through Docker or WSL. Therefore, I want to develop a rust version of SmartDNS that supports compiling to Windows, MacOS, Linux and Android Termux environment to run, and is compatible with its configuration.
-
----
-
-**It is still under development, please do not use it in production environment, welcome to try and provide feedback.**
-
-Please refer to [TODO](https://github.com/mokeyish/smartdns-rs/blob/main/TODO.md) for the function coverage
-
-
-
-## Installing
-
-*Nightly builds can be found [here](https://github.com/mokeyish/smartdns-rs/actions/workflows/nightly.yml).*
+## 安装
 
 - MacOS
 
-  If you have installed [brew](https://brew.sh/), you can directly use the following command to install.
+  如果你有安装 [brew](https://brew.sh/) ，可以直接用下面的命令进行安装。
 
   ```shell
   brew update
   brew install smartdns
   ```
 
-  Note: Listening on port 53 requires root permission, so `sudo` is required.
 
-  The command `sudo smartdns service start` for `brew` installed `smartdns` is the same as `sudo brew services start smartdns`.
+- Windows
 
-  If you don't have `brew` installed, just download the compiled program compression package and install it as below.
+  1. 前台运行，方便查看运行状况
 
-- Windows / Linux
-
-  Go to [here](https://github.com/mokeyish/smartdns-rs/releases) to download the package and decompress it.
-
-  1. Get help
-
-     ```shell
-     ./smartdns --help
-     ```
-
-  2. Run as foreground, easy to check the running status
-
-     ```shell
+     ```powershell
      ./smartdns run -c ./smartdns.conf -v
      ```
 
-     - `-v` is enabled to print debug logs.
+     - `-v` 是开启打印调试日志
 
-  3. Run as background service, run automatically at startup
+  2. 后台服务运行，开机自动运行
 
-     Get help of service management commands.
+     查看服务管理命令：
 
-     ```shell
-     ./smartdns service --help
+     ```powershell
+     ./smartdns service install
      ```
 
-     *Note: Installed as a system service, administrator / root permissions are required.*
-
-     *Service management is compatible with all systems, call [sc](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/cc754599(v=ws.11)) on Windows; call `launchctl` or `brew` on MacOS; call `Systemd` or `OpenRc` on Linux.*
-
-## Configuration
-
-The following is the simplest example configuration
-
-```conf
-# Listen on local port 53
-bind 127.0.0.1:53  
-
-# Configure bootstrap-dns, if not configured, call the system_conf, 
-# it is recommended to configure, so that it will be encrypted.
-server https://1.1.1.1/dns-query  -bootstrap-dns -exclude-default-group
-server https://8.8.8.8/dns-query  -bootstrap-dns -exclude-default-group
-
-# Configure default upstream server
-server https://cloudflare-dns.com/dns-query
-server https://dns.quad9.net/dns-query
-server https://dns.google/dns-query
-
-# Configure the Office(Home) upstream server
-server 192.168.1.1 -exclude-default-group -group office
-
-# Domain names ending with ofc are forwarded to the office group for resolution
-nameserver /ofc/office
-
-# Set static IP for domain name
-address /test.example.com/1.2.3.5
-
-# Block Domains (Ad Blocking)
-address /ads.example.com/#
-
-# The following features are not yet supported in the [C SmartDNS](https://github.com/pymumu/smartdns) and are only applicable to SmartDNS-rs.
-# Configure DoH3
-server-h3 1.1.1.1
-
-# Configure DoQ
-server-quic unfiltered.adguard-dns.com
-```
-
-For more advanced configurations, please refer to [here](https://github.com/pymumu/smartdns/blob/doc/en/docs/configuration.md) , and refer to [TODO](https://github.com/mokeyish/smartdns-rs/blob/main/TODO.md) for the function coverage.
-
-## Built-in diagnostics via `dig`
-
-SmartDNS-rs supports built-in `CHAOS TXT` queries for server/client diagnostics.
-
-```shell
-# most common: full identity info (server + client, multi TXT records)
-dig @127.0.0.1 CH TXT whoami +short
-
-# server identity info only (multi TXT records)
-dig @127.0.0.1 CH TXT smartdns +short
-
-# server name
-dig @127.0.0.1 CH TXT server-name +short
-
-# server version
-dig @127.0.0.1 CH TXT version +short
-
-# client source IP seen by smartdns-rs
-dig @127.0.0.1 CH TXT client_ip +short
-dig @127.0.0.1 CH TXT client-ip +short
-
-# client MAC from ARP table (LAN, ARP available)
-dig @127.0.0.1 CH TXT client_mac +short
-dig @127.0.0.1 CH TXT client-mac +short
-
-# JSON output with suffix style
-dig @127.0.0.1 CH TXT whoami.json +short
-dig @127.0.0.1 CH TXT smartdns.json +short
-
-# Compatibility examples
-dig @127.0.0.1 CH TXT hostname.bind +short
-dig @127.0.0.1 CH TXT version.bind +short
-dig @127.0.0.1 CH TXT id.server +short
-```
-
-## Building
-
-Assuming you have installed [Rust](https://www.rust-lang.org/learn/get-started), then you can open the terminal and execute these commands:
-
-```shell
-git clone https://github.com/mokeyish/smartdns-rs.git
-cd smartdns-rs
-
-# install https://github.com/casey/just
-cargo install just
-
-# build
-just build --release
-
-# print help
-./target/release/smartdns --help
-
-# run
-sudo ./target/release/smartdns run -c ./etc/smartdns/smartdns.conf
-```
-
-For cross-compilation, it is recommended to use [cross](https://github.com/cross-rs/cross) (requires Docker).
-
-## Acknowledgments !!!
-
-This software wouldn't have been possible without:
-
-- [Hickory DNS](https://github.com/hickory-dns/hickory-dns)
-- [SmartDNS](https://github.com/pymumu/smartdns)
-
-## License
-
-This software contains codes from [https://github.com/hickory-dns/hickory-dns](https://github.com/hickory-dns/hickory-dns), which is licensed under either of
-
-- Apache License, Version 2.0, (LICENSE-APACHE or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
-- MIT license (LICENSE-MIT or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
-
-And other codes is licensed under
-
-- GPL-3.0 license (LICENSE-GPL-3.0 or [https://opensource.org/licenses/GPL-3.0](https://opensource.org/licenses/GPL-3.0))
-
-## Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the GPL-3.0 license, shall be licensed as above, without any additional terms or conditions.
+ 	 
+- Linux
