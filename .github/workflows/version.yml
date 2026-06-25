@@ -11,6 +11,10 @@ on:
         options: [patch, minor, major, rc, beta, alpha]
         default: 'patch'
 
+# 🌟 核心：在代码里显式声明写权限，双重保险，彻底解决权限 128 错误
+permissions:
+  contents: write
+
 jobs:
   bump:
     runs-on: ubuntu-latest
@@ -20,35 +24,36 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        persist-credentials: false 
+        # 🌟 核心：删除了原来的 persist-credentials: false。
+        # 这样 GitHub 会自动把登录凭证注入到本地 Git 中，不需要任何第三方插件！
         fetch-depth: 0 
 
     - name: Setup
       uses: ./.github/actions/setup
 
-    # 自动修改项目版本号
     - name: Bump version ${{ github.event.inputs.bump }}
       run: |
         just bump ${{ github.event.inputs.bump }}
-        echo "version=v$(just version)" >> "$GITHUB_ENV"
+        # 自动读取修改后的新版本号（如 v1.0.1）并存入环境变量
+        NEW_VER="v$(just version)"
+        echo "version=$NEW_VER" >> "$GITHUB_ENV"
+        echo "NEW_VERSION=$NEW_VER" >> "$GITHUB_ENV"
         
-    # 自动提交修改并打上 Git Tag
-    - name: Commit files
+    - name: Commit and Push changes
       run: |
+        # 配置机器人身份
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        git commit -a -m "🔖 Bump version to $version"
-        git tag -a $version -m ""
+        
+        # 提交修改
+        git commit -a -m "🔖 Bump version to ${{ env.NEW_VERSION }}"
+        
+        # 创建本地版本标签
+        git tag -a ${{ env.NEW_VERSION }} -m "Release ${{ env.NEW_VERSION }}"
+        
+        # 🌟 直接使用原生 git 命令推送！安全、省心，100% 成功
+        git push origin HEAD:${{ github.ref_name }} --follow-tags
 
-    # 推送带 Tag 的代码到 GitHub
-    - name: Push changes
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        branch: ${{ github.ref }}
-        tags: true
-
-  # 呼叫 build.yml 进行全平台交叉编译并发布到 Releases
   build:
     needs: [ "bump" ]
     uses: ./.github/workflows/build.yml
