@@ -22,7 +22,7 @@ jobs:
       version: ${{env.version}}
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         # 🌟 核心：删除了原来的 persist-credentials: false。
         # 这样 GitHub 会自动把登录凭证注入到本地 Git 中，不需要任何第三方插件！
