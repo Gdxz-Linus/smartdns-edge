@@ -24,7 +24,7 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
     runs-on: ${{matrix.os}}
     steps:
@@ -58,7 +58,7 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
     runs-on: ubuntu-latest
     steps:
@@ -77,8 +77,6 @@ jobs:
           components: rustfmt, clippy
           target: ${{ matrix.target }}
 
-
-
       - name: Clippy & Rustfmt
         run: just cleanliness
         env:
@@ -93,61 +91,21 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-          - target: x86_64-pc-windows-gnu
-            os: windows-latest
-            archive: zip
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             archive: zip
-          - target: i686-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-          # - target: i686-pc-windows-gnu  # error: linker `i686-w64-mingw32-gcc` not found
-          #   os: windows-latest
-          #   archive: zip
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: zip
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: zip
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz tar.xz tar.zst
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            archive: tar.gz tar.xz tar.zst
-          # - target: arch64-unknown-linux-musl
-          #   archive: tar.gz tar.xz tar.zst
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            archive: tar.gz tar.xz tar.zst
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz tar.xz tar.zst
-          - target: arm-unknown-linux-musleabi
+          - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz tar.xz tar.zst
-          - target: arm-unknown-linux-musleabihf
-            os: ubuntu-latest
-            archive: tar.gz tar.xz tar.zst
-          # - target: mips-unknown-linux-musl
-          #   archive: tar.gz tar.xz tar.zst
-          # - target: mips-unknown-linux-musl
-          #   archive: tar.gz tar.xz tar.zst
-          # - target: mips64-unknown-linux-muslabi64
-          #   archive: tar.gz tar.xz tar.zst
-          - target: aarch64-linux-android
-            os: ubuntu-latest
-            archive: tar.gz tar.xz tar.zst
-          # - target: x86_64-unknown-freebsd
-          #   os: ubuntu-latest
-          #   archive: tar.gz tar.xz tar.zst
-          # - target: x86_64-unknown-netbsd
-          #   os: ubuntu-latest
-          #   archive: tar.gz tar.xz tar.zst
-          # - target: wasm32-unknown-emscripten
-          #   archive: tar.gz tar.xz tar.zst
     runs-on: ${{matrix.os}}
     env:
       RUSTFLAGS: -D warnings
@@ -164,5 +122,3 @@ jobs:
         run: just check --target ${{ matrix.target }}
         env:
           USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
-
-
