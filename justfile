@@ -44,7 +44,8 @@ build *args: patch
     echo "{{cargo}} build --features "future-diagnostic" {{args}}"
     RUSTFLAGS="--cfg tokio_unstable" {{cargo}} build --features "future-diagnostic" {{args}}
   else
-    echo "{{cargo}} build --features disable_icmp_ping {{args}}"
+    echo "{{cargo}} build {{args}}"
+    {{cargo}} build {{args}}  
   fi
 
 # Publish to Crates.io
