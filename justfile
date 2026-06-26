@@ -60,8 +60,7 @@ package: patch package-clean package-prepare && zip package-list
 
 
 # Package the binary for distribution
-[windows]
-# 🌟 彻底去除了依赖链里的 wix
+
 package: patch package-clean package-prepare && zip package-list
   cp target/{{target}}/release/{{bin_name}}  {{dist_dir}}/{{dist_name}}
 
