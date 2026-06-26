@@ -41,9 +41,28 @@ pub fn swagger_cdn<S: Clone + Send + Sync + 'static>(
     use std::sync::Arc;
     use utoipa::openapi::OpenApi;
 
-    // https://unpkg.com/swagger-ui-dist/index.html
     let cdn = cdn.unwrap_or("https://unpkg.com/swagger-ui-dist");
-    let html = include_str!("../../swagger-ui.html")
+    // 🌟 核心修复：直接将 HTML 模板硬编码进程序，保留原有的变量替换逻辑
+    let html = r#"<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>{title}</title>
+      <link rel="stylesheet" href="{cdn}/swagger-ui.css" />
+    </head>
+    <body>
+      <div id="swagger-ui"></div>
+      <script src="{cdn}/swagger-ui-bundle.js"></script>
+      <script>
+        window.onload = () => {
+          window.ui = SwaggerUIBundle({
+            url: '{openapi}',
+            dom_id: '#swagger-ui',
+          });
+        };
+      </script>
+    </body>
+    </html>"#
         .replace("{cdn}", cdn)
         .replace("{openapi}", openapi_url)
         .replace("{title}", crate::NAME);
