@@ -135,32 +135,50 @@ ________________________________________
 - **Windows 容器环境**：完美支持在 Windows 的 WSL2 (Windows Subsystem for Linux) Docker Desktop 中运行。
 
 ## 安装
+## 📦 安装与运行
 
-- MacOS
+本程序为**纯净绿色软件**，无任何外部系统依赖。请前往 [Releases 页面](https://github.com/Gdxz-Linus/smartdns-rs/releases) 下载对应您系统架构的最新压缩包。
 
-  如果你有安装 [brew](https://brew.sh/) ，可以直接用下面的命令进行安装。
+### 🪟 Windows (企业服务器 & 个人桌面)
 
-  ```shell
-  brew update
-  brew install smartdns
-  ```
+将下载的 `.zip` 文件解压到一个固定目录（如 `D:\SmartDNS`）。
 
-- Windows
+**方式一：前台测试运行（适合排障）**
+打开终端（CMD 或 PowerShell），进入解压目录执行：
+```powershell
+.\smartdns.exe run -c .\smartdns.conf -v
+(注：-v 表示开启调试日志输出，方便直观查看解析过程)
 
-  1. 前台运行，方便查看运行状况
+**方式二：后台服务运行（推荐，开机自启）**
+请以管理员身份运行终端，执行以下命令，系统将全自动接管进程并配置好防火墙规则：
+Powershell
+# 1. 安装服务
+.\smartdns.exe service install
 
-     ```powershell
-     ./smartdns run -c ./smartdns.conf -v
-     ```
+# 2. 启动服务
+.\smartdns.exe service start
 
-     - `-v` 是开启打印调试日志
+# 3. 随时查看运行状态 (带 🟢/🔴 指示灯)
+.\smartdns.exe service status
+(如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
 
-  2. 后台服务运行，开机自动运行
+###🐧 Linux & 🍎 macOS (通用绿色运行)
+将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
+打开终端，进入该目录并赋予执行权限，即可直接启动：
+Bash
+chmod +x ./smartdns
+sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
+(注：Unix 系统绑定 53 等特权端口需要 sudo root 权限)
 
-     查看服务管理命令：
-
-     ```powershell
-     ./smartdns service install
-     ```
- 	 
-- Linux
+###🐳 Docker / NAS (容器化一键部署)
+我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology)、软路由 (OpenWrt) 等支持 Docker 的环境中。
+使用 CLI 快速启动：
+code
+Bash
+docker run -d \
+  --name smartdns \
+  --restart always \
+  --network host \
+  -v /你的本地配置文件路径/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns:v1.0.1
+(注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
