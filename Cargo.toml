@@ -1,6 +1,6 @@
 [package]
 name = "smartdns"
-version = "1.0.3"
+version = "1.0.0"
 authors = ["Gdxz <gdxz-Linus@outlook.com>"]
 edition = "2024"
 rust-version = "1.94.0"
