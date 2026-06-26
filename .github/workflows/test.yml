@@ -2,12 +2,9 @@
 
 name: Test
 
+# 🌟 核心修改 1：砍掉了默认的 push 触发，只保留手动触发和合并请求触发，让你的 Actions 页面保持绝对清爽！
 on:
-  push:
-    branches:
-      - main
-      - release/**
-      - ci*
+  workflow_dispatch: # 允许你随时在网页上点按钮手动体检
   pull_request:
     branches:
       - main
@@ -29,12 +26,16 @@ jobs:
     runs-on: ${{matrix.os}}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup
         uses: ./.github/actions/setup
+        # 🌟 核心修改 2：在这里同样关闭无用的组件，防止 Windows 编译机网络报错卡死！
         with:
           rust_target: ${{ matrix.target }}
+          install_patch_crate: "false"
+          install_wix: "false"
+          install_cargo_edit: "false"
 
       - name: Test
         run: just test --features=disable_icmp_ping
@@ -63,12 +64,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup
         uses: ./.github/actions/setup
+        # 🌟 核心修改 3：关闭无用组件，彻底对齐
         with:
           rust_target: ${{ matrix.target }}
+          install_patch_crate: "false"
+          install_wix: "false"
+          install_cargo_edit: "false"
 
       - name: Install Rust Toolchain Components
         uses: dtolnay/rust-toolchain@stable
@@ -111,12 +116,16 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup
         uses: ./.github/actions/setup
+        # 🌟 核心修改 4：关闭无用组件，彻底对齐
         with:
           rust_target: ${{ matrix.target }}
+          install_patch_crate: "false"
+          install_wix: "false"
+          install_cargo_edit: "false"
 
       - name: Check
         run: just check --target ${{ matrix.target }}
