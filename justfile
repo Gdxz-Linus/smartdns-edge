@@ -16,7 +16,8 @@ version := `grep -m1 '^version' Cargo.toml | cut -d '"' -f2`
 diagnostic := ""
 bin_name := if os_family() == "windows" { name + ".exe" } else { name }
 dist_dir := "dist"
-dist_name := name + "-" + target
+dist_target := `echo "{{target}}" | sed 's/unknown/generic/'`
+dist_name := name + "-" + dist_target
 dist_zip := if os() == "windows" { dist_name + "-v" + version + ".zip" } else if os() == "macos" { dist_name + "-v" + version + ".zip" } else { dist_name + "-v" + version + ".tar.gz" }
 
 
