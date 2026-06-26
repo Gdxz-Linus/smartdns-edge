@@ -134,23 +134,24 @@ ________________________________________
 - **高级网络环境**：支持在 PVE/ESXi 下的虚拟机中运行，支持部署于 Kubernetes (K8s) 企业级编排集群。
 - **Windows 容器环境**：完美支持在 Windows 的 WSL2 (Windows Subsystem for Linux) Docker Desktop 中运行。
 
-## 安装
 ## 📦 安装与运行
 
-本程序为**纯净绿色软件**，无任何外部系统依赖。请前往 [Releases 页面](https://github.com/Gdxz-Linus/smartdns-rs/releases) 下载对应您系统架构的最新压缩包。
+本程序为**纯净绿色软件**，无任何外部系统依赖。请前往 [Releases 页面]下载对应您系统架构的最新压缩包。
 
 ### 🪟 Windows (企业服务器 & 个人桌面)
 
-将下载的 `.zip` 文件解压到一个固定目录（如 `D:\SmartDNS`）。
+将下载的 `.zip` 文件解压到一个固定目录（如`D:\SmartDNS`）。
 
-**方式一：前台测试运行（适合排障）**
+**方式一：前台测试运行（适合测试排障）**
 打开终端（CMD 或 PowerShell），进入解压目录执行：
+
 ```powershell
 .\smartdns.exe run -c .\smartdns.conf -v
 (注：-v 表示开启调试日志输出，方便直观查看解析过程)
 
 **方式二：后台服务运行（推荐，开机自启）**
 请以管理员身份运行终端，执行以下命令，系统将全自动接管进程并配置好防火墙规则：
+
 Powershell
 # 1. 安装服务
 .\smartdns.exe service install
@@ -163,14 +164,18 @@ Powershell
 (如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
 
 ###🐧 Linux & 🍎 macOS (通用绿色运行)
+
 将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
 打开终端，进入该目录并赋予执行权限，即可直接启动：
+
 Bash
 chmod +x ./smartdns
-sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
+
+sudo ./smartdns run -c ./smartdns.conf
 (注：Unix 系统绑定 53 等特权端口需要 sudo root 权限)
 
 ###🐳 Docker / NAS (容器化一键部署)
+
 我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology)、软路由 (OpenWrt) 等支持 Docker 的环境中。
 使用 CLI 快速启动：
 code
