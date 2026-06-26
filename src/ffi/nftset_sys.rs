@@ -19,3 +19,15 @@ unsafe extern "C" {
         addr_len: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
 }
+
+unsafe extern "C" {
+    pub fn nftset_add_batch(
+        familyname: *const ::std::os::raw::c_char,
+        tablename: *const ::std::os::raw::c_char,
+        setname: *const ::std::os::raw::c_char,
+        addrs: *const ::std::os::raw::c_uchar,
+        addr_len: ::std::os::raw::c_int,
+        ip_count: ::std::os::raw::c_int,
+        timeout: ::std::os::raw::c_ulong,
+    ) -> ::std::os::raw::c_int;
+}
