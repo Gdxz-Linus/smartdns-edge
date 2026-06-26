@@ -1,6 +1,4 @@
-
 cargo := if env_var_or_default('USE_CROSS', 'false') == "true" { "cross" } else { "cargo" }
-
 
 alias b := build
 alias c := clippy
@@ -11,7 +9,9 @@ set positional-arguments
 
 name := "smartdns"
 target := `rustc -vV | grep host | cut -d ' ' -f2`
-version := `cargo pkgid | cut -d@ -f2`
+
+version := `grep -m1 '^version' Cargo.toml | cut -d '"' -f2`
+
 diagnostic := ""
 bin_name := if os_family() == "windows" { name + ".exe" } else { name }
 dist_dir := "dist"
@@ -47,43 +47,7 @@ build *args: patch
     {{cargo}} build {{args}}
   fi
 
-# Build Windows installer
-[windows]
-wix: && wix-sha256sum
-  #!/usr/bin/env sh
-  # set -euxo pipefail
-
-  wix --version >/dev/null 2>&1 || { echo "wix not installed"; exit 1; } # check if wix is installed
-
-  TARGET="{{target}}"
-
-  if [[ "$TARGET" != *windows* ]]; then
-    exit 0
-  fi
-
-  ARCH="${TARGET%%-*}"
-  case "$ARCH" in
-    x86_64) ARCH="x64" ;;
-    aarch64) ARCH="arm64" ;;
-    i[3-6]86|x86) ARCH="x86" ;;
-    thumbv7a|armv7) ARCH="arm" ;;
-    arm64|arm64ec) ARCH="arm64ec" ;;
-    *)
-      exit 0
-    ;;
-  esac
-
-  VERSION="{{version}}"
-  SOURCE_DIR="{{dist_dir}}/{{dist_name}}"
-  OUTPUT="{{dist_dir}}/{{dist_name}}-v{{version}}.msi"
-
-  echo "Building Windows installer for $ARCH..."
-  # echo "TARGET=$TARGET"
-  # echo "ARCH=$ARCH"
-  # echo "VERSION=$VERSION"
-  VERSION="$VERSION" TARGET="$TARGET" SOURCE_DIR="$SOURCE_DIR" wix build -arch $ARCH ./wix.wxs -o $OUTPUT
-  echo "Saved to: $OUTPUT"
-
+# 🌟 彻底干掉了 Windows 生成 msi 的 wix 模块，现在是纯净的绿色软件！
 
 # Publish to Crates.io
 publish *args: patch
@@ -97,13 +61,14 @@ package: patch package-clean package-prepare && zip package-list
 
 # Package the binary for distribution
 [windows]
-package: patch package-clean package-prepare && zip wix package-list
+# 🌟 彻底去除了依赖链里的 wix
+package: patch package-clean package-prepare && zip package-list
   cp target/{{target}}/release/{{bin_name}}  {{dist_dir}}/{{dist_name}}
 
 [private]
 package-prepare:
   @mkdir -p {{dist_dir}}/{{dist_name}}
-  cp LICENSE README*.md etc/smartdns/smartdns.conf  {{dist_dir}}/{{dist_name}}
+  cp LICENSE README*.md etc/smartdns/smartdns.conf  {{dist_dir}}/{{dist_name}} || true
   echo "Version: {{version}}" >  {{dist_dir}}/{{dist_name}}/version
   echo "Build date: $(date)" >>  {{dist_dir}}/{{dist_name}}/version
   echo "Branch: $(git rev-parse --abbrev-ref HEAD)" >>  {{dist_dir}}/{{dist_name}}/version
@@ -136,11 +101,6 @@ zip: && zip-sha256sum
 [private]
 zip-sha256sum:
   echo {{sha256_file(dist_dir + "/" + dist_zip)}} > {{dist_dir}}/{{dist_zip}}-sha256sum.txt
-
-[private]
-[windows]
-wix-sha256sum:
-  echo {{sha256_file(dist_dir + "/" + dist_name + "-v" + version + ".msi" )}} > {{dist_dir}}/{{dist_name}}-v{{version}}.msi-sha256sum.txt
 
 # cleanup the workspace
 clean:
