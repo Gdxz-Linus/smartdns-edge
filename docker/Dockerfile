@@ -6,8 +6,8 @@ WORKDIR /app
 RUN mkdir -p /app/x86 /app/arm64 /app/extracted/x86 /app/extracted/arm64
 
 # 复制我们新编译的企业级 gnu 压缩包
-COPY ./smartdns-x86_64-unknown-linux-gnu.tar.gz /app/x86/smartdns.tar.gz
-COPY ./smartdns-aarch64-unknown-linux-gnu.tar.gz /app/arm64/smartdns.tar.gz
+COPY ./smartdns-x86_64-generic-linux-gnu.tar.gz /app/x86/smartdns.tar.gz
+COPY ./smartdns-aarch64-generic-linux-gnu.tar.gz /app/arm64/smartdns.tar.gz
 
 # 解压提取主程序
 RUN tar -xzf /app/x86/smartdns.tar.gz -C /app/extracted/x86
