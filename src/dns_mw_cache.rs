@@ -808,6 +808,7 @@ impl DnsCache {
 	pub fn load_cache(&self, path: &Path) {
         // 🌟 视觉净化：尝试将路径转化为绝对路径，如果失败则保持原样
         let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        #[allow(unused_mut)]
         let mut display_str = display_path.to_string_lossy().to_string();
         
         // 🌟 终极清洗：剥离 Windows 丑陋的 UNC 长路径前缀 (\\?\)
