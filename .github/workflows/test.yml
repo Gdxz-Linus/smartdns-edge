@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{matrix.os}}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup
         uses: ./.github/actions/setup
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup
         uses: ./.github/actions/setup
@@ -113,7 +113,7 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup
         uses: ./.github/actions/setup
