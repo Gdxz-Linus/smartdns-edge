@@ -60,7 +60,7 @@ package: patch package-clean package-prepare && zip package-list
 
 
 # Package the binary for distribution
-
+[windows]
 package: patch package-clean package-prepare && zip package-list
   cp target/{{target}}/release/{{bin_name}}  {{dist_dir}}/{{dist_name}}
 
