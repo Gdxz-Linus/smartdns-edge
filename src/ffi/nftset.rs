@@ -90,40 +90,33 @@ pub fn add_batch(
     let table_name = CString::new(table_name)?;
     let set_name = CString::new(set_name)?;
 
-    let is_v4 = addrs[0].is_ipv4();
-    let addr_len = if is_v4 { 4 } else { 16 };
+    let mut last_res = 0;
 
-    // 🌟 在 Rust 内存中将所有独立的 IP 连续拍平（Flatten）为一个巨型字节流
-    let mut raw_addrs = Vec::with_capacity(addrs.len() * addr_len);
-    for ip in addrs {
-        match ip {
-            IpAddr::V4(v4) => {
-                if !is_v4 {
-                    return Err(anyhow::anyhow!("Mixed IP families"));
-                }
-                raw_addrs.extend_from_slice(&v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                if is_v4 {
-                    return Err(anyhow::anyhow!("Mixed IP families"));
-                }
-                raw_addrs.extend_from_slice(&v6.octets());
+    // 🌟 核心架构不变：在一个 Rust 阻塞线程内，集中向内核连续发射指令。
+    for addr in addrs {
+        let c_addr = to_c_addr(*addr);
+        let addr_slice = match c_addr.as_ref() {
+            Either::Left(v) => v.as_slice(),
+            Either::Right(v) => v.as_slice(),
+        };
+        let addr_len = addr_slice.len();
+        let addr_ptr = addr_slice.as_ptr();
+
+        unsafe {
+            let res = super::nftset_sys::nftset_add(
+                family_name.as_ptr(),
+                table_name.as_ptr(),
+                set_name.as_ptr(),
+                addr_ptr,
+                addr_len as c_int,
+                timeout as c_ulong,
+            ) as i32;
+            
+            if res != 0 {
+                last_res = res;
             }
         }
     }
 
-    let addr_ptr = raw_addrs.as_ptr();
-
-    // 突破次元壁：一根指针，携带成百上千个 IP，一次性杀入 Linux 内核！
-    unsafe {
-        Ok(super::nftset_sys::nftset_add_batch(
-            family_name.as_ptr(),
-            table_name.as_ptr(),
-            set_name.as_ptr(),
-            addr_ptr,
-            addr_len as c_int,
-            addrs.len() as c_int,
-            timeout as c_ulong,
-        ) as i32)
-    }
+    Ok(last_res)
 }
