@@ -163,31 +163,21 @@ Powershell
 
 (如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
 
-###🐧 Linux & 🍎 macOS (通用绿色运行)
+### 🐧 Linux & 🍎 macOS (通用绿色运行)
 
-将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
+将下载的压缩包解压到目标目录。打开终端，赋予执行权限即可直接启动：
 
-打开终端，进入该目录并赋予执行权限，即可直接启动：
-
-Bash
 chmod +x ./smartdns
 
-sudo ./smartdns run -c ./smartdns.conf
+sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
+
 (注：Unix 系统绑定 53 等特权端口需要 sudo root 权限)
 
-###🐳 Docker / NAS (容器化一键部署)
+### 🐳 Docker / NAS (容器化一键部署)
 
-我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology)、软路由 (OpenWrt) 等支持 Docker 的环境中。
+我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology)、软路由 (OpenWrt) 等支持 Docker 的环境中。使用 CLI 快速启动：
 
-使用 CLI 快速启动：
+docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns:v1.0.1
 
-Bash
-docker run -d \
-  --name smartdns \
-  --restart always \
-  --network host \
-  -v /你的本地配置文件路径/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns:v1.0.1
-  
 (注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
 
