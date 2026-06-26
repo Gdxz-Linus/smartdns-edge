@@ -96,7 +96,7 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
 
         Ok(async move {
             // 🌟 核心修复 3：跨平台网卡分流！Win/Mac 平台将网卡名动态翻译成本机 IP，完美实现 -device 参数分流！
-            let bind_addr = if let Some(dev) = &runtime_proviver.device {
+            let bind_addr = if let Some(_dev) = &runtime_proviver.device {
                 #[cfg(not(any(target_os = "android", target_os = "linux")))]
                 {
                     local_ip_address::list_afinet_netifas().ok().and_then(|interfaces| {
