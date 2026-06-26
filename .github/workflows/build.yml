@@ -149,4 +149,8 @@ jobs:
           fallback_sha: ${{ github.sha }}
       - name: Build and push Docker image
         run: |
-          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=${{ inputs.version }} -t ghcr.io/mokeyish/smartdns-rs:${{ steps.release_label.outputs.value }} --push -f ./docker/Dockerfile .
+          # 🌟 核心修复：动态获取你自己的 GitHub 仓库路径，并用 bash 自动转为纯小写，彻底杜绝权限和格式报错！
+          IMAGE_NAME="ghcr.io/${{ github.repository }}"
+          IMAGE_NAME_LOWER=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          
+          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=${{ inputs.version }} -t ${IMAGE_NAME_LOWER}:${{ steps.release_label.outputs.value }} --push -f ./docker/Dockerfile .
