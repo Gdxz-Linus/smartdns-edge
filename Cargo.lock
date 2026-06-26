@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "async-socks5"
 version = "0.6.0"
-source = "git+https://github.com/mokeyish/async-socks5.git?rev=f78eec5#f78eec58e8befd8b9615364b96e06fb2f20e009d"
+source = "git+https://github.com/Gdxz-Linus/async-socks5.git?rev=f78eec5#f78eec58e8befd8b9615364b96e06fb2f20e009d"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -2755,8 +2755,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.12.0"
-source = "git+https://github.com/mokeyish/pki-types.git?rev=1.12.0.smartdns.1#f31dde58a184f50379b623fcf155f419f50a5bcb"
+version = "1.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
  "web-time",
  "zeroize",
@@ -3027,7 +3028,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smartdns"
-version = "1.0.2"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-http-proxy",
