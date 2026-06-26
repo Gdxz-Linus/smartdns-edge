@@ -140,8 +140,8 @@ jobs:
       - uses: actions/download-artifact@v7
       - name: Rename artifacts
         run: |
-          mv smartdns-x86_64-unknown-linux-gnu-*/smartdns-x86_64-unknown-linux-gnu-*.tar.gz smartdns-x86_64-unknown-linux-gnu.tar.gz || true
-          mv smartdns-aarch64-unknown-linux-gnu-*/smartdns-aarch64-unknown-linux-gnu-*.tar.gz smartdns-aarch64-unknown-linux-gnu.tar.gz || true
+          mv smartdns-x86_64-unknown-linux-gnu-*/smartdns-x86_64-generic-linux-gnu-*.tar.gz smartdns-x86_64-generic-linux-gnu.tar.gz || true
+          mv smartdns-aarch64-unknown-linux-gnu-*/smartdns-aarch64-generic-linux-gnu-*.tar.gz smartdns-aarch64-generic-linux-gnu.tar.gz || true
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
