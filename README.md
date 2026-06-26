@@ -143,3 +143,44 @@ ________________________________________
 将下载的 `.zip` 文件解压到一个固定目录（如`D:\SmartDNS`）。
 
 **方式一：前台测试运行（适合测试排障）**
+.\smartdns.exe run -c .\smartdns.conf -v
+(注：-v 表示开启调试日志输出，方便直观查看解析过程)
+
+**方式二：后台服务运行（推荐，开机自启）**
+请以管理员身份运行终端，执行以下命令，系统将全自动接管进程并配置好防火墙规则：
+
+Powershell
+# 1. 安装服务
+.\smartdns.exe service install
+
+# 2. 启动服务
+.\smartdns.exe service start
+
+# 3. 随时查看运行状态 (带 🟢/🔴 指示灯)
+.\smartdns.exe service status
+(如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
+
+###🐧 Linux & 🍎 macOS (通用绿色运行)
+
+将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
+打开终端，进入该目录并赋予执行权限，即可直接启动：
+
+Bash
+chmod +x ./smartdns
+
+sudo ./smartdns run -c ./smartdns.conf
+(注：Unix 系统绑定 53 等特权端口需要 sudo root 权限)
+
+###🐳 Docker / NAS (容器化一键部署)
+
+我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology)、软路由 (OpenWrt) 等支持 Docker 的环境中。
+使用 CLI 快速启动：
+code
+Bash
+docker run -d \
+  --name smartdns \
+  --restart always \
+  --network host \
+  -v /你的本地配置文件路径/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns:v1.0.1
+(注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
