@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use crate::log;
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use std::{io, net::SocketAddr};
