@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdlib.h> // 🌟 新增：供批量分配内存使用
 #ifdef NFNL_SUBSYS_NFTABLES
 #include <linux/netfilter/nf_tables.h>
 
@@ -561,6 +562,85 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 	return ret;
 }
 
+// 🌟 核心引擎：批量封装多个 IP 为同一个 Netlink Payload
+int nftset_add_batch(const char *familyname, const char *tablename, const char *setname, const unsigned char addrs[],
+               int addr_len, int ip_count, unsigned long timeout)
+{
+    if (ip_count <= 0) {
+        return 0;
+    }
+
+    uint32_t flags = 0;
+    int ret = -1;
+    int nffamily = _nftset_get_nffamily_from_str(familyname);
+
+    ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
+    if (ret != 0) {
+        flags = 0;
+    }
+
+    // 动态申请足够大的 Netlink 载荷区 (根据 IP 数量动态扩容)
+    int total_size = PAYLOAD_MAX + ip_count * PAYLOAD_MAX;
+    uint8_t *buf = (uint8_t *)malloc(total_size);
+    if (!buf) {
+        return -1;
+    }
+
+    // 如果设置了 timeout，先批量执行一遍删除操作
+    if (timeout > 0) {
+        void *next = buf;
+        _nftset_start_batch(next, &next);
+        for (int i = 0; i < ip_count; i++) {
+            const unsigned char *addr = addrs + (i * addr_len);
+            uint8_t addr_end_buff[16] = {0};
+            uint8_t *addr_end = addr_end_buff;
+            int addr_end_len = 0;
+
+            if (flags != 0) {
+                if (_nftset_process_setflags(flags, addr, addr_len, 0, &addr_end, &addr_end_len) != 0) {
+                    addr_end = NULL; addr_end_len = 0;
+                }
+            } else {
+                addr_end = NULL; addr_end_len = 0;
+            }
+            _nftset_del_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, next, &next);
+        }
+        _nftset_end_batch(next, &next);
+        int buffer_len = (uint8_t *)next - buf;
+        _nftset_socket_send(buf, buffer_len);
+    }
+
+    // 执行核心的批量添加操作，全部元素共享同一个 BATCH！
+    void *next = buf;
+    _nftset_start_batch(next, &next);
+
+    for (int i = 0; i < ip_count; i++) {
+        const unsigned char *addr = addrs + (i * addr_len);
+        uint8_t addr_end_buff[16] = {0};
+        uint8_t *addr_end = addr_end_buff;
+        int addr_end_len = 0;
+
+        if (flags != 0) {
+            if (_nftset_process_setflags(flags, addr, addr_len, &timeout, &addr_end, &addr_end_len) != 0) {
+                addr_end = NULL; addr_end_len = 0;
+            }
+        } else {
+            addr_end = NULL; addr_end_len = 0;
+        }
+
+        _nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
+    }
+
+    _nftset_end_batch(next, &next);
+    int buffer_len = (uint8_t *)next - buf;
+
+    ret = _nftset_socket_send(buf, buffer_len);
+    free(buf);
+
+    return ret;
+}
+
+
 #else
 
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
@@ -573,6 +653,12 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
 			   int addr_len)
 {
 	return 0;
+}
+
+// 🌟 为 Windows/Mac 环境提供兼容空壳
+int nftset_add_batch(const char *familyname, const char *tablename, const char *setname, const unsigned char addrs[], int addr_len, int ip_count, unsigned long timeout)
+{
+    return 0;
 }
 
 #endif
