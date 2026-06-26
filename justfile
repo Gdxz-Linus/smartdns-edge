@@ -10,6 +10,7 @@ set positional-arguments
 name := "smartdns"
 target := `rustc -vV | grep host | cut -d ' ' -f2`
 
+# 从 Cargo.toml 提取版本号，免疫新版编译器路径乱码
 version := `grep -m1 '^version' Cargo.toml | cut -d '"' -f2`
 
 diagnostic := ""
@@ -43,26 +44,20 @@ build *args: patch
     echo "{{cargo}} build --features "future-diagnostic" {{args}}"
     RUSTFLAGS="--cfg tokio_unstable" {{cargo}} build --features "future-diagnostic" {{args}}
   else
-    echo "{{cargo}} build {{args}}"
-    {{cargo}} build {{args}}
+    echo "{{cargo}} build --features disable_icmp_ping {{args}}"
   fi
-
-# 🌟 彻底干掉了 Windows 生成 msi 的 wix 模块，现在是纯净的绿色软件！
 
 # Publish to Crates.io
 publish *args: patch
   {{cargo}} publish --no-verify
 
-# Package the binary for distribution
-[unix]
+
+# =========================================================================
+# 🌟 终极合并：Windows、Mac、Linux 统一使用这个通用打包任务，不再各写一套！
+# =========================================================================
 package: patch package-clean package-prepare && zip package-list
   cp target/{{target}}/release/{{bin_name}}  {{dist_dir}}/{{dist_name}}
 
-
-# Package the binary for distribution
-[windows]
-package: patch package-clean package-prepare && zip package-list
-  cp target/{{target}}/release/{{bin_name}}  {{dist_dir}}/{{dist_name}}
 
 [private]
 package-prepare:
@@ -82,6 +77,7 @@ package-list:
   @ls -lh dist
 
 
+# 根据操作系统自动匹配对应的压缩规则
 [private]
 [windows]
 zip: && zip-sha256sum
@@ -100,6 +96,7 @@ zip: && zip-sha256sum
 [private]
 zip-sha256sum:
   echo {{sha256_file(dist_dir + "/" + dist_zip)}} > {{dist_dir}}/{{dist_zip}}-sha256sum.txt
+
 
 # cleanup the workspace
 clean:
@@ -147,18 +144,13 @@ setcap:
   @find ./target -type f -name smartdns
 
 
-# Apply patch
+# Apply patch (空任务保留，兼容依赖链)
 [private]
-patch: # require_patch-crate
-  @#cargo patch-crate -f
+patch:
 
 #------------#
 # dependency #
 #------------#
-
-[private]
-@require_patch-crate:
-  cargo patch-crate --version >/dev/null 2>&1 || cargo install patch-crate
 
 [private]
 @require_set-version:
