@@ -162,6 +162,7 @@ Powershell
 .\smartdns.exe service status
 
 (如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
+
 ###🐧 Linux & 🍎 macOS (通用绿色运行)
 
 将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
