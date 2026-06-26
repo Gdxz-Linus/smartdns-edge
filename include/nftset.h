@@ -29,6 +29,9 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len);
 
+int nftset_add_batch(const char *familyname, const char *tablename, const char *setname, const unsigned char addrs[],
+               int addr_len, int ip_count, unsigned long timeout);
+			   
 #ifdef __cplusplus
 }
 #endif
