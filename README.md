@@ -107,14 +107,14 @@ ________________________________________
 6.	重写SLI的帮助信息以及各指令的反馈信息。
 
 ## 支持的操作系统
-### 🪟 一、 Windows 系列（全面覆盖企业与现代桌面）
+### 🪟 Windows 系列（全面覆盖企业与现代桌面）
 *底层架构：`x86_64` (主流 Intel/AMD) 与 `aarch64` (现代 ARM 处理器)*
 
 - **企业级服务器 (Windows Server)**：完美支持 Windows Server 2016, 2019, 2022 以及最新的 Windows Server 2025。
 - **个人桌面端 (Windows Desktop)**：完美支持 Windows 10 和 Windows 11。
 - **ARM 笔电生态**：原生满血支持搭载骁龙 X 芯片的新一代 Windows 11 ARM 笔记本。
 
-### 🐧 二、 Linux 系列
+### 🐧 Linux 系列
 *底层架构：`x86_64-generic-linux-gnu` 与 `aarch64-generic-linux-gnu`*
 
 - **主流企业服务器 (Linux Server)**：
@@ -127,13 +127,13 @@ ________________________________________
   - **【重点】**完美支持 AWS Graviton、阿里云倚天等高性能 ARM64 云服务器。
   - 支持安装了 64 位 Linux 系统的微型边缘主机（如树莓派 4、树莓派 5、NanoPi 等）。
 
-### 🍎 三、 macOS 系列（苹果生态全家桶）
+### 🍎 macOS 系列（苹果生态全家桶）
 *底层架构：`x86_64-apple-darwin` 与 `aarch64-apple-darwin`*
 
 - **老款 Mac 设备**：完美支持搭载 Intel 处理器的老款 MacBook、iMac、Mac mini。
 - **新款 Mac 设备**：原生支持搭载 M1、M2、M3、M4 芯片 (Apple Silicon) 的所有 Mac 设备。无需开启 Rosetta 转译，发挥出苹果芯片最极限的 I/O 性能。
 
-### 🐳 四、 云原生与容器化环境 (Docker / NAS)
+### 🐳 云原生与容器化环境 (Docker / NAS)
 *分发形式：全自动构建的 `ghcr.io` 多架构双端镜像 (amd64 / arm64)*
 
 - **网络附属存储 (NAS)**：完美运行于群晖 (Synology)、威联通 (QNAP)、极空间等主流 NAS 系统的 Docker 组件中。
