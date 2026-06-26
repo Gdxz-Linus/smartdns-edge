@@ -167,6 +167,8 @@ Powershell
 
 将下载的压缩包解压到目标目录。打开终端，赋予执行权限即可直接启动：
 
+Bash
+
 chmod +x ./smartdns
 
 sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
