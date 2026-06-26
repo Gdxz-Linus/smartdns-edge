@@ -173,7 +173,7 @@ chmod +x ./smartdns
 
 sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
 
-(注：Unix 系统绑定 53 等特权端口需要 sudo root 权限)
+(注：Linux 系统绑定 53 等特权端口需要 sudo root 权限)
 
 ### 🐳 Docker / NAS (容器化一键部署)
 
