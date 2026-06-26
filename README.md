@@ -162,7 +162,6 @@ Powershell
 .\smartdns.exe service status
 
 (如需彻底清理，执行 .\smartdns.exe service uninstall 即可)
-
 ###🐧 Linux & 🍎 macOS (通用绿色运行)
 
 将下载的 .tar.gz (Linux) 或 .zip (macOS) 解压到目标目录。
@@ -190,3 +189,4 @@ docker run -d \
   ghcr.io/gdxz-linus/smartdns:v1.0.1
   
 (注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
+
