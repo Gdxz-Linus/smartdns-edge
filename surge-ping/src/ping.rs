@@ -81,12 +81,16 @@ impl Pinger {
 
         // Wait for reply or timeout.
         match timeout(self.timeout, reply_waiter).await {
-            Ok(Ok(reply)) => Ok((
-                reply.packet,
-                reply.timestamp.saturating_duration_since(send_time),
-            )),
+            Ok(Ok(reply)) => {
+                self.last_sequence.take(); // 🌟 优化：拿到结果后清空序号，避免 Drop 时产生多余的锁请求
+                Ok((
+                    reply.packet,
+                    reply.timestamp.saturating_duration_since(send_time),
+                ))
+            }
             Ok(Err(_err)) => Err(SurgeError::NetworkError),
             Err(_) => {
+                let seq = self.last_sequence.take().unwrap_or(seq); // 🌟 优化：超时也一并清空
                 self.reply_map.remove(self.host, self.ident, seq);
                 Err(SurgeError::Timeout { seq })
             }
