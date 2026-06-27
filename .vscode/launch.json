@@ -9,8 +9,7 @@
         "args": [
           "build",
           "--bin=smartdns",
-          "--package=smartdns",
-          // "--features=future-diagnostic"
+          "--package=smartdns"
         ],
         "filter": {
           "name": "smartdns",
@@ -20,8 +19,7 @@
       "args": [
         "run",
         "-d", "./etc/smartdns",
-        // "-c", "etc/smartdns/smartdns.conf",
-        "-c", "etc/smartdns/smartdns-dev.conf",
+        "-c", "etc/smartdns/smartdns.conf",
         "-p", "./smartdns.pid",
         "-vvvv"
       ],
@@ -48,7 +46,7 @@
         }
       },
       "args": [
-        "update",
+        "update"
       ],
       "cwd": "${workspaceFolder}"
     },

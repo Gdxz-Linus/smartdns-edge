@@ -12,8 +12,8 @@ description = """
 A cross platform local DNS server written in rust to obtain the fastest website IP for the best Internet experience, support DoT, DoQ, DoH, DoH3.
 """
 
-homepage = "https://github.com/Gdxz-Linus/smartdns-rs"
-repository = "https://github.com/Gdxz-Linus/smartdns-rs"
+homepage = "https://github.com/Gdxz-Linus/smartdns-edge"
+repository = "https://github.com/Gdxz-Linus/smartdns-edge"
 license = "GPL-3.0-only"
 readme = "README.md"
 
@@ -103,16 +103,6 @@ experimental-phf = [
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[patch.crates-io]
-# rustls = { git = "https://github.com/mokeyish/rustls.git", branch = "patched_main"}
-# hickory-resolver = { git = "https://github.com/hickory-dns/hickory-dns.git", rev = "41b6e33"}
-# hickory-server = { path = "./target/patch/hickory-server-0.24.0" }
-# hickory-proto = { path = "./target/patch/hickory-proto-0.24.0" }
-# rustls-native-certs = { git = "https://github.com/mokeyish/rustls-native-certs.git" }
-# enum_dispatch = { git = "https://gitlab.com/mokeyish/enum_dispatch.git", branch = "master"}
-# axum = { git = "https://github.com/tokio-rs/axum.git", rev = "8854e66" }
-# boomphf ={ path = "./target/patch/boomphf-0.6.0"}
-
 [dependencies]
 libc = "0.2"
 cfg-if = "1"
@@ -154,6 +144,8 @@ tokio = { version = "1.46", features = [
   "signal",
   "macros",
   "parking_lot",
+  "net",
+  "io-util",
 ] }
 tokio-rustls = { version = "0.26.0", default-features = false }
 tokio-util = "0.7.12"
@@ -195,7 +187,7 @@ rustls-native-certs = "0.8"
 lru = { version = "0.14", default-features = false }
 # time = "0.3"
 chrono = { version = "0.4.38", default-features = false, features = ["serde", "clock"]}
-surge-ping = { version = "0.8", git = "https://github.com/mokeyish/surge-ping.git", rev = "4a88f6f"}
+surge-ping = { path = "./surge-ping" }
 rand = "0.9.1"
 smallvec = "1.13.2"
 csv = "1.1"
@@ -210,7 +202,6 @@ wildcard = "0.3.0"
 sysinfo = { version = "0.36", default-features = false, features = ["system"]}
 
 # proxy
-async-socks5 = { version = "0.6.0", git = "https://github.com/Gdxz-Linus/async-socks5.git", rev = "f78eec5" }
 async-http-proxy = { version = "1.2.5", features = [
   "runtime-tokio",
   "basic-auth",

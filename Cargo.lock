@@ -130,15 +130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-socks5"
-version = "0.6.0"
-source = "git+https://github.com/Gdxz-Linus/async-socks5.git?rev=f78eec5#f78eec58e8befd8b9615364b96e06fb2f20e009d"
-dependencies = [
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3032,7 +3023,6 @@ version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-http-proxy",
- "async-socks5",
  "async-trait",
  "axum 0.8.4",
  "axum-h3",
@@ -3160,7 +3150,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "surge-ping"
 version = "0.8.2"
-source = "git+https://github.com/mokeyish/surge-ping.git?rev=4a88f6f#4a88f6f9987a56955133d732871c7002c56b6e1b"
 dependencies = [
  "hex",
  "parking_lot",

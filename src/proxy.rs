@@ -1,4 +1,4 @@
-use async_socks5::SocksDatagram as Socks5Datagram;
+use crate::async_socks5::SocksDatagram as Socks5Datagram;
 use std::{
     fmt::{Display, Write},
     io,
@@ -25,7 +25,7 @@ pub async fn handshake_tcp(
     match proxy {
         Some(proxy) => match proxy.proto {
             ProxyProtocol::Socks5 => {
-                use async_socks5::Auth;
+                use crate::async_socks5::Auth;
 
                 let auth = if proxy.username.is_some() {
                     let username = proxy.username.as_deref().unwrap_or_default();
@@ -39,7 +39,7 @@ pub async fn handshake_tcp(
                     None
                 };
 
-                let _ = async_socks5::connect(&mut stream, server_addr, auth)
+                let _ = crate::async_socks5::connect(&mut stream, server_addr, auth)
                     .await
                     .map_err(from_socks5_err)?;
 
@@ -78,7 +78,7 @@ pub async fn handshake_udp(
     match proxy {
         Some(proxy) => match proxy.proto {
             ProxyProtocol::Socks5 => {
-                use async_socks5::{AddrKind, Auth};
+                use crate::async_socks5::{AddrKind, Auth};
                 let stream = stream.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TCP stream required for SOCKS5 UDP associate"))?;
 
                 let auth = if proxy.username.is_some() {
@@ -107,9 +107,9 @@ pub async fn handshake_udp(
     }
 }
 
-fn from_socks5_err(err: async_socks5::Error) -> io::Error {
+fn from_socks5_err(err: crate::async_socks5::Error) -> io::Error {
     match err {
-        async_socks5::Error::Io(io) => io,
+        crate::async_socks5::Error::Io(io) => io,
         err => io::Error::new(io::ErrorKind::ConnectionRefused, err),
     }
 }

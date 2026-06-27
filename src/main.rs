@@ -39,6 +39,8 @@ mod libdns;
 mod log;
 mod preset_ns;
 mod proxy;
+pub mod socks5;
+pub use socks5 as async_socks5;
 #[cfg(feature = "resolve-cli")]
 mod resolver;
 mod rustls;

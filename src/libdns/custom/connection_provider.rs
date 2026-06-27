@@ -788,8 +788,8 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
                 let (len, addr) = ready!(s.poll_recv_from(cx, buf))
                     .map_err(|err| io::Error::other(err.to_string()))?;
                 let addr = match addr {
-                    async_socks5::AddrKind::Ip(addr) => addr,
-                    async_socks5::AddrKind::Domain(_, _) => {
+                    crate::async_socks5::AddrKind::Ip(addr) => addr,
+                    crate::async_socks5::AddrKind::Domain(_, _) => {
                         Err(io::Error::other("Expect IP address"))?
                     }
                 };
@@ -827,8 +827,8 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
                     .map_err(|err| io::Error::other(err.to_string()))?;
 
                 let addr = match addr {
-                    async_socks5::AddrKind::Ip(addr) => addr,
-                    async_socks5::AddrKind::Domain(_, _) => {
+                    crate::async_socks5::AddrKind::Ip(addr) => addr,
+                    crate::async_socks5::AddrKind::Domain(_, _) => {
                         Err(io::Error::other("Expect IP address"))?
                     }
                 };
