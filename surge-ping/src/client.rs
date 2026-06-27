@@ -179,25 +179,24 @@ impl ReplyMap {
 /// If you want to pass the `Client` in the task, please wrap it with `Arc`: `Arc<Client>`.
 /// and can realize the simultaneous ping of multiple addresses when only one `socket` is created.
 ///
+
+// 🌟 1. 新增一个守卫结构体，专门负责中止任务
+struct RecvTaskGuard(JoinHandle<()>);
+
+impl Drop for RecvTaskGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     socket: AsyncSocket,
     reply_map: ReplyMap,
-    recv: Arc<JoinHandle<()>>,
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        // The client may pass through multiple tasks, so need to judge whether the number of references is 1.
-        if Arc::strong_count(&self.recv) <= 1 {
-            self.recv.abort();
-        }
-    }
+    _recv: Arc<RecvTaskGuard>, // 🌟 2. 使用安全守卫代替 JoinHandle
 }
 
 impl Client {
-    /// A client is generated according to the configuration. In fact, a `AsyncSocket` is wrapped inside,
-    /// and you can clone to any `task` at will.
     pub fn new(config: &Config) -> io::Result<Self> {
         let socket = AsyncSocket::new(config)?;
         let reply_map = ReplyMap::default();
@@ -205,7 +204,7 @@ impl Client {
         Ok(Self {
             socket,
             reply_map,
-            recv: Arc::new(recv),
+            recv: Arc::new(RecvTaskGuard(recv)), // 🌟 4. 包装并传入守卫
         })
     }
 
@@ -221,7 +220,7 @@ impl Client {
 }
 
 async fn recv_task(socket: AsyncSocket, reply_map: ReplyMap) {
-    let mut buf = [0; 2048];
+    let mut buf = vec![0u8; 2048];
     loop {
         if let Ok((sz, addr)) = socket.recv_from(&mut buf).await {
             let timestamp = Instant::now();
