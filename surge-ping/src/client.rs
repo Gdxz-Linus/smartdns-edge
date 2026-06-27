@@ -204,7 +204,7 @@ impl Client {
         Ok(Self {
             socket,
             reply_map,
-            recv: Arc::new(RecvTaskGuard(recv)), // 🌟 4. 包装并传入守卫
+            _recv: Arc::new(RecvTaskGuard(recv)), // 🌟 4. 包装并传入守卫
         })
     }
 

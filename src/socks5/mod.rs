@@ -691,43 +691,51 @@ where
 
     // ======= 🌟 下面是为 smartdns 同步轮询机制补充的底层方法 =======
 
-    fn write_header_sync(bytes: &mut Vec<u8>, addr: &AddrKind) {
-        bytes.push(0x00); // RSV
-        bytes.push(0x00); // RSV
-        bytes.push(0x00); // FRAG
+    fn write_header_sync(bytes: &mut [u8], addr: &AddrKind) -> usize {
+        bytes[0] = 0x00; // RSV
+        bytes[1] = 0x00; // RSV
+        bytes[2] = 0x00; // FRAG
+        let mut offset = 3;
         match addr {
             AddrKind::Ip(SocketAddr::V4(addr)) => {
-                bytes.push(0x01); // ATYP: V4
-                bytes.extend_from_slice(&addr.ip().octets());
-                bytes.extend_from_slice(&addr.port().to_be_bytes());
+                bytes[offset] = 0x01; // ATYP: V4
+                offset += 1;
+                bytes[offset..offset + 4].copy_from_slice(&addr.ip().octets());
+                offset += 4;
+                bytes[offset..offset + 2].copy_from_slice(&addr.port().to_be_bytes());
+                offset += 2;
             }
             AddrKind::Ip(SocketAddr::V6(addr)) => {
-                bytes.push(0x04); // ATYP: V6
-                bytes.extend_from_slice(&addr.ip().octets());
-                bytes.extend_from_slice(&addr.port().to_be_bytes());
+                bytes[offset] = 0x04; // ATYP: V6
+                offset += 1;
+                bytes[offset..offset + 16].copy_from_slice(&addr.ip().octets());
+                offset += 16;
+                bytes[offset..offset + 2].copy_from_slice(&addr.port().to_be_bytes());
+                offset += 2;
             }
             AddrKind::Domain(domain, port) => {
-                bytes.push(0x03); // ATYP: Domain
-                let len = domain.len() as u8;
-                bytes.push(len);
-                bytes.extend_from_slice(domain.as_bytes());
-                bytes.extend_from_slice(&port.to_be_bytes());
+                bytes[offset] = 0x03; // ATYP: Domain
+                offset += 1;
+                let domain_bytes = domain.as_bytes();
+                let len = domain_bytes.len();
+                bytes[offset] = len as u8;
+                offset += 1;
+                bytes[offset..offset + len].copy_from_slice(domain_bytes);
+                offset += len;
+                bytes[offset..offset + 2].copy_from_slice(&port.to_be_bytes());
+                offset += 2;
             }
         }
+        offset
     }
 
     fn parse_header_sync(bytes: &[u8]) -> Result<(usize, AddrKind)> {
         if bytes.len() < 4 {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Packet too short",
-            )));
+            return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short")));
         }
-
         if bytes[0] != 0x00 || bytes[1] != 0x00 {
             return Err(Error::InvalidReserved(bytes[0]));
         }
-
         if bytes[2] != 0x00 {
             return Err(Error::InvalidFragmentId(bytes[2]));
         }
@@ -737,53 +745,39 @@ where
 
         let addr = match atyp {
             0x01 => {
-                if bytes.len() < offset + 4 + 2 {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Packet too short for IPv4 header",
-                    )));
+                if bytes.len() < offset + 6 {
+                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for IPv4")));
                 }
                 let mut ip_bytes = [0u8; 4];
-                ip_bytes.copy_from_slice(&bytes[offset..offset+4]);
+                ip_bytes.copy_from_slice(&bytes[offset..offset + 4]);
                 offset += 4;
-                let port = u16::from_be_bytes([bytes[offset], bytes[offset+1]]);
+                let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
                 AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_bytes), port)))
             }
             0x04 => {
-                if bytes.len() < offset + 16 + 2 {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Packet too short for IPv6 header",
-                    )));
+                if bytes.len() < offset + 18 {
+                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for IPv6")));
                 }
                 let mut ip_bytes = [0u8; 16];
-                ip_bytes.copy_from_slice(&bytes[offset..offset+16]);
+                ip_bytes.copy_from_slice(&bytes[offset..offset + 16]);
                 offset += 16;
-                let port = u16::from_be_bytes([bytes[offset], bytes[offset+1]]);
+                let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
                 AddrKind::Ip(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_bytes), port, 0, 0)))
             }
             0x03 => {
                 if bytes.len() < offset + 1 {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Packet too short for Domain length",
-                    )));
+                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for Domain len")));
                 }
                 let len = bytes[offset] as usize;
                 offset += 1;
                 if bytes.len() < offset + len + 2 {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Packet too short for Domain header",
-                    )));
+                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for Domain")));
                 }
-                let domain_bytes = &bytes[offset..offset+len];
-                let domain = String::from_utf8(domain_bytes.to_vec())
-                    .map_err(Error::FromUtf8)?;
+                let domain = String::from_utf8(bytes[offset..offset + len].to_vec()).map_err(Error::FromUtf8)?;
                 offset += len;
-                let port = u16::from_be_bytes([bytes[offset], bytes[offset+1]]);
+                let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
                 AddrKind::Domain(domain, port)
             }
@@ -803,12 +797,24 @@ where
         A: Into<AddrKind>,
     {
         let addr = addr.into();
-        let mut bytes = Vec::with_capacity(6 + buf.len());
-        Self::write_header_sync(&mut bytes, &addr);
-        bytes.extend_from_slice(buf);
+        let total_len = buf.len() + 262; // 负载长度 + SOCKS5最大头部长度
 
-        let header_len = bytes.len() - buf.len();
-        match self.socket.poll_send(cx, &bytes) {
+        // 🌟 核心优化：99% 的 DNS 请求都小于 4096，使用极速栈内存，真正实现 0 Malloc 分配！
+        let mut stack_buf = [0u8; 4096];
+        let mut heap_buf = Vec::new();
+
+        let target_buf = if total_len <= 4096 {
+            &mut stack_buf[..total_len]
+        } else {
+            heap_buf.resize(total_len, 0); // 仅在遇到怪兽级巨型数据包时退化为堆分配
+            &mut heap_buf[..]
+        };
+
+        let header_len = Self::write_header_sync(target_buf, &addr);
+        let packet_len = header_len + buf.len();
+        target_buf[header_len..packet_len].copy_from_slice(buf);
+
+        match self.socket.poll_send(cx, &target_buf[..packet_len]) {
             std::task::Poll::Ready(Ok(n)) => {
                 if n >= header_len {
                     std::task::Poll::Ready(Ok(n - header_len))
@@ -829,9 +835,19 @@ where
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> std::task::Poll<Result<(usize, AddrKind)>> {
-        let max_hdr_len = 6 + 256;
-        let mut raw_buf = vec![0u8; max_hdr_len + buf.len()];
-        let mut read_buf = tokio::io::ReadBuf::new(&mut raw_buf);
+        let total_len = buf.len() + 262;
+
+        let mut stack_buf = [0u8; 4096];
+        let mut heap_buf = Vec::new();
+
+        let target_buf = if total_len <= 4096 {
+            &mut stack_buf[..total_len]
+        } else {
+            heap_buf.resize(total_len, 0);
+            &mut heap_buf[..]
+        };
+
+        let mut read_buf = tokio::io::ReadBuf::new(target_buf);
 
         match self.socket.poll_recv(cx, &mut read_buf) {
             std::task::Poll::Ready(Ok(())) => {
@@ -863,37 +879,17 @@ where
         }
     }
 
+    // 🌟 核心优化：直接复用 poll 方法，极大地瘦身协程体积，删除了原来慢速臃肿的 Cursor/Vec 逻辑
     pub async fn send_to<A>(&self, buf: &[u8], addr: A) -> Result<usize>
     where
         A: Into<AddrKind>,
     {
         let addr: AddrKind = addr.into();
-        let (bytes, header_size) = Self::write_request(buf, addr).await?;
-        Ok(self.socket.send(&bytes).await? - header_size)
-    }
-
-    async fn read_response(
-        len: usize,
-        buf: &mut [u8],
-        bytes: &mut [u8],
-    ) -> Result<(usize, AddrKind)> {
-        let mut cursor = Cursor::new(bytes);
-        cursor.read_reserved().await?;
-        cursor.read_reserved().await?;
-        cursor.read_fragment_id().await?;
-        let addr = cursor.read_target_addr().await?;
-        let header_len = cursor.position() as usize;
-        cursor.read_exact(buf).await?;
-        Ok((len - header_len, addr))
+        std::future::poll_fn(|cx| self.poll_send_to(cx, buf, addr.clone())).await
     }
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, AddrKind)> {
-        let bytes_size = Self::get_buf_size(AddrKind::MAX_SIZE, buf.len());
-        let mut bytes = vec![0; bytes_size];
-
-        let len = self.socket.recv(&mut bytes).await?;
-        let (read, addr) = Self::read_response(len, buf, &mut bytes).await?;
-        Ok((read, addr))
+        std::future::poll_fn(|cx| self.poll_recv_from(cx, buf)).await
     }
 
     fn get_buf_size(addr_size: usize, buf_len: usize) -> usize {
