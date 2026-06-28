@@ -7,103 +7,216 @@
     <meta name="description" content="A cross platform local DNS server written in rust to obtain the fastest website IP, supporting DoT, DoQ, DoH, DoH3.">
     <!-- 引入极简自适应美化库 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css">
+    
+    <style>
+        /* 16:9 & 16:10 全平台比例自适应优化 */
+        body {
+            max-width: 900px;
+            margin: 0 auto; 
+            padding: 2rem 1.25rem;
+            line-height: 1.65;
+        }
+
+        /* 语言切换器排版样式 */
+        .lang-switcher {
+            float: right;
+            margin-top: 5px;
+        }
+        .lang-switcher select {
+            padding: 4px 8px;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+
+        /* 动态语言显隐控制 */
+        body.lang-zh .lang-en-el {
+            display: none !important;
+        }
+        body.lang-en .lang-zh-el {
+            display: none !important;
+        }
+    </style>
 </head>
-<body>
+<body class="lang-zh">
     <header>
-        <h1>🐋 SmartDNS Edge</h1>
-        <p><strong>基于 Rust 开发的全平台高性能本地 DNS 服务器</strong></p>
+        <!-- 语言选择下拉菜单 -->
+        <div class="lang-switcher">
+            <select id="lang-select" onchange="switchLanguage(this.value)">
+                <option value="zh">简体中文</option>
+                <option value="en">English</option>
+            </select>
+        </div>
+
+        <h1 class="lang-zh-el">🐋 SmartDNS Edge</h1>
+        <h1 class="lang-en-el">🐋 SmartDNS Edge</h1>
+
+        <p class="lang-zh-el"><strong>基于 Rust 开发的全平台高性能本地 DNS 服务器</strong></p>
+        <p class="lang-en-el"><strong>A Rust-based cross-platform high-performance local DNS server</strong></p>
+
         <p>
-            <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">🌐 GitHub 源码仓库</a> | 
-            <a href="#features">✨ 核心特性</a> | 
-            <a href="#os">💻 支持系统</a> | 
-            <a href="#install">📦 安装运行</a>
+            <span class="lang-zh-el">
+                <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">🌐 GitHub 源码仓库</a> | 
+                <a href="#features">✨ 核心特性</a> | 
+                <a href="#os">💻 支持系统</a> | 
+                <a href="#install">📦 安装运行</a>
+            </span>
+            <span class="lang-en-el">
+                <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">🌐 GitHub Repo</a> | 
+                <a href="#features">✨ Features</a> | 
+                <a href="#os">💻 Supported OS</a> | 
+                <a href="#install">📦 Install & Run</a>
+            </span>
         </p>
     </header>
 
     <hr>
 
     <section id="about">
-        <h2>什么是 SmartDNS Edge？</h2>
-        <p>SmartDNS Edge 是使用 Rust 语言重写的本地 DNS 服务器。它能够获取多个上游 DNS 的解析结果，并通过测速算法动态获取最快的网站 IP 响应，从而显著提升网络访问相应速度与网页加载体验。</p>
+        <h2 class="lang-zh-el">什么是 SmartDNS Edge？</h2>
+        <h2 class="lang-en-el">What is SmartDNS Edge?</h2>
+
+        <p class="lang-zh-el">SmartDNS Edge 是使用 Rust 语言重写的本地 DNS 服务器。它能够获取多个上游 DNS 的解析结果，并通过测速算法动态获取最快的网站 IP 响应，从而显著提升网络访问相应速度与网页加载体验。</p>
+        <p class="lang-en-el">SmartDNS Edge is a local DNS server rewritten in the Rust programming language. It resolves DNS queries from multiple upstream servers, dynamically determines the fastest IP addresses using smart speed-testing algorithms, and significantly improves internet access speeds and web-loading experiences.</p>
     </section>
 
     <section id="features">
-        <h2>✨ 核心特性</h2>
+        <h2 class="lang-zh-el">✨ 核心特性</h2>
+        <h2 class="lang-en-el">✨ Core Features</h2>
         <ul>
-            <li><strong>绿色工具软件</strong>：解包即用，需要自己编辑smartdns.conf配置文件，可作为服务安装。</li>
-            <li><strong>前沿加密协议支持</strong>：全面支持 DNS-over-TLS (DoT)、DNS-over-HTTPS (DoH)、DNS-over-QUIC (DoQ) 以及最新的 DNS-over-HTTP/3 (DoH3)。</li>
-            <li><strong>持久缓存（乐观缓存）</strong>：完善的新鲜缓存、过期缓存预取、超时缓存、否定缓存机制，后台自动更新满足热度要求的过期缓存，前端解析响应毫秒级响应。</li>
-            <li><strong>高性能 SOCKS5/HTTP 代理隧道</strong>：内置零分配（Zero-Allocation）的高并发 SOCKS5 代理客户端，安全绕过代理漏流。</li>
-            <li><strong>全平台兼容</strong>：完美兼容 Windows、Linux、macOS，支持无管理员权限（Unprivileged ICMP）极速 Ping 测速。</li>
-            <li><strong>智能防漏流与分流</strong>：支持高级防火墙 SO_MARK、网卡设备绑定以及多 WAN 口策略路由。</li>
-            <li><strong>极高并发处理性能</strong>：CPU多核心优化，极高网络并发处理能力，无内存泄漏。</li>
-            <li><strong>完美的双栈优选</strong>：A与AAAA记录进行优选，选出最优访问速度的记录，默认参数下，只要有A记录，A记录始终有效，如果AAAA纪录更优，那就都保留；可设置AAAA记录优先，哪个记录更优就只保留哪个记录。A和AAAA记录TTL始终对齐</li>
-            <li><strong>漏洞防御与反网络攻击</strong>：防御恒定时间防侧信道爆破、源地址投毒清洗、UDP放大反射、HTTPS内存炸弹、慢速握手等网络攻击；使用绝对的流量沙盒防止泄漏真实地址</li>
-            <li><strong>resolve命令行工具</strong>：支持完善的resolve功能，对标dig</li>
+            <li class="lang-zh-el"><strong>绿色工具软件</strong>：解包即用，需要自己编辑 smartdns.conf 配置文件，可作为服务安装。</li>
+            <li class="lang-en-el"><strong>Green Utility Software</strong>: Out-of-the-box, easy configuration with a single <code>smartdns.conf</code> file, and supports installation as a system service.</li>
+
+            <li class="lang-zh-el"><strong>前沿加密协议支持</strong>：全面支持 DNS-over-TLS (DoT)、DNS-over-HTTPS (DoH)、DNS-over-QUIC (DoQ) 以及最新的 DNS-over-HTTP/3 (DoH3)。</li>
+            <li class="lang-en-el"><strong>Cutting-edge Encryption Protocol Support</strong>: Full support for DNS-over-TLS (DoT), DNS-over-HTTPS (DoH), DNS-over-QUIC (DoQ), and the latest DNS-over-HTTP/3 (DoH3).</li>
+
+            <li class="lang-zh-el"><strong>持久缓存（乐观缓存）</strong>：完善的新鲜缓存、过期缓存预取、超时缓存、否定缓存机制，后台自动更新满足热度要求的过期缓存，前端解析响应毫秒级响应。</li>
+            <li class="lang-en-el"><strong>Persistent Cache (Optimistic Cache)</strong>: Comprehensive mechanisms for fresh cache, prefetching expired cache, timeout cache, and negative cache. It automatically updates expired cache in the background based on request frequency, achieving millisecond-level DNS response times.</li>
+
+            <li class="lang-zh-el"><strong>高性能 SOCKS5/HTTP 代理隧道</strong>：内置零分配（Zero-Allocation）的高并发 SOCKS5 代理客户端，安全绕过代理漏流。</li>
+            <li class="lang-en-el"><strong>High-Performance SOCKS5/HTTP Proxy Tunneling</strong>: Built-in zero-allocation, high-concurrency SOCKS5 proxy client that securely avoids proxy leaks.</li>
+
+            <li class="lang-zh-el"><strong>全平台兼容</strong>：完美兼容 Windows、Linux、macOS，支持无管理员权限（Unprivileged ICMP）极速 Ping 测速。</li>
+            <li class="lang-en-el"><strong>Cross-Platform Compatibility</strong>: Fully compatible with Windows, Linux, and macOS. Supports unprivileged ICMP ping for speed testing without administrator/root privileges.</li>
+
+            <li class="lang-zh-el"><strong>智能防漏流与分流</strong>：支持高级防火墙 SO_MARK、网卡设备绑定以及多 WAN 口策略路由。</li>
+            <li class="lang-en-el"><strong>Smart Routing & Leak Prevention</strong>: Supports advanced firewall tagging (SO_MARK), binding sockets to specific network interfaces, and multi-WAN policy routing.</li>
+
+            <li class="lang-zh-el"><strong>极高并发处理性能</strong>：CPU多核心优化，极高网络并发处理能力，无内存泄漏。</li>
+            <li class="lang-en-el"><strong>Ultra-high Concurrency</strong>: Optimized for multi-core CPUs with extreme network concurrency handling and zero memory leaks.</li>
+
+            <li class="lang-zh-el"><strong>完美的双栈优选</strong>：A与AAAA记录进行优选，选出最优访问速度的记录，默认参数下，只要有A记录，A记录始终有效，如果AAAA纪录更优，那就都保留；可设置AAAA记录优先，哪个记录更优就只保留哪个记录。A和AAAA记录TTL始终对齐</li>
+            <li class="lang-en-el"><strong>Optimal Dual-Stack Selection</strong>: Optimizes IPv4 (A) and IPv6 (AAAA) records to choose the fastest access route. By default, as long as an A record exists, it is kept valid. If the AAAA record is faster, both are kept. You can also prioritize AAAA records so only the faster one is returned. A and AAAA record TTLs are always kept aligned.</li>
+
+            <li class="lang-zh-el"><strong>漏洞防御与反网络攻击</strong>：防御恒定时间防侧信道爆破、源地址投毒清洗、UDP放大反射、HTTPS内存炸弹、慢速握手等网络攻击；使用绝对的流量沙盒防止泄漏真实地址</li>
+            <li class="lang-en-el"><strong>Vulnerability Defense & Anti-Network Attack</strong>: Defends against constant-time side-channel attacks, source address poisoning/scrubbing, UDP amplification/reflection, HTTPS memory bombs, and slow-handshake attacks. Uses isolated sandboxes to prevent real IP leaks.</li>
+
+            <li class="lang-zh-el"><strong>resolve命令行工具</strong>：支持完善的resolve功能，对标dig</li>
+            <li class="lang-en-el"><strong>Resolve CLI Tool</strong>: Built-in feature-complete resolution command-line tool, fully matching the capabilities of dig.</li>
         </ul>
     </section>
 
     <section id="os">
-        <h2>💻 支持的操作系统</h2>
+        <h2 class="lang-zh-el">💻 支持的操作系统</h2>
+        <h2 class="lang-en-el">💻 Supported Operating Systems</h2>
         
-        <h3>🪟 Windows 系列（全面覆盖企业与现代桌面）</h3>
-        <p><em>底层架构：<code>x86_64</code> (主流 Intel/AMD) 与 <code>aarch64</code> (现代 ARM 处理器)</em></p>
+        <h3 class="lang-zh-el">🪟 Windows 系列（全面覆盖企业与现代桌面）</h3>
+        <h3 class="lang-en-el">🪟 Windows Series (Full Coverage of Enterprise & Modern Desktops)</h3>
+        <p class="lang-zh-el"><em>底层架构：<code>x86_64</code> (主流 Intel/AMD) 与 <code>aarch64</code> (现代 ARM 处理器)</em></p>
+        <p class="lang-en-el"><em>Underlying Architectures: <code>x86_64</code> (Mainstream Intel/AMD) & <code>aarch64</code> (Modern ARM Processors)</em></p>
         <ul>
-            <li><strong>企业级服务器 (Windows Server)</strong>：完美支持 Windows Server 2016, 2019, 2022 以及最新的 Windows Server 2025。</li>
-            <li><strong>个人桌面端 (Windows Desktop)</strong>：完美支持 Windows 10 和 Windows 11。</li>
-            <li><strong>ARM 笔电生态</strong>：原生满血支持搭载骁龙 X 芯片的新一代 Windows 11 ARM 笔记本。</li>
+            <li class="lang-zh-el"><strong>企业级服务器 (Windows Server)</strong>：完美支持 Windows Server 2016, 2019, 2022 以及最新的 Windows Server 2025。</li>
+            <li class="lang-en-el"><strong>Enterprise Servers (Windows Server)</strong>: Fully supports Windows Server 2016, 2019, 2022, and the latest Windows Server 2025.</li>
+            <li class="lang-zh-el"><strong>个人桌面端 (Windows Desktop)</strong>：完美支持 Windows 10 和 Windows 11。</li>
+            <li class="lang-en-el"><strong>Personal Desktops (Windows Desktop)</strong>: Fully supports Windows 10 and Windows 11.</li>
+            <li class="lang-zh-el"><strong>ARM 笔电生态</strong>：原生满血支持搭载骁龙 X 芯片的新一代 Windows 11 ARM 笔记本。</li>
+            <li class="lang-en-el"><strong>ARM Laptop Ecosystem</strong>: Native out-of-the-box support for next-generation Snapdragon X Elite/Plus Windows 11 ARM laptops.</li>
         </ul>
 
-        <h3>🐧 Linux 系列</h3>
-        <p><em>底层架构：<code>x86_64-generic-linux-gnu</code> 与 <code>aarch64-generic-linux-gnu</code></em></p>
+        <h3 class="lang-zh-el">🐧 Linux 系列</h3>
+        <h3 class="lang-en-el">🐧 Linux Series</h3>
+        <p class="lang-zh-el"><em>底层架构：<code>x86_64-generic-linux-gnu</code> 与 <code>aarch64-generic-linux-gnu</code></em></p>
+        <p class="lang-en-el"><em>Underlying Architectures: <code>x86_64-generic-linux-gnu</code> & <code>aarch64-generic-linux-gnu</code></em></p>
         <ul>
-            <li><strong>主流企业服务器 (Linux Server)</strong>：
+            <li class="lang-zh-el"><strong>主流企业服务器 (Linux Server)</strong>：
                 <ul>
                     <li>Debian 阵营：Ubuntu Server (18.04 及以上), Debian (10 及以上)。</li>
                     <li>红帽阵营 (RHEL)：CentOS (7/8/9), Red Hat Enterprise Linux, Rocky Linux, AlmaLinux, Oracle Linux。</li>
                     <li>其他商业 Server：SUSE Linux Enterprise, openSUSE。</li>
                 </ul>
             </li>
-            <li><strong>国产/个人桌面端 (Linux Desktop)</strong>：Ubuntu Desktop, Fedora, Linux Mint, Deepin (深度操作系统), 统信 UOS, Manjaro 等。</li>
-            <li><strong>云服务器 / 边缘计算节点 (VPS & Edge)</strong>：
+            <li class="lang-en-el"><strong>Mainstream Enterprise Servers (Linux Server)</strong>:
+                <ul>
+                    <li>Debian Camps: Ubuntu Server (18.04 & above), Debian (10 & above).</li>
+                    <li>Red Hat Camps (RHEL): CentOS (7/8/9), Red Hat Enterprise Linux, Rocky Linux, AlmaLinux, Oracle Linux.</li>
+                    <li>Other Commercial Servers: SUSE Linux Enterprise, openSUSE.</li>
+                </ul>
+            </li>
+            <li class="lang-zh-el"><strong>国产/个人桌面端 (Linux Desktop)</strong>：Ubuntu Desktop, Fedora, Linux Mint, Deepin (深度操作系统), 统信 UOS, Manjaro 等。</li>
+            <li class="lang-en-el"><strong>Desktop & Distros (Linux Desktop)</strong>: Ubuntu Desktop, Fedora, Linux Mint, Deepin, UnionTech UOS, Manjaro, etc.</li>
+            <li class="lang-zh-el"><strong>云服务器 / 边缘计算节点 (VPS & Edge)</strong>：
                 <ul>
                     <li>支持所有主流云厂商（阿里云、腾讯云、华为云、AWS、Azure、Google Cloud 等）的普通 x86_64 虚拟机。</li>
                     <li><strong>【重点】</strong>完美支持 AWS Graviton、阿里云倚天、Oracle 等高性能 ARM64 云服务器。</li>
                     <li>支持安装了 64 位 Linux 系统的微型边缘主机（如树莓派 4、树莓派 5、NanoPi 等）。</li>
                 </ul>
             </li>
+            <li class="lang-en-el"><strong>Cloud & Edge Nodes (VPS & Edge)</strong>:
+                <ul>
+                    <li>Supports all mainstream cloud providers (Alibaba Cloud, Tencent Cloud, Huawei Cloud, AWS, Azure, Google Cloud, etc.) on standard x86_64 VMs.</li>
+                    <li><strong>[Highlight]</strong> Seamlessly supports high-performance ARM64 cloud instances like AWS Graviton, Alibaba Cloud Yitian, and Oracle ARM instances.</li>
+                    <li>Supports micro edge servers running 64-bit Linux (e.g., Raspberry Pi 4/5, NanoPi, etc.).</li>
+                </ul>
+            </li>
         </ul>
 
-        <h3>🍎 macOS 系列（苹果生态全家桶）</h3>
-        <p><em>底层架构：<code>x86_64-apple-darwin</code> 与 <code>aarch64-apple-darwin</code></em></p>
+        <h3 class="lang-zh-el">🍎 macOS 系列（苹果生态全家桶）</h3>
+        <h3 class="lang-en-el">🍎 macOS Series (Apple Ecosystem)</h3>
+        <p class="lang-zh-el"><em>底层架构：<code>x86_64-apple-darwin</code> 与 <code>aarch64-apple-darwin</code></em></p>
+        <p class="lang-en-el"><em>Underlying Architectures: <code>x86_64-apple-darwin</code> & <code>aarch64-apple-darwin</code></em></p>
         <ul>
-            <li><strong>老款 Mac 设备</strong>：完美支持搭载 Intel 处理器的老款 MacBook、iMac、Mac mini。</li>
-            <li><strong>新款 Mac 设备</strong>：原生支持搭载 M1、M2、M3、M4 芯片 (Apple Silicon) 的所有 Mac 设备。无需开启 Rosetta 转译，发挥出苹果芯片最极限的 I/O 性能。</li>
+            <li class="lang-zh-el"><strong>老款 Mac 设备</strong>：完美支持搭载 Intel 处理器的老款 MacBook、iMac、Mac mini。</li>
+            <li class="lang-en-el"><strong>Intel Macs</strong>: Fully supports older MacBook, iMac, and Mac mini models powered by Intel processors.</li>
+            <li class="lang-zh-el"><strong>新款 Mac 设备</strong>：原生支持搭载 M1、M2、M3、M4 芯片 (Apple Silicon) 的所有 Mac 设备。无需开启 Rosetta 转译，发挥出苹果芯片最极限的 I/O 性能。</li>
+            <li class="lang-en-el"><strong>Apple Silicon Macs</strong>: Native support for all Mac models powered by M1, M2, M3, and M4 Apple Silicon chips. No Rosetta translation required, unleashing peak chip I/O performance.</li>
         </ul>
 
-        <h3>🐳 云原生与容器化环境 (Docker / NAS)</h3>
-        <p><em>分发形式：全自动构建的 <code>ghcr.io</code> 多架构双端镜像 (amd64 / arm64)</em></p>
+        <h3 class="lang-zh-el">🐳 云原生与容器化环境 (Docker / NAS)</h3>
+        <h3 class="lang-en-el">🐳 Cloud-Native & Containerized Environments (Docker / NAS)</h3>
+        <p class="lang-zh-el"><em>分发形式：全自动构建的 <code>ghcr.io</code> 多架构双端镜像 (amd64 / arm64)</em></p>
+        <p class="lang-en-el"><em>Distribution: Automated multi-architecture dual-end images on <code>ghcr.io</code> (amd64 / arm64)</em></p>
         <ul>
-            <li><strong>网络附属存储 (NAS)</strong>：完美运行于群晖 (Synology)、威联通 (QNAP)、极空间等主流 NAS 系统的 Docker 组件中。</li>
-            <li><strong>高级网络环境</strong>：支持在 PVE/ESXi 下的虚拟机中运行，支持部署于 Kubernetes (K8s) 企业级编排集群。</li>
-            <li><strong>Windows 容器环境</strong>：完美支持在 Windows 的 WSL2 (Windows Subsystem for Linux) Docker Desktop 中运行。</li>
+            <li class="lang-zh-el"><strong>网络附属存储 (NAS)</strong>：完美运行于群晖 (Synology)、威联通 (QNAP)、极空间等主流 NAS 系统的 Docker 组件中。</li>
+            <li class="lang-en-el"><strong>Network Attached Storage (NAS)</strong>: Runs perfectly inside Docker on Synology, QNAP, Ugreen, and other mainstream NAS systems.</li>
+            <li class="lang-zh-el"><strong>高级网络环境</strong>：支持在 PVE/ESXi 下的虚拟机中运行，支持部署于 Kubernetes (K8s) 企业级编排集群。</li>
+            <li class="lang-en-el"><strong>Advanced Network Environments</strong>: Supports running in virtual machines under PVE/ESXi, and deploying to enterprise-grade Kubernetes (K8s) orchestration clusters.</li>
+            <li class="lang-zh-el"><strong>Windows 容器环境</strong>：完美支持在 Windows 的 WSL2 (Windows Subsystem for Linux) Docker Desktop 中运行。</li>
+            <li class="lang-en-el"><strong>Windows Containerized Environments</strong>: Fully supported in Windows WSL2 (Windows Subsystem for Linux) and Docker Desktop.</li>
         </ul>
     </section>
 
     <section id="install">
-        <h2>📦 安装与运行</h2>
-        <p>本程序为<strong>纯净绿色软件</strong>，无任何外部系统依赖。请前往 <a href="https://github.com/Gdxz-Linus/smartdns-edge/releases" target="_blank">Releases 页面</a> 下载对应您系统架构的最新压缩包。</p>
+        <h2 class="lang-zh-el">📦 安装与运行</h2>
+        <h2 class="lang-en-el">📦 Installation and Running</h2>
+        <p class="lang-zh-el">本程序为<strong>纯净绿色软件</strong>，无任何外部系统依赖。请前往 <a href="https://github.com/Gdxz-Linus/smartdns-edge/releases" target="_blank">Releases 页面</a> 下载对应您系统架构的最新压缩包。</p>
+        <p class="lang-en-el">This software is a clean, dependency-free utility. Please visit the <a href="https://github.com/Gdxz-Linus/smartdns-edge/releases" target="_blank">Releases page</a> to download the latest archive corresponding to your system architecture.</p>
 
-        <h3>🪟 Windows (企业服务器 & 个人桌面)</h3>
-        <p>将下载的 <code>.zip</code> 文件解压到一个固定目录（如 <code>D:\SmartDNS</code>）。</p>
+        <h3 class="lang-zh-el">🪟 Windows (企业服务器 & 个人桌面)</h3>
+        <h3 class="lang-en-el">🪟 Windows (Enterprise Servers & Desktops)</h3>
+        <p class="lang-zh-el">将下载的 <code>.zip</code> 文件解压到一个固定目录（如 <code>D:\SmartDNS</code>）。</p>
+        <p class="lang-en-el">Extract the downloaded <code>.zip</code> file to a fixed directory (e.g., <code>D:\SmartDNS</code>).</p>
         
-        <p><strong>方式一：前台测试运行（适合测试排障）</strong></p>
+        <p class="lang-zh-el"><strong>方式一：前台测试运行（适合测试排障）</strong></p>
+        <p class="lang-en-el"><strong>Method 1: Foreground Test Execution (Best for troubleshooting)</strong></p>
         <pre><code>.\smartdns.exe run -c .\smartdns.conf -v</code></pre>
-        <p><em>(注：<code>-v</code> 表示开启调试日志输出，方便直观查看解析过程)</em></p>
+        <p class="lang-zh-el"><em>(注：<code>-v</code> 表示开启调试日志输出，方便直观查看解析过程)</em></p>
+        <p class="lang-en-el"><em>(Note: <code>-v</code> enables debug log output to visually inspect the resolution process)</em></p>
 
-        <p><strong>方式二：后台服务运行（推荐，开机自启）</strong></p>
-        <p>请以管理员身份运行终端（PowerShell），执行以下命令，系统将全自动接管进程并配置好防火墙规则：</p>
-        <pre><code># 1. 安装服务
+        <p class="lang-zh-el"><strong>方式二：后台服务运行（推荐，开机自启）</strong></p>
+        <p class="lang-en-el"><strong>Method 2: Background Service Execution (Recommended, Autostart)</strong></p>
+        <p class="lang-zh-el">请以管理员身份运行终端（PowerShell），执行以下命令，系统将全自动接管进程并配置好防火墙规则：</p>
+        <p class="lang-en-el">Run your terminal (PowerShell) as Administrator and execute the following commands. The system will automatically register the background process and configure the local firewall rules:</p>
+        
+        <pre class="lang-zh-el"><code># 1. 安装服务
 .\smartdns.exe service install
 
 # 2. 启动服务
@@ -111,25 +224,79 @@
 
 # 3. 随时查看运行状态 (带 🟢/🔴 指示灯)
 .\smartdns.exe service status</code></pre>
-        <p><em>(如需彻底清理，执行 <code>.\smartdns.exe service uninstall</code> 即可)</em></p>
+        <pre class="lang-en-el"><code># 1. Install service
+.\smartdns.exe service install
 
-        <h3>🐧 Linux & 🍎 macOS (通用绿色运行)</h3>
-        <p>将下载的压缩包解压到目标目录。打开终端，赋予执行权限即可直接启动：</p>
-        <pre><code># 赋予执行权限
+# 2. Start service
+.\smartdns.exe service start
+
+# 3. Inspect service status (with 🟢/🔴 indicators)
+.\smartdns.exe service status</code></pre>
+        
+        <p class="lang-zh-el"><em>(如需彻底清理，执行 <code>.\smartdns.exe service uninstall</code> 即可)</em></p>
+        <p class="lang-en-el"><em>(To uninstall, simply execute <code>.\smartdns.exe service uninstall</code>)</em></p>
+
+        <h3 class="lang-zh-el">🐧 Linux & 🍎 macOS (通用绿色运行)</h3>
+        <h3 class="lang-en-el">🐧 Linux & 🍎 macOS (Generic Execution)</h3>
+        <p class="lang-zh-el">将下载的压缩包解压到目标目录。打开终端，赋予执行权限即可直接启动：</p>
+        <p class="lang-en-el">Extract the archive to your target directory. Open your terminal, grant execution permissions, and run:</p>
+        
+        <pre class="lang-zh-el"><code># 赋予执行权限
 chmod +x ./smartdns
 
 # 启动服务
 sudo ./smartdns run -c ./etc/smartdns/smartdns.conf</code></pre>
-        <p><em>(注：Linux 系统绑定 53 等特权端口需要 sudo root 权限)</em></p>
+        <pre class="lang-en-el"><code># Grant execution permissions
+chmod +x ./smartdns
 
-        <h3>🐳 Docker / NAS (容器化一键部署)</h3>
-        <p>我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology) 等支持 Docker 的环境中。使用 CLI 快速启动：</p>
-        <pre><code>docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns:v1.0.1</code></pre>
+# Start service
+sudo ./smartdns run -c ./etc/smartdns/smartdns.conf</code></pre>
+        
+        <p class="lang-zh-el"><em>(注：Linux 系统绑定 53 等特权端口需要 sudo root 权限)</em></p>
+        <p class="lang-en-el"><em>(Note: Binding to privileged ports like 53 on Linux requires sudo/root privileges)</em></p>
+
+        <h3 class="lang-zh-el">🐳 Docker / NAS (容器化一键部署)</h3>
+        <h3 class="lang-en-el">🐳 Docker / NAS (One-Click Container Deployment)</h3>
+        <p class="lang-zh-el">我们提供原生支持 amd64 与 arm64 双架构的极简容器镜像。极其适合部署在群晖 (Synology) 等支持 Docker 的环境中。使用 CLI 快速启动：</p>
+        <p class="lang-en-el">We provide minimal container images natively supporting both amd64 and arm64 architectures. Perfect for Synology Docker setups or similar environments. Quick start using the CLI:</p>
+        
+        <pre class="lang-zh-el"><code>docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns:v1.0.1</code></pre>
+        <pre class="lang-en-el"><code>docker run -d --name smartdns --restart always --network host -v /your/local/path/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns:v1.0.1</code></pre>
     </section>
 
     <footer>
         <hr>
-        <p>项目托管于 GitHub：<a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">Gdxz-Linus/smartdns-edge</a>。欢迎提交 Issue 与 Pull Request！</p>
+        <p class="lang-zh-el">项目托管于 GitHub：<a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">Gdxz-Linus/smartdns-edge</a>。欢迎提交 Issue 与 Pull Request！</p>
+        <p class="lang-en-el">Project hosted on GitHub: <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">Gdxz-Linus/smartdns-edge</a>. Contributions via Issues and Pull Requests are welcome!</p>
     </footer>
+
+    <script>
+        function switchLanguage(lang) {
+            document.body.className = 'lang-' + lang;
+            localStorage.setItem('preferred-lang', lang);
+            
+            if (lang === 'zh') {
+                document.title = "SmartDNS Edge - 基于 Rust 的全平台高性能本地 DNS 服务器";
+            } else {
+                document.title = "SmartDNS Edge - A Rust-based Cross-Platform High-Performance Local DNS Server";
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            let savedLang = localStorage.getItem('preferred-lang');
+            
+            if (!savedLang) {
+                const browserLang = navigator.language || navigator.userLanguage || 'zh';
+                if (browserLang.startsWith('zh')) {
+                    savedLang = 'zh';
+                } else {
+                    savedLang = 'en';
+                }
+            }
+            
+            document.getElementById('lang-select').value = savedLang;
+            switchLanguage(savedLang);
+        });
+    </script>
 </body>
 </html>
