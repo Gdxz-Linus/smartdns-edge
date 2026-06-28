@@ -72,7 +72,9 @@ runs:
 
     - name: Install just
       if: ${{ inputs.install_just == 'true' }}
-      uses: extractions/setup-just@v3
+      uses: taiki-e/install-action@v2
+      with:
+        tool: just
 
     - name: Install cross
       if: ${{ inputs.install_cross == 'true' && runner.os == 'Linux' }}
@@ -80,20 +82,15 @@ runs:
       with:
         tool: cross
 
-    - name: Install Wix Toolset
-      if: ${{ inputs.install_wix == 'true' && runner.os == 'Windows' }}
-      shell: pwsh
-      run: dotnet tool install --global wix
-
     - name: Install cargo-edit
       if: ${{ inputs.install_cargo_edit == 'true' }}
-      uses: baptiste0928/cargo-install@v3
+      uses: taiki-e/install-action@v2
       with:
-        crate: cargo-edit
+        tool: cargo-edit
 
     - name: Install patch-crate
       if: ${{ inputs.install_patch_crate == 'true' }}
-      uses: baptiste0928/cargo-install@v3
+      uses: taiki-e/install-action@v2
       with:
-        crate: patch-crate
+        tool: patch-crate
 
