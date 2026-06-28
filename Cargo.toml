@@ -169,8 +169,8 @@ console-subscriber = { version = "0.4.1", optional = true }
 # tracing-appender = "0.2"
 
 # hickory dns
-hickory-proto = { git = "https://github.com/mokeyish/hickory-dns.git", rev = "0.26.0-smartdns.5", features = ["serde"]}
-hickory-resolver = { git = "https://github.com/mokeyish/hickory-dns.git", rev = "0.26.0-smartdns.5", features = [
+hickory-proto = { path = "./hickory-dns/crates/proto", features = ["serde"]}
+hickory-resolver = { path = "./hickory-dns/crates/resolver", features = [
   "serde",
   "system-config",
 ] }
