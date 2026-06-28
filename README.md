@@ -185,6 +185,6 @@ sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
 
 Bash
 
-docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns:v1.0.1
+docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns-edge:v1.0.1
 
 (注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
