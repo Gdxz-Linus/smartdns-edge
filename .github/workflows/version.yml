@@ -20,7 +20,7 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{env.version}}
+      version: ${{ steps.bump_step.outputs.version }}
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -33,13 +33,14 @@ jobs:
       uses: ./.github/actions/setup
 
     - name: Bump version ${{ github.event.inputs.bump }}
+      id: bump_step
       run: |
         just bump ${{ github.event.inputs.bump }}
         
         # 🌟 极速解法：直接用原生命令行，秒读 Cargo.toml 里的真实版本号（过滤掉所有垃圾前缀）
         NEW_VER="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
         
-        echo "version=$NEW_VER" >> "$GITHUB_ENV"
+        echo "version=$NEW_VER" >> "$GITHUB_OUTPUT" 
         echo "NEW_VERSION=$NEW_VER" >> "$GITHUB_ENV"
         
     - name: Commit and Push changes
