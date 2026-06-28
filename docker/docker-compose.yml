@@ -1,7 +1,7 @@
 
 services:
   dns:
-    image: smartdns-rs
+    image: smartdns-edge
     build:
       context: .
       dockerfile: docker/Dockerfile  # 指向我们优化的 Dockerfile
