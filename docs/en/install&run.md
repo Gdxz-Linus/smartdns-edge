@@ -74,5 +74,5 @@ docker run -d \
   --restart always \
   --network host \
   -v /your/local/path/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns-edge:v1.0.1
+  ghcr.io/gdxz-linus/smartdns-edge:lastest
 ```
