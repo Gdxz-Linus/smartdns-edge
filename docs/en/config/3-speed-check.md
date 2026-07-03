@@ -1,4 +1,4 @@
-# Module 3: Speed Check & IP Selection
+# 3 Speed Check & IP Selection
 SmartDNS Edge can concurrently query multiple upstream DNS servers and perform real-network speed tests on the returned IPs, ensuring clients always connect to the server with the lowest physical latency.
 
 ## 3.1 Speed Check Mode

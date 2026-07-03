@@ -1,4 +1,4 @@
-# Module 1: Basic Service & Listener Setup
+# 1 Basic Service & Listener Setup
 
 This module covers how to run SmartDNS Edge as a basic DNS gateway, enable encrypted service ports, and harden system security.
 

@@ -1,4 +1,4 @@
-# Module 5: Domain Control & Ad Blocking
+# 5. Domain Control & Ad Blocking
 
 SmartDNS Edge offers extremely flexible domain management capabilities. You can easily implement domain redirection, granular rule control, and highly efficient ad-blocking supporting millions of rules.
 

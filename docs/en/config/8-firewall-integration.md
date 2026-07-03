@@ -1,4 +1,4 @@
-# Module 8: Advanced Firewall Integration (Transparent Proxy)
+# 8 Advanced Firewall Integration (Transparent Proxy)
 
 SmartDNS Edge supports deep integration with Linux kernel firewalls (iptables/nftables) by dynamically injecting resolved target IPs into system `ipset` or `nftset` collections. Combined with a transparent proxy program (like TPROXY or REDIRECT) on a soft-router, this achieves the ultimate split-routing architecture: "direct connection for domestic traffic, proxy for overseas."
 
