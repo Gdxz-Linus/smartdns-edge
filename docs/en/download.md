@@ -1,9 +1,3 @@
----
-hide:
-  - navigation
-  - toc
----
-
 # Downloads
 
 SmartDNS Edge provides high-performance, native executables across all major platforms. For standard Windows, Linux, and macOS systems, we highly recommend downloading the latest releases directly from this project.
