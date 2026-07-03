@@ -1,4 +1,4 @@
-# Module 4: High-Performance DNS Cache Mechanism
+# 4. High-Performance DNS Cache Mechanism
 
 SmartDNS Edge provides ultra-fast memory caching and persistence mechanisms. It also supports advanced optimistic caching (Serve Expired) and domain prefetching, ensuring millisecond-level DNS response times.
 

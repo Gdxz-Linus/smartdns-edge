@@ -1,4 +1,4 @@
-# Module 6: IP Control & CDN Acceleration
+# 6 IP Control & CDN Acceleration
 
 SmartDNS Edge provides robust IP-level routing and filtering capabilities. You can block ISP hijacked IPs, leverage aliasing for massive CDN acceleration, and optimize cross-subnet routing via ECS.
 

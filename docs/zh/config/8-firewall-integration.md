@@ -1,4 +1,4 @@
-# 模块 8：高级防火墙联动 (透明代理分流)
+# 8. 高级防火墙联动 (透明代理分流)
 
 SmartDNS Edge 支持与 Linux 内核防火墙（iptables / nftables）深度联动，将解析到的目标 IP 动态注入至系统的 ipset 或 nftset 集合中。配合软路由上的透明代理程序（如 TPROXY 或 REDIRECT），可完美实现“国内直连、海外走代理”的究极白名单分流架构。
 

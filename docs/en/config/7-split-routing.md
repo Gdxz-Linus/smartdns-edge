@@ -1,4 +1,4 @@
-# Module 7: Smart Split-Routing & Client Control
+# 7 Smart Split-Routing & Client Control
 
 SmartDNS Edge offers multi-dimensional intelligent split-routing. You can selectively route queries based on domain names or enforce strictly independent network rules (such as parental controls) based on the IP or MAC addresses of different devices in your LAN.
 

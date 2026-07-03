@@ -1,4 +1,4 @@
-# 模块 4：高性能 DNS 缓存机制
+# 4. 高性能 DNS 缓存机制
 
 SmartDNS Edge 提供极速的内存缓存与持久化机制，并支持先进的乐观缓存（Serve Expired）与域名预取（Prefetch），实现毫秒级 DNS 响应体验。
 

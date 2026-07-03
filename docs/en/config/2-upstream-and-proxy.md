@@ -1,4 +1,4 @@
-# Module 2: Upstream DNS & Proxy Tunnels
+# 2 Upstream DNS & Proxy Tunnels
 
 SmartDNS Edge supports a variety of mainstream and cutting-edge DNS query protocols, and deeply integrates local proxy capabilities. This module guides you on configuring upstream servers, anti-pollution proxy tunnels, as well as fallback and bootstrap resolution.
 
