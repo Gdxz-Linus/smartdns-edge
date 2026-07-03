@@ -1,8 +1,3 @@
----
-hide:
-    - toc
----
-
 # Module 1: Basic Service & Listener Setup
 
 This module covers how to run SmartDNS Edge as a basic DNS gateway, enable encrypted service ports, and harden system security.
@@ -72,5 +67,3 @@ As critical network infrastructure, you can harden security by dropping root pri
    audit-size 16M
    audit-file /var/log/smartdns/smartdns-audit.log
    ```
-
----

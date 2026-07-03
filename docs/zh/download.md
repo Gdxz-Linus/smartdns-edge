@@ -1,9 +1,3 @@
----
-hide:
-  - navigation
-  - toc
----
-
 # 下载资源
 
 SmartDNS Edge 提供了全平台的高性能原生可执行文件。对于标准的 Windows、Linux 和 macOS 系统，推荐直接下载本项目的最新 Release 版本。

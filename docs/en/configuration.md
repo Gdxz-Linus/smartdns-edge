@@ -1,9 +1,3 @@
----
-hide:
-  - navigation
-  - toc
----
-
 # Configurations Parameters
 
 ## Configuration Advice:

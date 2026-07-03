@@ -1,9 +1,3 @@
----
-hide:
-  - toc
----
-
-
 # Module 2: Upstream DNS & Proxy Tunnels
 
 SmartDNS Edge supports a variety of mainstream and cutting-edge DNS query protocols, and deeply integrates local proxy capabilities. This module guides you on configuring upstream servers, anti-pollution proxy tunnels, as well as fallback and bootstrap resolution.
@@ -79,5 +73,3 @@ When all primary DNS servers fail, timeout, or stop responding, the Fallback DNS
    Set the specified DNS as a fallback server
    server 8.8.4.4 -fallback
    ```
-   
- ---

@@ -23,6 +23,7 @@ SmartDNS Edge automatically adjusts the cache size based on available system mem
     ```
 
     2. Force Override Cache TTL
+	
     If you believe the TTL returned by upstream servers is too short or too long, you can enforce TTL bounds.
 
     ```shell
