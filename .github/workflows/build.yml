@@ -156,5 +156,15 @@ jobs:
         run: |
           IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/smartdns-edge"
           IMAGE_NAME_LOWER=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          TAG_VERSION="${{ steps.release_label.outputs.value }}"
           
-          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=${{ inputs.version }} -t ${IMAGE_NAME_LOWER}:${{ steps.release_label.outputs.value }} --push -f ./docker/Dockerfile .
+          # 1. 默认设置：始终打上版本号标签（如 :v1.0.1）
+          TAGS="-t ${IMAGE_NAME_LOWER}:${TAG_VERSION}"
+          
+          # 2. 智能判断：如果是正式版本（非 prerelease）且版本号以 "v" 开头，额外追加 :latest 标签
+          if [ "${{ inputs.prerelease }}" != "true" ] && [[ "$TAG_VERSION" =~ ^v[0-9] ]]; then
+            TAGS="$TAGS -t ${IMAGE_NAME_LOWER}:latest"
+          fi
+          
+          # 3. 执行多架构编译并推送
+          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=${{ inputs.version }} $TAGS --push -f ./docker/Dockerfile .
