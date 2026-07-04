@@ -1,4 +1,4 @@
-use super::openapi::{IntoRouter, http::get, routes};
+use super::openapi::{IntoRouter, routes};
 use crate::libdns::proto::rr::Name;
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ pub fn routes() -> StatefulRouter {
     routes![status,].into_router()
 }
 
-#[get("/system/status", tag="System", description = "Get system status", responses(
+#[utoipa::path(get, path = "/system/status", tag="System", description = "Get system status", responses(
     (status = 200, content_type="application/json", body = SystemStatus )
 ))]
 async fn status(State(s): State<Arc<ServeState>>) -> Json<SystemStatus> {

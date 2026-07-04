@@ -1,30 +1,25 @@
-use super::openapi::{
-    IntoRouter,
-    http::{get, post},
-    routes,
-};
-use super::{ApiError, ServeState, StatefulRouter};
-use crate::libdns::proto::rr::Name;
-use axum::Json;
-use axum::extract::State;
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::Json;
+
+use crate::libdns::proto::rr::Name;
 use serde::{Deserialize, Serialize};
 
+use super::openapi::{IntoRouter, routes};
+use super::{ApiError, ServeState, StatefulRouter};
+
 pub fn routes() -> StatefulRouter {
-    let r1 = routes![reload].into_router();
-    let r2 = routes![config].into_router();
-    r1.merge(r2)
-    // routes![reload, config].into_router()
+    routes![reload, config].into_router()
 }
 
-#[post("/config/reload", tag = "Config")]
+#[utoipa::path(post, path = "/config/reload", tag = "Config")]
 async fn reload(State(state): State<Arc<ServeState>>) -> Result<(), ApiError> {
     state.app.reload().await?;
     Ok(())
 }
 
-#[get("/config", tag = "Config", operation_id = "config")]
+#[utoipa::path(get, path = "/config", tag = "Config", operation_id = "config")]
 async fn config(State(state): State<Arc<ServeState>>) -> Json<ServerConfig> {
     let cfg = state.app.cfg().await;
     let conf_dir = cfg

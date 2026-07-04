@@ -13,11 +13,7 @@ use crate::{
     third_ext::serde_str,
 };
 
-use super::openapi::{
-    IntoRouter, ToSchema,
-    http::{delete, get, post, put},
-    routes,
-};
+use super::openapi::{IntoRouter, ToSchema, routes};
 use super::{ApiError, DataListPayload, ServeState, StatefulRouter};
 use axum::{Json, extract::State, http::StatusCode};
 
@@ -28,7 +24,7 @@ pub fn routes() -> StatefulRouter {
     routes![list, create, update, delete].into_router()
 }
 
-#[get("/addresses", tag = "Addresses")]
+#[utoipa::path(get, path = "/addresses", tag = "Addresses")]
 async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<AddressRule>> {
     // 🌟 抢占共享读锁：多个 GET 请求可完全并发，只有写操作时才会被短暂阻塞
     let _guard = CONFIG_FILE_LOCK.read().await;
@@ -45,7 +41,7 @@ async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Addr
     Json(groups.into())
 }
 
-#[post("/addresses", tag = "Addresses")]
+#[utoipa::path(post, path = "/addresses", tag = "Addresses")]
 async fn create(
     State(state): State<Arc<ServeState>>,
     Json(input): Json<CreateAddressRule>,
@@ -104,10 +100,10 @@ async fn create(
     Ok(StatusCode::CREATED)
 }
 
-#[put("/addresses", tag = "Addresses")]
+#[utoipa::path(put, path = "/addresses", tag = "Addresses")]
 async fn update() {}
 
-#[delete("/addresses", tag = "Addresses")]
+#[utoipa::path(delete, path = "/addresses", tag = "Addresses")]
 async fn delete(
     State(state): State<Arc<ServeState>>,
     Json(input): Json<DeleteAddressRule>,
