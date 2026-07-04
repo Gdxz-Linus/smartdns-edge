@@ -686,6 +686,9 @@
         // 7. 脚本初始化执行入口
         document.addEventListener('DOMContentLoaded', () => {
             initTheme();
+			
+			// 🌟 核心新增：自动触发 GitHub 访问计数器（通过后台静默加载图片）
+            new Image().src = "https://komarev.com/ghpvc/?username=Gdxz-Linus&repo=smartdns-edge&color=0969da&t=" + Date.now();
             
             // 绑定 Logo 的点击跳转
             document.getElementById('header-logo').addEventListener('click', () => {
