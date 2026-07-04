@@ -6,18 +6,16 @@ For soft-router systems like OpenWrt that require graphical web interfaces (such
 
 ## 1. Official SmartDNS Edge Releases (Recommended)
 
-SmartDNS Edge offers zero-dependency, ultra-optimized pre-compiled archives for all platforms.
+SmartDNS Edge provides zero-dependency, pre-compiled release packages optimized for all platforms.
 
-👉 **[Go to GitHub Releases to download the latest version](https://github.com/Gdxz-Linus/smartdns-edge/releases)**
-
-| Supported System (Arch) | Release Archive Name | Description |
-| :--- | :--- | :--- |
-| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | 64-bit Windows Desktop & Server |
-| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | Windows laptops with Snapdragon (ARM) chips |
-| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | Older Mac devices powered by Intel |
-| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | Modern Mac devices with M1/M2/M3/M4 chips |
-| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | Standard 64-bit Linux Server, Desktop, WSL |
-| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | ARM64 Linux Servers, Raspberry Pi, Edge nodes |
+| Supported OS (Arch) | Pre-compiled Package | Download Link | Description |
+| :--- | :--- | :--- | :--- |
+| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | [Download](https://downloads.goalwx.workers.dev/download/windows-x64) | 64-bit Windows Desktops & Servers |
+| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | [Download](https://downloads.goalwx.workers.dev/download/windows-arm64) | Snapdragon ARM-based Windows Laptops |
+| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | [Download](https://downloads.goalwx.workers.dev/download/mac-intel) | Intel-based Mac models |
+| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | [Download](https://downloads.goalwx.workers.dev/download/mac-arm64) | Apple M1/M2/M3/M4 Macs |
+| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | [Download](https://downloads.goalwx.workers.dev/download/linux-x64) | Standard 64-bit Linux, VPS, WSL |
+| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | [Download](https://downloads.goalwx.workers.dev/download/linux-arm64) | ARM64 Linux, Raspberry Pi, Edge devices |
 
 **Docker Container Image:**
 Native multi-architecture image (amd64 / arm64), which can be pulled directly via CLI:
