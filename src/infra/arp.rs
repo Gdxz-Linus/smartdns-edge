@@ -117,7 +117,7 @@ fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
         ) -> u32;
     }
 
-    let dest_ip = u32::from_ne_bytes(client_ip.octets());
+    let dest_ip = u32::from_be_bytes(client_ip.octets());
     let mut mac = [0u8; 6];
     let mut mac_len = 6u32;
 

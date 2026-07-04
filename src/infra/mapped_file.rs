@@ -196,9 +196,13 @@ impl MappedFile {
                 new_path = new_path.with_extension(ext);
             }
             
-            // 🌟 核心修复：把愚公移山（全量复制）升级为瞬间移动（原子重命名）
-            // 彻底消灭大文件轮转时造成的数秒磁盘 I/O 尖刺（Spike），耗时瞬间降至 0.1 毫秒！
-            // 原文件被移走后，后续逻辑会自动创建一个干净的新文件继续写入，完美衔接！
+            // 🌟 核心修复：在对旧文件执行 rename 重命名归档之前，必须先将当前打开的文件句柄 take() 出去并 drop 释放！
+            // 否则在 Windows 下，一个正在被打开写入的文件直接执行 rename 会引发句柄锁冲突（OS Error 32）。
+            if let Some(mut file) = self.file.take() {
+                let _ = file.flush();
+                drop(file);
+            }
+
             std::fs::rename(self.path.as_path(), new_path)?;
         }
 
