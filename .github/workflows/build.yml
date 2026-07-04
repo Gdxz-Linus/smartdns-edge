@@ -85,31 +85,26 @@ jobs:
       # 🌟 核心新增：自动清除 dist 目录下所有发布包的版本号后缀（如 -v1.0.1），转化为固定的文件名
       - name: Strip version suffix from dist artifacts
         run: |
-          cd dist || true
-          
-          # 1. 重命名压缩包（去掉 -v1.0.1 等版本号后缀）
-          for f in *.zip *.tar.gz *.tar.xz *.tar.zst; do
-            if [ -f "$f" ]; then
-              new_name=$(echo "$f" | sed -E 's/-(v?[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*)(\.zip|\.tar\.gz|\.tar\.xz|\.tar\.zst)$/\2/')
-              if [ "$f" != "$new_name" ]; then
-                mv "$f" "$new_name"
-              fi
-            fi
-          done
-
-          # 2. 同步重命名 sha256 校验文件，并修正文件内部记录的目标文件名
-          for f in *sha256sum.txt *sha256*; do
-            if [ -f "$f" ]; then
-              # 修正 sha256 文件内部记录的文件名，去掉 -v1.0.1
-              sed -i -E 's/-(v?[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*)(\.zip|\.tar\.gz|\.tar\.xz|\.tar\.zst)/\2/g' "$f"
-              
-              # 重命名 sha256 文件本身
-              new_name=$(echo "$f" | sed -E 's/-(v?[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*)(\.zip|\.tar\.gz|\.tar\.xz|\.tar\.zst)?(-sha256sum\.txt|\.sha256sum|\.txt)$/\2\3/')
-              if [ "$f" != "$new_name" ]; then
-                mv "$f" "$new_name"
-              fi
-            fi
-          done
+          python3 -c '
+          import os, re
+          dist_dir = "dist"
+          if os.path.exists(dist_dir):
+              for f in os.listdir(dist_dir):
+                  filepath = os.path.join(dist_dir, f)
+                  if os.path.isfile(filepath):
+                      # 1. 如果是校验文件，更新内部记录的文件名（去掉 -v1.0.1 等版本号）
+                      if f.endswith(".txt") or "sha256" in f:
+                          with open(filepath, "r", encoding="utf-8", errors="ignore") as fp:
+                              content = fp.read()
+                          new_content = re.sub(r"-(v?\d+\.\d+\.\d+[a-zA-Z0-9.-]*)", "", content)
+                          with open(filepath, "w", encoding="utf-8") as fp:
+                              fp.write(new_content)
+                      
+                      # 2. 重命名文件本身（去掉 -v1.0.1 等版本号）
+                      new_f = re.sub(r"-(v?\d+\.\d+\.\d+[a-zA-Z0-9.-]*)", "", f)
+                      if new_f != f:
+                          os.rename(filepath, os.path.join(dist_dir, new_f))
+          '
         shell: bash
 
       - name: Compute release label
