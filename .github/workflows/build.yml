@@ -82,6 +82,20 @@ jobs:
         run: just target=${{ matrix.target }} pack
         shell: bash
 
+      # 🌟 核心新增：自动清除 dist 目录下所有发布包的版本号后缀（如 -v1.0.1），转化为固定的文件名
+      - name: Strip version suffix from dist artifacts
+        run: |
+          cd dist || true
+          for f in *.zip *.tar.gz *.tar.xz *.tar.zst; do
+            if [ -f "$f" ]; then
+              new_name=$(echo "$f" | sed -E 's/-(v?[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*)(\.zip|\.tar\.gz|\.tar\.xz|\.tar\.zst)$/\2/')
+              if [ "$f" != "$new_name" ]; then
+                mv "$f" "$new_name"
+              fi
+            fi
+          done
+        shell: bash
+
       - name: Compute release label
         id: release_label
         uses: ./.github/actions/sanitize-label
