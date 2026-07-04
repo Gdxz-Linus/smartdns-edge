@@ -440,10 +440,9 @@ async fn process(
 
                             // 🌟 核心修复：遵循 RFC 1035 及 EDNS0 标准，动态决定 UDP 报文截断阈值
                             if protocol == crate::libdns::Protocol::Udp {
-                                // 1. 动态查验客户端订单 (EDNS0)：
-                                //    如果客户端带有 EDNS0，读取其接收能力。
-                                //    【防 10040 报错核心】：加上 4096 的服务端天花板，防止恶意客户端申请 65535 导致服务端发送时触发 WSAEMSGSIZE！
-                                //    同时兜底 512 字节，保护老旧设备不被分片撑爆丢包。
+                                use crate::libdns::proto::op::message::{HeaderCounts, update_header_counts};
+
+                                // 1. 动态查验客户端接收能力
                                 let max_payload = request.extensions()
                                     .as_ref()
                                     .map(|edns| edns.max_payload().clamp(512, 4096))
@@ -451,21 +450,29 @@ async fn process(
 
                                 if let Ok(bytes) = response_message.to_vec() {
                                     if bytes.len() > max_payload {
-                                        // 2. 超过动态尺子限制，贴上黄牌 (TC 截断标志)
+                                        // 2. 超过动态接收尺寸限制，贴上黄牌 (TC 截断标志)
                                         response_message.set_truncated(true);
                                         
-                                        // 🌟 核心优化：杜绝阶梯式反复 to_vec() 序列化（避免 AST 树深拷贝浪费 CPU）！
-                                        // 根据 RFC 规范，一旦 TC=1，客户端通常会自动使用 TCP 重试。
-                                        // 所以我们直接一次性清空 Additional 和 Authority 区，换取极致性能！
+                                        // 一次性清空 Additional 和 Authority 区域记录
                                         response_message.take_additionals();
                                         response_message.take_authorities();
                                         
-                                        // 仅做最后一次防线校验：防止恶意超大 TXT/Answer 依然撑爆 Payload
+                                        // 仅做最后一次防线校验：防止极端超大的 Answer 依然撑爆 Payload
                                         if let Ok(shrunk_bytes) = response_message.to_vec() {
                                             if shrunk_bytes.len() > max_payload {
                                                 response_message.take_answers();
                                             }
                                         }
+
+                                        // 🌟 核心修复（治理影响 A）：一旦触发物理截断，必须重新核对并覆写 Header 计数清单！
+                                        let counts = HeaderCounts {
+                                            query_count: response_message.queries().len(),
+                                            answer_count: response_message.answers().len(),
+                                            authority_count: response_message.authorities().len(),
+                                            additional_count: response_message.additionals().len(),
+                                        };
+                                        let synced_header = update_header_counts(response_message.header(), response_message.truncated(), counts);
+                                        response_message.set_header(synced_header);
                                     }
                                 }
                             }

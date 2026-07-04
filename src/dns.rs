@@ -527,12 +527,52 @@ mod response {
             self.valid_until = valid_until
         }
 
+        // 🌟 核心修复（治理影响 B）：在报文最终出站的必经之路上，严格核对实际装箱数量。
+        // 无论外部传入了什么 Header，都将其 QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT 
+        // 严格同步为当前报文体内真正携带的记录数！
         pub fn into_message(self, header: Option<Header>) -> Message {
+            use op::message::{HeaderCounts, update_header_counts};
             let mut message = self.message;
-            if let Some(header) = header {
-                message.set_header(header);
-            }
+            
+            // 提取基准 Header（若有外部传入的新 Header 则以它为准，否则使用自身 Header）
+            let base_header = header.as_ref().unwrap_or(message.header());
+            
+            // 统计当前报文体内实际装载的真实记录数量
+            let actual_counts = HeaderCounts {
+                query_count: message.queries().len(),
+                answer_count: message.answers().len(),
+                authority_count: message.authorities().len(), // 👈 准确获取实际塞入的 SOA 权威记录数
+                additional_count: message.additionals().len(),
+            };
+            
+            // 生成数量严格对齐的新 Header 并覆写
+            let synced_header = update_header_counts(base_header, message.truncated(), actual_counts);
+            message.set_header(synced_header);
+            
             message
+        }
+
+        // 🌟 核心重写：追加权威记录与附加记录时，同步刷新内存中的 Header 计数
+        pub fn add_authority(&mut self, record: Record) {
+            self.message.add_authority(record);
+            self.sync_header_counts();
+        }
+
+        pub fn add_additional(&mut self, record: Record) {
+            self.message.add_additional(record);
+            self.sync_header_counts();
+        }
+
+        pub fn sync_header_counts(&mut self) {
+            use op::message::{HeaderCounts, update_header_counts};
+            let counts = HeaderCounts {
+                query_count: self.message.queries().len(),
+                answer_count: self.message.answers().len(),
+                authority_count: self.message.authorities().len(),
+                additional_count: self.message.additionals().len(),
+            };
+            let header = update_header_counts(self.message.header(), self.message.truncated(), counts);
+            self.message.set_header(header);
         }
     }
 

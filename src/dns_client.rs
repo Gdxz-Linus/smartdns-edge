@@ -403,6 +403,11 @@ mod name_server_group {
                 .iter()
                 .map(|ns| GenericResolver::lookup(ns.as_ref(), name.clone(), options.clone()))
                 .collect::<Vec<_>>();
+				
+			// 🌟 核心防御保护：拦截空任务列表，防止 select_all 触发 Panic 崩盘
+            if tasks.is_empty() {
+                return Err(crate::libdns::proto::ProtoErrorKind::NoConnections.into());
+            }
 
             loop {
                 let (res, _idx, rest) = select_all(tasks).await;
