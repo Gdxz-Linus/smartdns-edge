@@ -244,7 +244,7 @@ async fn single_mode_ping_fastest(
         return None;
     }
 
-    let _permit = match PING_SEMAPHORE.try_acquire() {
+    let _permit = match PING_SEMAPHORE.acquire().await {
         Ok(p) => p,
         Err(_) => return None,
     };

@@ -634,7 +634,7 @@ async fn dynamic_tier_ping(
             let stagger_delay = Duration::from_millis((i as u64) * 25);
             
             futures.push(async move {
-                let _permit = match PING_SEMAPHORE.try_acquire() {
+                let _permit = match PING_SEMAPHORE.acquire().await {
                     Ok(p) => p,
                     Err(_) => return (dest, Err(())),
                 };

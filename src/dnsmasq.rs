@@ -294,53 +294,53 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_lan_client_store_lookup() {
+    #[tokio::test]
+    async fn test_lan_client_store_lookup() {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Default::default());
 
         assert_eq!(
-            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::AAAA),
+            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 .map(|s| s.into())
         );
 
         assert_eq!(
-            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::A),
+            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::A).await,
             None
         );
     }
 
-    #[test]
-    fn test_lan_client_store_lookup_fqdn() {
+    #[tokio::test]
+    async fn test_lan_client_store_lookup_fqdn() {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Default::default());
 
         assert_eq!(
-            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::AAAA),
+            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 .map(|s| s.into())
         );
 
         assert_eq!(
-            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::A),
+            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::A).await, 
             None
         );
     }
 
-    #[test]
-    fn test_lan_client_store_lookup_zone() {
+    #[tokio::test]
+    async fn test_lan_client_store_lookup_zone() {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Name::from_str("xyz").ok());
 
         assert_eq!(
-            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::AAAA),
+            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 .map(|s| s.into())
         );
 
         assert_eq!(
-            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A),
+            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A).await,
             None
         );
     }
