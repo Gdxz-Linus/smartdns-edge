@@ -28,7 +28,7 @@ docker pull ghcr.io/gdxz-linus/smartdns-edge:latest
 
 ## 2. 软路由与嵌入式生态 (互补资源)
 
-由于目前 SmartDNS Edge 主要提供跨平台的底层核心网关程序，如果您在 OpenWrt、DD-WRT 等路由器固件上需要原生的 luci-app 网页控制界面，您可以继续使用原版生态系统提供的包管理器进行安装：
+由于目前 SmartDNS Edge 主要提供跨平台的底层核心网关程序，如果您在 OpenWrt、DD-WRT 等路由器固件上需要原生的 luci-app 网页控制界面，您可以继续使用pymumu提供的原C语言版包管理器进行安装：
 
 | 系统 / 环境 | 获取方式与说明 |
 | :--- | :--- |

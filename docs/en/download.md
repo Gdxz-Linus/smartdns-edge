@@ -27,7 +27,7 @@ docker pull ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
 ##  2. Soft-Router & Embedded Ecosystem (Complementary)
-Since SmartDNS Edge currently focuses on providing the cross-platform core gateway daemon, if you require the native luci-app web GUI on router firmwares like OpenWrt or DD-WRT, you can continue to use the package managers provided by the original ecosystem:
+Since SmartDNS Edge currently focuses on providing the cross-platform core gateway daemon, if you require the native luci-app web GUI on router firmwares like OpenWrt or DD-WRT, you can continue to use the original C-version package manager provided by pymumu for installation:
 
 | System / Environment | Installation Method & Details |
 | :--- | :--- |
