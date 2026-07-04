@@ -82,37 +82,41 @@ jobs:
         run: just target=${{ matrix.target }} pack
         shell: bash
 
-      # 🌟 核心新增：自动清除 dist 目录下所有发布包的版本号后缀（如 -v1.0.1），转化为固定的文件名
-      - name: Strip version suffix from dist artifacts
-        run: |
-          python3 -c '
-          import os, re
-          dist_dir = "dist"
-          if os.path.exists(dist_dir):
-              for f in os.listdir(dist_dir):
-                  filepath = os.path.join(dist_dir, f)
-                  if os.path.isfile(filepath):
-                      # 1. 如果是校验文件，更新内部记录的文件名（去掉 -v1.0.1 等版本号）
-                      if f.endswith(".txt") or "sha256" in f:
-                          with open(filepath, "r", encoding="utf-8", errors="ignore") as fp:
-                              content = fp.read()
-                          new_content = re.sub(r"-(v?\d+\.\d+\.\d+[a-zA-Z0-9.-]*)", "", content)
-                          with open(filepath, "w", encoding="utf-8") as fp:
-                              fp.write(new_content)
-                      
-                      # 2. 重命名文件本身（去掉 -v1.0.1 等版本号）
-                      new_f = re.sub(r"-(v?\d+\.\d+\.\d+[a-zA-Z0-9.-]*)", "", f)
-                      if new_f != f:
-                          os.rename(filepath, os.path.join(dist_dir, new_f))
-          '
-        shell: bash
-
+      # 1. 先计算精准的版本号标签 (如 v1.0.1)
       - name: Compute release label
         id: release_label
         uses: ./.github/actions/sanitize-label
         with:
           raw_label: ${{ inputs.version || github.ref_name }}
           fallback_sha: ${{ github.sha }}
+
+      # 2. 🌟 核心修复：基于精确版本号，绝对不误删扩展名，绝对不碰撞文件夹名！
+      - name: Strip version suffix from dist artifacts
+        run: |
+          python3 -c '
+          import os, re
+          label = "${{ steps.release_label.outputs.value }}".lstrip("v")
+          dist_dir = "dist"
+          if label and os.path.exists(dist_dir):
+              # 精准匹配 -v1.0.1 或 -1.0.1，绝对不碰扩展名
+              pattern = re.compile(rf"-v?{re.escape(label)}")
+              for f in os.listdir(dist_dir):
+                  filepath = os.path.join(dist_dir, f)
+                  if os.path.isfile(filepath):
+                      # 修正 sha256 文本内部的内容
+                      if f.endswith(".txt") or "sha256" in f:
+                          with open(filepath, "r", encoding="utf-8", errors="ignore") as fp:
+                              content = fp.read()
+                          new_content = pattern.sub("", content)
+                          with open(filepath, "w", encoding="utf-8") as fp:
+                              fp.write(new_content)
+
+                      # 修正文件名本身
+                      new_f = pattern.sub("", f)
+                      if new_f != f:
+                          os.rename(filepath, os.path.join(dist_dir, new_f))
+          '
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -167,6 +171,7 @@ jobs:
         run: |
           mv smartdns-x86_64-unknown-linux-gnu-*/smartdns-x86_64-*.tar.gz ./smartdns-x86_64-generic-linux-gnu.tar.gz || true
           mv smartdns-aarch64-unknown-linux-gnu-*/smartdns-aarch64-*.tar.gz ./smartdns-aarch64-generic-linux-gnu.tar.gz || true
+        shell: bash
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
