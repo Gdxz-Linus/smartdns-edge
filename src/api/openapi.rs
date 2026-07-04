@@ -6,12 +6,8 @@ use utoipa::{
     openapi::{Paths, RefOr, Schema},
 };
 
-pub use utoipa::{IntoParams, ToSchema};
+pub use utoipa::{IntoParams, ToSchema, path};
 pub use utoipa_axum::{router::OpenApiRouter as Router, routes};
-
-pub mod http {
-    pub use utoipa::{any, delete, get, head, options, patch, post, put};
-}
 
 pub trait IntoRouter<S = ()> {
     fn into_router(self) -> Router<S>;
@@ -42,7 +38,6 @@ pub fn swagger_cdn<S: Clone + Send + Sync + 'static>(
     use utoipa::openapi::OpenApi;
 
     let cdn = cdn.unwrap_or("https://unpkg.com/swagger-ui-dist");
-    // 🌟 核心修复：直接将 HTML 模板硬编码进程序，保留原有的变量替换逻辑
     let html = r#"<!DOCTYPE html>
     <html lang="en">
     <head>

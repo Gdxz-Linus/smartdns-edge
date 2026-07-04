@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use super::openapi::{
-    IntoParams, IntoRouter,
-    http::{get, post},
-    routes,
-};
+use super::openapi::{IntoParams, IntoRouter, routes};
 use super::{ServeState, StatefulRouter};
 use crate::{config::CacheConfig, dns_mw_cache::CachedQueryRecord, log};
 use axum::{Json, extract::{State, Query}, http::StatusCode};
@@ -34,7 +30,7 @@ struct CacheListPayload<T> {
     data: Vec<T>,
 }
 
-#[get("/caches", tag = "Caches", operation_id = "list_caches", params(CachePagination))]
+#[utoipa::path(get, path = "/caches", tag = "Caches", operation_id = "list_caches", params(CachePagination))]
 async fn caches(
     State(state): State<Arc<ServeState>>,
     Query(page): Query<CachePagination>,
@@ -53,7 +49,7 @@ async fn caches(
     })
 }
 
-#[post("/caches/flush", tag = "Caches", operation_id = "flush_caches")]
+#[utoipa::path(post, path = "/caches/flush", tag = "Caches", operation_id = "flush_caches")]
 async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
     if let Some(c) = state.app.cache().await {
         c.clear().await;
@@ -62,7 +58,7 @@ async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-#[get("/caches/config", tag = "Caches", operation_id = "get_cache_config")]
+#[utoipa::path(get, path = "/caches/config", tag = "Caches", operation_id = "get_cache_config")]
 async fn config(State(state): State<Arc<ServeState>>) -> Json<CacheConfig> {
     let config = state.app.cfg().await.cache_config().clone();
     Json(config)

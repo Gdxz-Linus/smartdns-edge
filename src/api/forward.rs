@@ -6,14 +6,14 @@ use byte_unit::rust_decimal::str;
 use crate::config::ForwardRule;
 use serde::{Deserialize, Serialize};
 
-use super::openapi::{IntoRouter, http::get, routes};
+use super::openapi::{IntoRouter, routes};
 use super::{DataListPayload, ServeState, StatefulRouter};
 
 pub fn routes() -> StatefulRouter {
     routes![forwards].into_router()
 }
 
-#[get("/forwards", tag = "Forwards")]
+#[utoipa::path(get, path = "/forwards", tag = "Forwards")]
 async fn forwards(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<ForwardRuleGroup>> {
     let forwards = state
         .app
