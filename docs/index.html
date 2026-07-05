@@ -412,6 +412,57 @@
             color: var(--accent-color);
             text-decoration: none;
         }
+		
+		/* 11. 针对 720p 级别及 4:3 / 5:4 窄屏的响应式自适应优化 */
+        @media (max-width: 1150px) {
+            /* 在窄屏下缩减两边留白与侧边栏宽度，为正文腾出更多阅读空间 */
+            .layout-wrapper {
+                gap: 24px;         /* 间距由 40px 缩减为 24px */
+                width: 94%;        /* 页面左右白边从 5% 缩减为 3% */
+            }
+            .sidebar {
+                width: 210px;      /* 侧边栏由 250px 缩减为 210px */
+                padding-right: 16px;
+            }
+            .header-container {
+                width: 94%;
+            }
+        }
+
+        @media (max-width: 850px) {
+            /* 在极端窄屏（如 800x600 屏，或用户在桌面将浏览器左右分屏）下 */
+            /* 双栏自动转为单栏上下堆叠，彻底防止排版被挤压变形 */
+            .layout-wrapper:not(.no-sidebar) {
+                flex-direction: column;
+                gap: 32px;
+            }
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: static;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+                padding-right: 0;
+                padding-bottom: 16px;
+            }
+            /* 侧边栏子菜单在单栏模式下改为水平流式排版 */
+            .sidebar-menu {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .sidebar-item {
+                margin-bottom: 0;
+                padding: 8px 12px;
+            }
+        }
+		
+		/* 12. 确保 Markdown 正文里的图片能在高分辨率屏幕下自动等比例收缩，绝不撑破排版 */
+        .markdown-body img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 6px; /* 可选：圆角处理，观感更加现代 */
+        }
     </style>
 </head>
 <body>
