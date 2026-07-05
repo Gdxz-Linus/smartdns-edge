@@ -709,6 +709,7 @@
             const opt_sug = currentLang === 'zh' ? '💡 功能建议' : '💡 Feature Request';
             const opt_que = currentLang === 'zh' ? '💬 使用咨询' : '💬 Question/Support';
 			const label_title = currentLang === 'zh' ? '简短标题' : 'Title';
+			const label_contact = currentLang === 'zh' ? '您的联系方式（邮箱/Telegram，选填，方便我们修复后通知您）' : 'Your Contact (Email/Telegram, Optional)';
             const label_desc = currentLang === 'zh' ? '详细问题描述（建议附带简要日志或配置，请勿包含私密密钥）' : 'Description';
             const btn_submit = currentLang === 'zh' ? '提交反馈' : 'Submit';
             const msg_empty = currentLang === 'zh' ? '请填写标题与描述！' : 'Please fill in both title and description.';
@@ -720,20 +721,16 @@
                 <div style="background-color: var(--bg-secondary); border: 1px solid var(--border-color); padding: 24px; border-radius: 8px; margin-top: 24px; box-shadow: var(--shadow);">
                     <form id="raw-feedback-form">
                         <div style="margin-bottom: 16px;">
-                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_type}</label>
-                            <select id="fb-type" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none;">
-                                <option value="Bug">${opt_bug}</option>
-                                <option value="Suggestion">${opt_sug}</option>
-                                <option value="Question">${opt_que}</option> 
-                            </select>
-                        </div>
-                        <div style="margin-bottom: 16px;">
-                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_title}</label>
-                            <input type="text" id="fb-title" placeholder="e.g. Windows下服务无法正常自启" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" required />
-                        </div>
-                        <div style="margin-bottom: 20px;">
-                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
-                            <textarea id="fb-desc" rows="8" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
+                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_title}</label>
+                        <input type="text" id="fb-title" placeholder="e.g. Windows下服务无法正常自启" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" required />
+                    </div>
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_contact}</label>
+                        <input type="text" id="fb-contact" placeholder="e.g. email@example.com" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" />
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
+                        <textarea id="fb-desc" rows="8" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
                         </div>
                         <div id="fb-status-msg" style="margin-bottom: 16px; font-size: 0.95rem; font-weight: 500;"></div>
                         <button type="submit" id="fb-submit-btn" style="background-color: var(--accent-color); color: #ffffff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: background-color 0.2s;">${btn_submit}</button>
@@ -748,6 +745,7 @@
 
                 const type = document.getElementById("fb-type").value;
                 const title = document.getElementById("fb-title").value.trim();
+                const contact = document.getElementById("fb-contact").value.trim(); 
                 const description = document.getElementById("fb-desc").value.trim();
                 const statusMsg = document.getElementById("fb-status-msg");
                 const submitBtn = document.getElementById("fb-submit-btn");
@@ -763,7 +761,6 @@
                 statusMsg.innerHTML = `<span style="color: var(--text-secondary);">${msg_sending}</span>`;
 
                 // 🌟 获取当前访问域名并自动拼接 API。
-                // 这样无论您访问 downloads-21j.pages.dev 还是 smartdns-edge.pages.dev，API 路径都会完美自适应！
                 const apiUrl = `${window.location.protocol}//${window.location.host}/feedback`;
 
                 try {
@@ -772,13 +769,12 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({ type, title, description }),
+                        body: JSON.stringify({ type, title, description, contact }),
                     });
 
                     const resData = await response.json();
 
                     if (response.ok && resData.success) {
-                        // 提交成功，生成高亮成功弹窗并提供 GitHub 直达链接 [2]
                         statusMsg.innerHTML = `
                             <span style="color: #1a7f37; font-weight: bold; display: block; margin-bottom: 8px;">
                                 💚 ${currentLang === 'zh' ? '反馈提交成功！' : 'Submitted successfully!'}
@@ -790,8 +786,9 @@
                                 </a>
                             </span>
                         `;
-                        // 清空表单，并让按钮彻底功退
+                        // 清空表单输入框，并让提交按钮隐退
                         document.getElementById("fb-title").value = "";
+                        document.getElementById("fb-contact").value = "";
                         document.getElementById("fb-desc").value = "";
                         submitBtn.style.display = "none";
                     } else {
