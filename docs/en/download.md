@@ -29,7 +29,7 @@ Since SmartDNS Edge currently focuses on providing the cross-platform core gatew
 
 | System / Environment | Installation Method & Details |
 | :--- | :--- |
-| **OpenWrt** | For 24.10+ use the `apk` command:<br/>`apk add luci-app-smartdns`<br/><br/>For 22.03 and older use `opkg`:<br/>`opkg update && opkg install luci-app-smartdns` |
+| **OpenWrt** | For 24.10+ use the `apk` command:<br/>`apk add luci-app-smartdns`<br/>For 22.03 and older use `opkg`:<br/>`opkg update && opkg install luci-app-smartdns` |
 | **DD-WRT** | In the latest official firmware: Services Page -> SmartDNS Resolver -> Enable. |
 | **Entware** | `ipkg update`<br/>`ipkg install smartdns` |
 | **LuCI App** | `luci-app-smartdns` or `luci-app-smartdns-lite`<br/>*Note: The LuCI interface can be used to control the backend SmartDNS process.* |
