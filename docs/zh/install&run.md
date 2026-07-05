@@ -1,6 +1,6 @@
 # 安装与运行
 
-本程序为**纯净绿色软件**，无任何外部系统依赖。请前往 [Releases 页面](https://github.com/Gdxz-Linus/smartdns-edge/releases) 下载对应您系统架构的最新压缩包。
+本程序为**纯净绿色软件**，无任何外部系统依赖。
 
 ## 🪟 Windows (企业服务器 & 个人桌面)
 
