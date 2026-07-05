@@ -676,7 +676,8 @@
             const label_type = currentLang === 'zh' ? '反馈类型' : 'Feedback Type';
             const opt_bug = currentLang === 'zh' ? '🐛 Bug 反馈' : '🐛 Bug Report';
             const opt_sug = currentLang === 'zh' ? '💡 功能建议' : '💡 Feature Request';
-            const label_title = currentLang === 'zh' ? '简短标题' : 'Title';
+            const opt_que = currentLang === 'zh' ? '💬 使用咨询' : '💬 Question/Support';
+			const label_title = currentLang === 'zh' ? '简短标题' : 'Title';
             const label_desc = currentLang === 'zh' ? '详细问题描述（建议附带简要日志或配置，请勿包含私密密钥）' : 'Description';
             const btn_submit = currentLang === 'zh' ? '提交反馈' : 'Submit';
             const msg_empty = currentLang === 'zh' ? '请填写标题与描述！' : 'Please fill in both title and description.';
@@ -692,6 +693,7 @@
                             <select id="fb-type" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none;">
                                 <option value="Bug">${opt_bug}</option>
                                 <option value="Suggestion">${opt_sug}</option>
+                                <option value="Question">${opt_que}</option> 
                             </select>
                         </div>
                         <div style="margin-bottom: 16px;">
