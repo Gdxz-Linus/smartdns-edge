@@ -30,7 +30,7 @@ docker pull ghcr.io/gdxz-linus/smartdns-edge:latest
 
 | 系统 / 环境 | 获取方式与说明 |
 | :--- | :--- |
-| **OpenWrt** | 24.10 之后系统使用 `apk` 命令：<br/>`apk add luci-app-smartdns`<br/><br/>22.03 及之前系统使用 `opkg`：<br/>`opkg update && opkg install luci-app-smartdns` |
+| **OpenWrt** | 24.10 之后系统使用 `apk` 命令：<br/>`apk add luci-app-smartdns`<br/>22.03 及之前系统使用 `opkg`：<br/>`opkg update && opkg install luci-app-smartdns` |
 | **DD-WRT** | 官方最新固件 Services 页面 -> SmartDNS Resolver -> 启用。 |
 | **Entware** | `ipkg update`<br/>`ipkg install smartdns` |
 | **LuCI App** | `luci-app-smartdns` 或 `luci-app-smartdns-lite`<br/>*注：LuCI 界面可以直接驱动后端的 SmartDNS 进程。* |
