@@ -1,4 +1,4 @@
-## 什么是 SmartDNS Edge？
+# 什么是 SmartDNS Edge？
 
 SmartDNS Edge 是使用 Rust 语言重写的本地 DNS 智能网关。它能够获取多个上游 DNS 的解析结果，并通过测速算法动态获取最快的网站 IP 响应，从而显著提升网络访问响应速度与网页加载体验。
 
