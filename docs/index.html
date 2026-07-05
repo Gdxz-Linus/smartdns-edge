@@ -463,6 +463,10 @@
             options: {
                 zh: { label: '配置选项说明', file: './zh/configuration.md' },
                 en: { label: 'Config Options', file: './en/configuration.md' }
+            },
+            feedback: {
+                zh: { label: '问题反馈', file: './zh/feedback.md' },
+                en: { label: 'Feedback', file: './en/feedback.md' }
             }
         };
 
@@ -611,21 +615,20 @@
         }
 
         // 5. 动态 Fetch 对应 Markdown 文件并渲染
+        // 5. 动态 Fetch 对应 Markdown 文件并渲染（含表单自动注入与提交控制）
         async function loadMarkdown() {
             const contentArea = document.getElementById('markdown-content');
             contentArea.innerHTML = '<div class="loading">Loading...</div>';
 
             let url = '';
             if (activeMenu === 'config') {
-                // 根据当前的子菜单标识，直接匹配获取对应的中英文专属配置路径
                 const activeMod = configModules.find(mod => mod.id === activeSubConfig);
                 if (activeMod && activeMod[currentLang]) {
                     url = activeMod[currentLang].file;
                 } else {
-                    url = `./${currentLang}/config/${activeSubConfig}`; // 兜底
+                    url = `./${currentLang}/config/${activeSubConfig}`;
                 }
             } else {
-                // 直接读取中英文各自指示的明确路径
                 url = menuConfig[activeMenu][currentLang].file;
             }
 
@@ -636,6 +639,10 @@
                 }
                 const markdownText = await response.text();
                 contentArea.innerHTML = marked.parse(markdownText);
+
+                // 🌟 核心新增：检测页面是否含有反馈表单占位符，若有则自动注入表单并绑定逻辑
+                injectFeedbackFormIfNeeded();
+
             } catch (err) {
                 let browserSecurityHelp = '';
                 if (window.location.protocol === 'file:') {
@@ -659,6 +666,110 @@
                         ${browserSecurityHelp}
                     </div>`;
             }
+        }
+
+        // 🌟 核心新增：反馈表单注入与安全提交控制器
+        function injectFeedbackFormIfNeeded() {
+            const placeholder = document.getElementById("feedback-form-placeholder");
+            if (!placeholder) return; // 没有占位符，说明不是反馈页面，直接退出
+
+            const label_type = currentLang === 'zh' ? '反馈类型' : 'Feedback Type';
+            const opt_bug = currentLang === 'zh' ? '🐛 Bug 反馈' : '🐛 Bug Report';
+            const opt_sug = currentLang === 'zh' ? '💡 功能建议' : '💡 Feature Request';
+            const label_title = currentLang === 'zh' ? '简短标题' : 'Title';
+            const label_desc = currentLang === 'zh' ? '详细问题描述（建议附带简要日志或配置，请勿包含私密密钥）' : 'Description';
+            const btn_submit = currentLang === 'zh' ? '提交反馈' : 'Submit';
+            const msg_empty = currentLang === 'zh' ? '请填写标题与描述！' : 'Please fill in both title and description.';
+            const msg_sending = currentLang === 'zh' ? '正在努力向 GitHub 传送中，请稍候...' : 'Submitting to GitHub, please wait...';
+            const msg_err = currentLang === 'zh' ? '反馈发送失败' : 'Submission failed';
+
+            // 动态构建高度美观、完美契合亮/暗主题的 HTML 表单
+            placeholder.innerHTML = `
+                <div style="background-color: var(--bg-secondary); border: 1px solid var(--border-color); padding: 24px; border-radius: 8px; margin-top: 24px; box-shadow: var(--shadow);">
+                    <form id="raw-feedback-form">
+                        <div style="margin-bottom: 16px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_type}</label>
+                            <select id="fb-type" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none;">
+                                <option value="Bug">${opt_bug}</option>
+                                <option value="Suggestion">${opt_sug}</option>
+                            </select>
+                        </div>
+                        <div style="margin-bottom: 16px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_title}</label>
+                            <input type="text" id="fb-title" placeholder="e.g. Windows下服务无法正常自启" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" required />
+                        </div>
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
+                            <textarea id="fb-desc" rows="8" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
+                        </div>
+                        <div id="fb-status-msg" style="margin-bottom: 16px; font-size: 0.95rem; font-weight: 500;"></div>
+                        <button type="submit" id="fb-submit-btn" style="background-color: var(--accent-color); color: #ffffff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: background-color 0.2s;">${btn_submit}</button>
+                    </form>
+                </div>
+            `;
+
+            // 监听表单安全提交
+            const form = document.getElementById("raw-feedback-form");
+            form.addEventListener("submit", async (e) => {
+                e.preventDefault();
+
+                const type = document.getElementById("fb-type").value;
+                const title = document.getElementById("fb-title").value.trim();
+                const description = document.getElementById("fb-desc").value.trim();
+                const statusMsg = document.getElementById("fb-status-msg");
+                const submitBtn = document.getElementById("fb-submit-btn");
+
+                if (!title || !description) {
+                    statusMsg.innerHTML = `<span style="color: #cf222e;">⚠️ ${msg_empty}</span>`;
+                    return;
+                }
+
+                // 准备锁死按钮，防止用户重复疯狂点击
+                submitBtn.disabled = true;
+                submitBtn.style.opacity = "0.6";
+                statusMsg.innerHTML = `<span style="color: var(--text-secondary);">${msg_sending}</span>`;
+
+                // 🌟 获取当前访问域名并自动拼接 API。
+                // 这样无论您访问 downloads-21j.pages.dev 还是 smartdns-edge.pages.dev，API 路径都会完美自适应！
+                const apiUrl = `${window.location.protocol}//${window.location.host}/feedback`;
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ type, title, description }),
+                    });
+
+                    const resData = await response.json();
+
+                    if (response.ok && resData.success) {
+                        // 提交成功，生成高亮成功弹窗并提供 GitHub 直达链接 [2]
+                        statusMsg.innerHTML = `
+                            <span style="color: #1a7f37; font-weight: bold; display: block; margin-bottom: 8px;">
+                                💚 ${currentLang === 'zh' ? '反馈提交成功！' : 'Submitted successfully!'}
+                            </span>
+                            <span style="font-size: 0.92rem; color: var(--text-primary);">
+                                ${currentLang === 'zh' ? '已在 GitHub 自动为您生成 Issue 编号' : 'GitHub Issue created'}: 
+                                <a href="${resData.issue_url}" target="_blank" style="font-weight: bold; text-decoration: underline; color: var(--accent-color);">
+                                    #${resData.issue_number} (点击前往查看)
+                                </a>
+                            </span>
+                        `;
+                        // 清空表单，并让按钮彻底功退
+                        document.getElementById("fb-title").value = "";
+                        document.getElementById("fb-desc").value = "";
+                        submitBtn.style.display = "none";
+                    } else {
+                        throw new Error(resData.error || "未知服务器异常");
+                    }
+                } catch (err) {
+                    statusMsg.innerHTML = `<span style="color: #cf222e;">❌ ${msg_err}: ${err.message}</span>`;
+                    submitBtn.disabled = false;
+                    submitBtn.style.opacity = "1";
+                }
+            });
         }
 
         // 6. 交互路由跳转控制
