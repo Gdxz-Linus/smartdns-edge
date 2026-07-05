@@ -58,7 +58,7 @@
         }
 
         /* 3. 顶部导航栏样式 */
-        .site-header {
+         .site-header {
             position: sticky;
             top: 0;
             z-index: 100;
@@ -76,6 +76,7 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 15px; /* 防止小分辨率下左、中、右挤在一起 */
         }
 
         .logo {
@@ -86,27 +87,29 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            white-space: nowrap; /* 🌟 强制禁止 Logo 折行 */
         }
 
         .main-nav {
             display: flex;
-            gap: 16px;
+            gap: clamp(4px, 1vw, 12px); /* 🌟 弹性间距：大屏舒展，小屏紧凑 */
             height: 100%;
         }
 
         .nav-item {
             background: none;
             border: none;
-            font-size: 0.98rem;
+            font-size: clamp(0.9rem, 0.95vw, 0.98rem); /* 🌟 弹性字体大小：小屏幕下自动微缩 */
             color: var(--text-secondary);
             cursor: pointer;
-            padding: 0 16px;
+            padding: 0 clamp(8px, 1.2vw, 14px); /* 🌟 弹性内边距：自适应收缩释出大量宽度空间 */
             font-weight: 500;
             position: relative;
             height: 100%;
             display: flex;
             align-items: center;
             transition: color 0.2s;
+            white-space: nowrap; /* 🌟 强制禁止菜单文字折行 */
         }
 
         .nav-item:hover, .nav-item.active {
@@ -157,6 +160,33 @@
 
         .btn-toggle:hover {
             background-color: var(--border-color);
+        }
+
+        @media (max-width: 1150px) {
+            .header-container {
+                width: 94%; /* 调大容器占比，释放两边空间 */
+                gap: 10px;
+            }
+            .main-nav {
+                gap: 4px; /* 进一步压紧间距 */
+            }
+            .nav-item {
+                padding: 0 8px; /* 进一步收缩内边距 */
+                font-size: 0.92rem;
+            }
+        }
+
+        @media (max-width: 1000px) {
+            .header-container {
+                gap: 6px;
+            }
+            .logo {
+                font-size: 1.15rem; /* 微调缩小 Logo */
+            }
+            .nav-item {
+                padding: 0 6px;
+                font-size: 0.88rem;
+            }
         }
 
         /* 4. 双布局容器设计 */
