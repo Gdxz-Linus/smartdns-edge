@@ -779,9 +779,10 @@
                         <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_contact}</label>
                         <input type="text" id="fb-contact" placeholder="e.g. email@example.com" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" />
                     </div>
-                    <div style="margin-bottom: 20px;">
-                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
-                        <textarea id="fb-desc" rows="8" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
+                    div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
+                            <textarea id="fb-desc" rows="8" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
+                            <small style="display: block; margin-top: 6px; color: var(--text-secondary); font-size: 0.85rem; line-height: 1.4;">${tip_markdown}</small>
                         </div>
                         <div id="fb-status-msg" style="margin-bottom: 16px; font-size: 0.95rem; font-weight: 500;"></div>
                         <button type="submit" id="fb-submit-btn" style="background-color: var(--accent-color); color: #ffffff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: background-color 0.2s;">${btn_submit}</button>
