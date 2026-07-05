@@ -92,7 +92,7 @@ export async function onRequestPost(context) {
 }
 
 // 7. 处理浏览器的 Preflight (OPTIONS) 预检请求，防止跨域拦截
-pub async fn onRequestOptions() {
+export async function onRequestOptions() {
   return new Response(null, {
     status: 204,
     headers: {
