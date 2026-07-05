@@ -76,7 +76,7 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 15px; /* 防止小分辨率下左、中、右挤在一起 */
+            gap: 15px;
         }
 
         .logo {
@@ -87,29 +87,29 @@
             display: flex;
             align-items: center;
             gap: 8px;
-            white-space: nowrap; /* 🌟 强制禁止 Logo 折行 */
+            white-space: nowrap; 
         }
 
         .main-nav {
             display: flex;
-            gap: clamp(4px, 1vw, 12px); /* 🌟 弹性间距：大屏舒展，小屏紧凑 */
+            gap: clamp(4px, 1vw, 12px);
             height: 100%;
         }
 
         .nav-item {
             background: none;
             border: none;
-            font-size: clamp(0.9rem, 0.95vw, 0.98rem); /* 🌟 弹性字体大小：小屏幕下自动微缩 */
+            font-size: clamp(0.9rem, 0.95vw, 0.98rem);
             color: var(--text-secondary);
             cursor: pointer;
-            padding: 0 clamp(8px, 1.2vw, 14px); /* 🌟 弹性内边距：自适应收缩释出大量宽度空间 */
+            padding: 0 clamp(8px, 1.2vw, 14px); 
             font-weight: 500;
             position: relative;
             height: 100%;
             display: flex;
             align-items: center;
             transition: color 0.2s;
-            white-space: nowrap; /* 🌟 强制禁止菜单文字折行 */
+            white-space: nowrap;
         }
 
         .nav-item:hover, .nav-item.active {
@@ -164,14 +164,14 @@
 
         @media (max-width: 1150px) {
             .header-container {
-                width: 94%; /* 调大容器占比，释放两边空间 */
+                width: 94%; 
                 gap: 10px;
             }
             .main-nav {
-                gap: 4px; /* 进一步压紧间距 */
+                gap: 4px; 
             }
             .nav-item {
-                padding: 0 8px; /* 进一步收缩内边距 */
+                padding: 0 8px; 
                 font-size: 0.92rem;
             }
         }
@@ -181,7 +181,7 @@
                 gap: 6px;
             }
             .logo {
-                font-size: 1.15rem; /* 微调缩小 Logo */
+                font-size: 1.15rem;
             }
             .nav-item {
                 padding: 0 6px;
@@ -194,7 +194,7 @@
             flex: 1;
             display: flex;
             width: 90%;
-            margin: 40px auto 100px auto; /* 底部边距增加至 100px，为常驻页脚留出空白 */
+            margin: 40px auto 100px auto;
             gap: 40px;
             transition: max-width 0.3s;
         }
@@ -215,7 +215,7 @@
             flex-shrink: 0;
             position: sticky;
             top: 110px;
-            height: calc(100vh - 190px); /* 可视高度微调减小，避开底部常驻页脚 */
+            height: calc(100vh - 190px);
             overflow-y: auto;
             border-right: 1px solid var(--border-color);
             padding-right: 20px;
@@ -259,26 +259,26 @@
         /* 7. Markdown 标准化渲染样式 */
         .markdown-body h1, .markdown-body h2, .markdown-body h3 {
             color: var(--text-primary);
-            margin-top: 24px;
-            margin-bottom: 16px;
+            margin-top: 20px;
+            margin-bottom: 12px;
             font-weight: 600;
             line-height: 1.25;
         }
 
         .markdown-body h1 {
-            font-size: 2rem;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-        }
-
-        .markdown-body h2 {
-            font-size: 1.5rem;
+            font-size: 1.55rem;
             border-bottom: 1px solid var(--border-color);
             padding-bottom: 8px;
         }
 
-        .markdown-body h3 {
+        .markdown-body h2 {
             font-size: 1.25rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 6px;
+        }
+
+        .markdown-body h3 {
+            font-size: 1.1rem;
         }
 
         .markdown-body p, .markdown-body ul, .markdown-body ol {
@@ -395,16 +395,16 @@
         .site-footer {
             border-top: 1px solid var(--border-color);
             background-color: var(--bg-secondary);
-            padding: 12px 0; /* 略微缩短高度，使其常驻时更加精致 */
+            padding: 12px 0;
             font-size: 0.88rem;
             color: var(--text-secondary);
             text-align: center;
-            position: fixed; /* 开启固定定位 */
+            position: fixed;
             bottom: 0;
             left: 0;
             right: 0;
             z-index: 100;
-            box-shadow: 0 -2px 10px var(--shadow); /* 增加向上的微弱投影，将页脚与正文清晰分隔 */
+            box-shadow: 0 -2px 10px var(--shadow);
         }
 
         .site-footer a {
