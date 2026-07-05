@@ -22,7 +22,7 @@ export async function onRequestPost(context) {
     });
   }
 
-  const { type, title, description } = body;
+  const { type, title, description, contact } = body;
 
   if (!title || !description) {
     return new Response(JSON.stringify({ error: '标题与详细描述不能为空' }), {
@@ -42,7 +42,8 @@ export async function onRequestPost(context) {
 
   // 4. 自动格式化排版 GitHub Issue 的内容
   const issueTitle = `[${type}] ${title}`;
-  const issueBody = `### 反馈类型\n${type}\n\n### 详细描述\n${description}\n\n---\n*来自 SmartDNS Edge 网页控制台用户的实时反馈*`;
+  const contactLine = contact ? `**联系方式 (Contact)**: \`${contact}\`\n\n` : '';
+  const issueBody = `### 反馈类型\n${type}\n\n${contactLine}### 详细描述\n${description}\n\n---\n*来自 SmartDNS Edge 网页控制台用户的实时反馈*`;
 
   const githubApiUrl = `https://api.github.com/repos/${GITHUB_REPO}/issues`;
 
