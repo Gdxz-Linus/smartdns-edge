@@ -1,6 +1,6 @@
 # Installation & Running
 
-This software is a clean, dependency-free utility. Please visit the [Releases page](https://github.com/Gdxz-Linus/smartdns-edge/releases) to download the latest archive corresponding to your system architecture.
+This software is a clean, dependency-free utility. 
 
 ## 🪟 Windows (Enterprise Servers & Desktops)
 
