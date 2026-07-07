@@ -413,7 +413,7 @@
             text-decoration: none;
         }
 		
-		/* 11. 针对 720p 级别及 4:3 / 5:4 窄屏的响应式自适应优化 */
+		/* 10. 针对 720p 级别及 4:3 / 5:4 窄屏的响应式自适应优化 */
         @media (max-width: 1150px) {
             /* 在窄屏下缩减两边留白与侧边栏宽度，为正文腾出更多阅读空间 */
             .layout-wrapper {
@@ -462,6 +462,23 @@
             max-width: 100%;
             height: auto;
             border-radius: 6px; /* 可选：圆角处理，观感更加现代 */
+        }
+		
+		/* 13. 隐藏下载链接样式（彻底禁止文字选中与右键复制） */
+        .dl-link {
+            color: var(--accent-color);
+            cursor: pointer;
+            text-decoration: underline;
+            font-weight: 500;
+            transition: color 0.15s;
+            /* 🌟 物理防御：全方位强行禁止用户鼠标选中/高亮该下载文字 */
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+        }
+        .dl-link:hover {
+            color: var(--accent-hover);
         }
     </style>
 </head>
@@ -724,6 +741,9 @@
 
                 // 🌟 核心新增：检测页面是否含有反馈表单占位符，若有则自动注入表单并绑定逻辑
                 injectFeedbackFormIfNeeded();
+				
+				// 🌟 核心新增：动态绑定防复制隐蔽下载事件
+                bindSecureDownloadEvents();
 
             } catch (err) {
                 let browserSecurityHelp = '';
@@ -877,7 +897,25 @@
             }
         }
 
-        // 7. 脚本初始化执行入口
+        // 🌟 核心新增：无链接隐蔽下载与右键拦截控制器
+        function bindSecureDownloadEvents() {
+            const dlLinks = document.querySelectorAll('.dl-link');
+            dlLinks.forEach(link => {
+                // 1. 拦截右键点击：当用户右键点击“点击下载”时，直接吞掉菜单，无法弹出“复制链接地址” [3]
+                link.addEventListener('contextmenu', e => e.preventDefault());
+                
+                // 2. 监听左键点击：采用无感路由隐蔽跳转下载
+                link.addEventListener('click', () => {
+                    const fileKey = link.getAttribute('data-file');
+                    if (fileKey) {
+                        // 动态隐蔽启动下载流，对外绝对不暴露任何真实的绝对 URL 属性 [2]
+                        window.location.href = `./download/${fileKey}`;
+                    }
+                });
+            });
+        }
+		
+		// 7. 脚本初始化执行入口
         document.addEventListener('DOMContentLoaded', () => {
             initTheme();
 			
