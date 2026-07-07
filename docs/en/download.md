@@ -10,12 +10,12 @@ SmartDNS Edge provides zero-dependency, pre-compiled release packages optimized 
 
 | Supported OS (Arch) | Pre-compiled Package | Download Link | Description |
 | :--- | :--- | :--- | :--- |
-| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | [Download](https://downloads.goalwx.workers.dev/download/windows-x64) | 64-bit Windows Desktops & Servers |
-| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | [Download](https://downloads.goalwx.workers.dev/download/windows-arm64) | Snapdragon ARM-based Windows Laptops |
-| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | [Download](https://downloads.goalwx.workers.dev/download/mac-intel) | Intel-based Mac models |
-| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | [Download](https://downloads.goalwx.workers.dev/download/mac-arm64) | Apple M1/M2/M3/M4 Macs |
-| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | [Download](https://downloads.goalwx.workers.dev/download/linux-x64) | Standard 64-bit Linux, VPS, WSL |
-| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | [Download](https://downloads.goalwx.workers.dev/download/linux-arm64) | ARM64 Linux, Raspberry Pi, Edge devices |
+| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | [Download](https://smartdns-edge.pages.dev/download/windows-x64) | 64-bit Windows Desktops & Servers |
+| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | [Download](https://smartdns-edge.pages.dev/download/windows-arm64) | Snapdragon ARM-based Windows Laptops |
+| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | [Download](https://smartdns-edge.pages.dev/download/mac-intel) | Intel-based Mac models |
+| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | [Download](https://smartdns-edge.pages.dev/download/mac-arm64) | Apple M1/M2/M3/M4 Macs |
+| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | [Download](https://smartdns-edge.pages.dev/download/linux-x64) | Standard 64-bit Linux, VPS, WSL |
+| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | [Download](https://smartdns-edge.pages.dev/download/linux-arm64) | ARM64 Linux, Raspberry Pi, Edge devices |
 
 **Docker Container Image:**
 Native multi-architecture image (amd64 / arm64), which can be pulled directly via CLI:
