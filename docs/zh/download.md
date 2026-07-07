@@ -10,12 +10,12 @@ SmartDNS Edge 为全平台提供零依赖、极致优化的预编译压缩包。
 
 | 支持系统（架构） | 预编译发布包名称 | 下载链接 | 说明 |
 | :--- | :--- | :--- | :--- |
-| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | [点击下载](https://downloads.goalwx.workers.dev/download/windows-x64) | 64位 Windows 桌面与服务器 |
-| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | [点击下载](https://downloads.goalwx.workers.dev/download/windows-arm64) | 搭载骁龙等 ARM 芯片的 Windows 笔电 |
-| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | [点击下载](https://downloads.goalwx.workers.dev/download/mac-intel) | 搭载 Intel 处理器的老款 Mac |
-| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | [点击下载](https://downloads.goalwx.workers.dev/download/mac-arm64) | 搭载 M1/M2/M3/M4 芯片的新款 Mac |
-| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | [点击下载](https://downloads.goalwx.workers.dev/download/linux-x64) | 标准 64位 Linux 桌面、服务器、WSL |
-| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | [点击下载](https://downloads.goalwx.workers.dev/download/linux-arm64) | ARM64 Linux 服务器、树莓派等边缘设备 |
+| **Windows** (x86_64) | `smartdns-x86_64-pc-windows-msvc.zip` | [点击下载](https://smartdns-edge.pages.dev/download/windows-x64) | 64位 Windows 桌面与服务器 |
+| **Windows** (ARM64) | `smartdns-aarch64-pc-windows-msvc.zip` | [点击下载](https://smartdns-edge.pages.dev/download/windows-arm64) | 搭载骁龙等 ARM 芯片的 Windows 笔电 |
+| **macOS** (Intel) | `smartdns-x86_64-apple-darwin.zip` | [点击下载](https://smartdns-edge.pages.dev/download/mac-intel) | 搭载 Intel 处理器的老款 Mac |
+| **macOS** (Apple Silicon) | `smartdns-aarch64-apple-darwin.zip` | [点击下载](https://smartdns-edge.pages.dev/download/mac-arm64) | 搭载 M1/M2/M3/M4 芯片的新款 Mac |
+| **Linux** (x86_64) | `smartdns-x86_64-generic-linux-gnu.tar.gz` | [点击下载](https://smartdns-edge.pages.dev/download/linux-x64) | 标准 64位 Linux 桌面、服务器、WSL |
+| **Linux** (ARM64) | `smartdns-aarch64-generic-linux-gnu.tar.gz` | [点击下载](https://smartdns-edge.pages.dev/download/linux-arm64) | ARM64 Linux 服务器、树莓派等边缘设备 |
 
 **Docker 容器镜像：**
 原生的多架构双端镜像（amd64 / arm64），可直接通过 CLI 拉取：
