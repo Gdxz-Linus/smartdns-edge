@@ -18,8 +18,38 @@ const FILE_MAP = {
 
 export async function onRequest(context) {
   const { request, params } = context;
+
+  // 🌟 核心安全新增：宽松防盗链校验 (允许直接复制下载，封杀第三方网站盗用) [1.2.2]
+  const referer = request.headers.get('Referer');
+  if (referer) {
+    try {
+      const refUrl = new URL(referer);
+      // 允许的白名单域名（只允许您自己的官网、本地调试环境）
+      const allowedHosts = [
+        'smartdns-edge.pages.dev',
+        'downloads-21j.pages.dev',
+        'localhost',
+        '127.0.0.1'
+      ];
+
+      // 判断来源网站域名是否在白名单中
+      const isAllowed = allowedHosts.some(host => 
+        refUrl.hostname === host || refUrl.hostname.endsWith('.' + host)
+      );
+
+      // 🚨 拦截：发现是第三方网站在恶意盗用下载链接，直接返回 403 拒绝访问 [1.2.2]
+      if (!isAllowed) {
+        return new Response('403 Forbidden: Hotlinking is not allowed from this website.', {
+          status: 403,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+    } catch (e) {
+      // 解析异常时放行，确保可用性
+    }
+  }
   
-  // 自动从路径参数中提取文件名标识 (例如对于 /download/windows-arm64，fileKey 就是 "windows-arm64")
+  // 自动从路径参数中提取文件名标识
   const fileKey = params.file ? params.file[0] : '';
   
   if (!fileKey) {
