@@ -2,7 +2,7 @@
 
 SmartDNS Edge is a local DNS intelligent gateway rewritten in the Rust programming language. It resolves DNS queries from multiple upstream servers, dynamically determines the fastest IP addresses using smart speed-testing algorithms, and significantly improves internet access speeds and web-loading experiences.
 
-## ✨ 13 Core Features
+## ✨ Core Features
 
 *   **1. Multi-Virtual DNS Gateways & High-Availability Upstreams**
 
