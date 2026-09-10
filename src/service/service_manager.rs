@@ -53,12 +53,11 @@ impl From<ServiceDefinition> for ServiceManager {
 impl ServiceManager {
     pub fn install(&self) -> io::Result<()> {
         // 🌟 智能防呆：安装前先探针，如果存在直接提示，绝不重复破坏现场！
-        if let Ok(status) = self.status() {
-            if matches!(status, ServiceStatus::Running(_) | ServiceStatus::Dead(_)) {
+        if let Ok(status) = self.status()
+            && matches!(status, ServiceStatus::Running(_) | ServiceStatus::Dead(_)) {
                 println!("💡 SmartDNS service is already installed.");
                 return Ok(());
             }
-        }
 
         let _ = self.uninstall(false, true);
 
@@ -66,9 +65,7 @@ impl ServiceManager {
         self.definition.installer.install()?;
 
         if let Some(install) = self.definition.commands.install.as_ref() {
-            if let Err(e) = install.spawn() {
-                return Err(e);
-            }
+            install.spawn()?;
         }
 
         self.start()?;

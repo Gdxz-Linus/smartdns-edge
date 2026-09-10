@@ -38,11 +38,10 @@ impl<T> DomainMap<T> {
                 // 🌟 精准比对，杜绝哈希冲突
                 if let Some(wildcards) = self.wildcards.get(&name) {
                     for w in wildcards.iter() {
-                        if w.is_match(&last) {
-                            if let Some(v) = self.map.get(w) {
+                        if w.is_match(&last)
+                            && let Some(v) = self.map.get(w) {
                                 return Some(v);
                             }
-                        }
                     }
                 }
             }

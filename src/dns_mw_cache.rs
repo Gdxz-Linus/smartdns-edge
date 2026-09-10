@@ -309,7 +309,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         CacheStatus::Expired if ctx.cfg().serve_expired() && !no_serve_expired => {
                             if self.cache.mark_prefetching(&cache_key).await {
                                 // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
-                                let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl as u64);
+                                let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl);
                                 let sync_valid_until = Instant::now() + reply_ttl;
                                 
                                 self.cache.set_valid_until_for_prefetch(&cache_key, sync_valid_until).await;
@@ -428,13 +428,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         self.cache.insert_full_response(extra_key, extra_resp, Instant::now()).await;
                     }
 
-                    if ctx.cfg().prefetch_domain() {
-                        if let Some(ttl) = lookup.min_ttl() {
+                    if ctx.cfg().prefetch_domain()
+                        && let Some(ttl) = lookup.min_ttl() {
                             self.cache.prefetch_notify
                                 .notify_after(Duration::from_secs(ttl as u64))
                                 .await;
                         }
-                    }
                 }
                 
                 {
@@ -577,11 +576,10 @@ impl DnsCache {
 	// 🌟 核心修复 2：改为接收外部绝对基准时间，确保双栈微秒级一致！
     pub async fn set_valid_until_for_prefetch(&self, key: &CacheKey, new_valid_until: Instant) {
         let mut cache = self.get_shard(key).lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = cache.get_mut(key) {
-            if entry.valid_until < new_valid_until {
+        if let Some(entry) = cache.get_mut(key)
+            && entry.valid_until < new_valid_until {
                 entry.valid_until = new_valid_until;
             }
-        }
     }
 
     pub async fn purge_dead_records(&self, now: Instant) -> usize {
@@ -647,7 +645,7 @@ impl DnsCache {
                 .or_else(|| response.answers().iter().find(|r| r.record_type() == RecordType::SOA));
             if let Some(soa) = soa_record {
                 let mut negative_ttl = soa.ttl();
-                if let RData::SOA(soa_data) = soa.data() { negative_ttl = negative_ttl.min(soa_data.minimum() as u32); }
+                if let RData::SOA(soa_data) = soa.data() { negative_ttl = negative_ttl.min(soa_data.minimum()); }
                 min_ttl = min_ttl.min(negative_ttl);
             } else {
                 min_ttl = 5;
@@ -1033,18 +1031,15 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
 
         // 🌟 安全读取 ECS 字段，如果读不到说明是旧版缓存文件，兼容降级
         let mut ecs = None;
-        if let Ok(tag) = decoder.read_u8() {
-            if tag.unverified() == 6 {
-                if let Ok(len) = decoder.read_u16() {
+        if let Ok(tag) = decoder.read_u8()
+            && tag.unverified() == 6
+                && let Ok(len) = decoder.read_u16() {
                     let len = len.unverified();
-                    if len > 0 {
-                        if let Ok(bytes) = decoder.read_slice(len as usize) {
+                    if len > 0
+                        && let Ok(bytes) = decoder.read_slice(len as usize) {
                             ecs = String::from_utf8(bytes.unverified().to_vec()).ok();
                         }
-                    }
                 }
-            }
-        }
 
         let mut res: DnsResponse = message.into();
         res = res.with_valid_until(valid_until);
@@ -1066,7 +1061,7 @@ impl DnsCacheEntry {
         let mut buf = vec![];
 
         for entry in entries {
-            buf.truncate(0);
+            buf.clear();
             let mut encoder = BinEncoder::new(&mut buf);
             if (*entry).emit(&mut encoder).is_ok() {
                 let _ = writer.write_all(&buf);

@@ -40,11 +40,10 @@ impl ResolveCommand {
                 }
             }
         };
-        if let Some(proto) = proto {
-            if let Some(s) = server.as_mut() {
+        if let Some(proto) = proto
+            && let Some(s) = server.as_mut() {
                 s.set_proto(proto)
             }
-        }
         let domains = self.domains();
         // 🌟 核心修复 1：如果解析出来的类型是空的，强制兜底注入 A 记录！
         let mut query_types = self.q_type().to_vec();

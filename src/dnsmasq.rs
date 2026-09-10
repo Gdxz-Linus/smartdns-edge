@@ -104,11 +104,10 @@ impl LanClientStore {
                 let mut name = name.clone();
 
                 if !name.is_fqdn() {
-                    if let Some(zone) = self.zone.as_ref() {
-                        if let Ok(n) = name.clone().append_name(zone) {
+                    if let Some(zone) = self.zone.as_ref()
+                        && let Ok(n) = name.clone().append_name(zone) {
                             name = n;
                         }
-                    }
                     name.set_fqdn(true);
                 }
 
@@ -234,11 +233,10 @@ fn read_lease_file<P: AsRef<Path>>(
                 continue; 
             }
 			
-            if let Some(z) = zone {
-                if let Ok(host) = client_info.host.clone().append_name(z) {
+            if let Some(z) = zone
+                && let Ok(host) = client_info.host.clone().append_name(z) {
                     client_info.host = host;
                 }
-            }
             client_info.host.set_fqdn(true);
             map.insert(client_info.host.clone().into(), client_info);
         }

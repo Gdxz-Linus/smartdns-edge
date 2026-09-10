@@ -34,11 +34,10 @@ impl DnsMiddlewareHandler {
         let client_rules = cfg.client_rules();
         // 🌟 修复：坚决剥夺 ECS 参与本地 ACL 控制的权利，只认真实的请求来源物理 IP
         let mut client_ip = req.src().ip();
-        if let IpAddr::V6(addr) = client_ip {
-            if let Some(addr) = addr.to_ipv4_mapped() {
+        if let IpAddr::V6(addr) = client_ip
+            && let Some(addr) = addr.to_ipv4_mapped() {
                 client_ip = addr.into();
             }
-        }
         let rule_group_name = client_rules
             .iter()
             .find(|s| s.match_ip(&client_ip))

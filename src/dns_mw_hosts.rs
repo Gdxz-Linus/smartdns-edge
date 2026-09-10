@@ -40,11 +40,10 @@ impl DnsHostsMiddleware {
 
         {
             let cache = self.0.read().await;
-            if let Some(cache) = cache.as_ref() {
-                if now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL {
+            if let Some(cache) = cache.as_ref()
+                && now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL {
                     return cache.hosts.clone();
                 }
-            }
         }
 
         // 把 pattern 转换为字符串，用于跨线程传递

@@ -44,11 +44,10 @@ impl LookupError {
 
     #[inline]
     pub fn is_soa(&self) -> bool {
-        if let Self::Proto(err) = self {
-            if let ProtoErrorKind::NoRecordsFound(NoRecords { soa: Some(_), .. }) = err.kind() {
+        if let Self::Proto(err) = self
+            && let ProtoErrorKind::NoRecordsFound(NoRecords { soa: Some(_), .. }) = err.kind() {
                 return true;
             }
-        }
         false
     }
 	
@@ -64,15 +63,14 @@ impl LookupError {
     pub fn as_soa(&self, query: &Query) -> Option<DnsResponse> {
         if let Self::Proto(err) = self {
             // 🌟 核心修复：取出被底层强行当作 Error 包装起来的 SOA 和真实 ResponseCode
-            if let ProtoErrorKind::NoRecordsFound(no_records) = err.kind() {
-                if let Some(record) = &no_records.soa {
+            if let ProtoErrorKind::NoRecordsFound(no_records) = err.kind()
+                && let Some(record) = &no_records.soa {
                     let mut dns_response = DnsResponse::new_with_max_ttl(query.to_owned(), Vec::new());
                     dns_response.add_authority(record.as_ref().to_owned().into_record_of_rdata());
                     // 将 NXDomain 等原始状态码原封不动地还给它
                     dns_response.set_response_code(no_records.response_code);
                     return Some(dns_response);
                 }
-            }
         }
         None
     }

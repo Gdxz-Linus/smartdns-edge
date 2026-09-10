@@ -159,14 +159,13 @@ impl FromStr for DnsUrl {
         let host = match host {
             Some(host) => {
                 let mut host = host.to_owned();
-                if let Host::Domain(ref domain) = host {
-                    if let Ok(ip) = IpAddr::from_str(domain) {
+                if let Host::Domain(ref domain) = host
+                    && let Ok(ip) = IpAddr::from_str(domain) {
                         host = match ip {
                             IpAddr::V4(ip) => Host::Ipv4(ip),
                             IpAddr::V6(ip) => Host::Ipv6(ip),
                         };
                     }
-                }
                 Some(host)
             }
             None => None,

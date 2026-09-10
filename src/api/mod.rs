@@ -172,25 +172,23 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
     let expected_token = std::env::var("SMARTDNS_API_TOKEN").unwrap_or_else(|_| "admin_secret".to_string());
 
     // 提取 HTTP Header 中的 Authorization 字段
-    if let Some(auth_header) = req.headers().get(http::header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            // 校验 Bearer Token
-            if auth_str.starts_with("Bearer ") {
-                let provided_token = &auth_str[7..];
-
-                // 🌟 上帝视角安全防御：恒定时间比较 (Constant-Time Comparison)
-                // 绝不使用原生的 `==` 短路比较，防止黑客通过极其微小的微秒级响应时间差，逐位爆破出你的管理密码。
-                if provided_token.len() == expected_token.len() {
-                    let mut diff = 0;
-                    for (a, b) in provided_token.bytes().zip(expected_token.bytes()) {
-                        // 使用 std::hint::black_box 蒙蔽 LLVM 的窥视优化，
-                        // 强迫 CPU 无论匹配与否，都必须老老实实做完所有的异或和位或运算，保证耗时绝对恒定！
-                        diff |= std::hint::black_box(a ^ b);
-                    }
-                    if diff == 0 {
-                        // 密码正确，放行！进入真正的 API 处理逻辑
-                        return Ok(next.run(req).await);
-                    }
+    if let Some(auth_header) = req.headers().get(http::header::AUTHORIZATION)
+        && let Ok(auth_str) = auth_header.to_str()
+    {
+        // 校验 Bearer Token
+        if let Some(provided_token) = auth_str.strip_prefix("Bearer ") {
+            // 🌟 上帝视角安全防御：恒定时间比较 (Constant-Time Comparison)
+            // 绝不使用原生的 `==` 短路比较，防止黑客通过极其微小的微秒级响应时间差，逐位爆破出你的管理密码。
+            if provided_token.len() == expected_token.len() {
+                let mut diff = 0;
+                for (a, b) in provided_token.bytes().zip(expected_token.bytes()) {
+                    // 使用 std::hint::black_box 蒙蔽 LLVM 的窥视优化，
+                    // 强迫 CPU 无论匹配与否，都必须老老实实做完所有的异或和位或运算，保证耗时绝对恒定！
+                    diff |= std::hint::black_box(a ^ b);
+                }
+                if diff == 0 {
+                    // 密码正确，放行！进入真正的 API 处理逻辑
+                    return Ok(next.run(req).await);
                 }
             }
         }

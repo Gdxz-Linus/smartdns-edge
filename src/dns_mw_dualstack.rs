@@ -215,7 +215,7 @@ async fn which_faster(
                 _ = &mut grace_period => None,
             };
 
-            if let Some(_) = second_res {
+            if second_res.is_some() {
                 return None;
             } else {
                 return Some(is_aaaa_first);

@@ -67,9 +67,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
             Ok(lookup) => Ok({
                 let mut records = Cow::Borrowed(lookup.records());
 
-                if query_type.is_ip_addr() {
-                    if let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num() {
-                        if max_reply_ip_num > 0 {
+                if query_type.is_ip_addr()
+                    && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
+                        && max_reply_ip_num > 0 {
                             let mut truncate = None;
                             for (i, r) in records.iter().enumerate() {
                                 if matches!(r.data(), RData::A(_) | RData::AAAA(_)) {
@@ -88,8 +88,6 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                                 _ => (),
                             }
                         }
-                    }
-                }
 
                 let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
 

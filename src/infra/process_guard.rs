@@ -31,10 +31,11 @@ pub fn create<P: AsRef<Path>>(path: P) -> Result<ProcessGuard, ProcessGuardError
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)?;
 
     // 尝试非阻塞获取排他锁
-    if let Err(_) = file.try_lock_exclusive() {
+    if file.try_lock_exclusive().is_err() {
         // 如果获取失败，说明另一个实例正在运行并持有该锁
         let mut id_str = String::new();
         let _ = file.read_to_string(&mut id_str);

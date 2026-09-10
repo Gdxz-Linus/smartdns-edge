@@ -300,7 +300,7 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
                 Ok(conn) => Ok(conn),
                 Err(err) => {
                     log::error!("Failed to connect to any nameserver: {} {}", server, err);
-                    return Err(err);
+                    Err(err)
                 }
             }
         }
@@ -721,7 +721,7 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
             };
             
             // UDP 是无连接的，在首个发包前设置即可立刻生效
-            setup_socket(&udp_socket, None, so_mark.clone(), device.clone());
+            setup_socket(&udp_socket, None, so_mark, device.clone());
 
             let tcp_stream = if let Some(proxy) = &proxy_config {
                 let target_addr = proxy.server;

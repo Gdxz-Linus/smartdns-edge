@@ -57,8 +57,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
 
         let client = &self.client;
 
-        if rtype.is_ip_addr() {
-            if let Some(lookup) = client.lookup_nameserver(name.clone(), rtype).await {
+        if rtype.is_ip_addr()
+            && let Some(lookup) = client.lookup_nameserver(name.clone(), rtype).await {
                 debug!(
                     "lookup nameserver {} {} ip {:?}",
                     name,
@@ -72,7 +72,6 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                 ctx.no_cache = true;
                 return Ok(lookup);
             }
-        }
 
         let lookup_options = LookupOptions {
             // 无论客户端带不带 DO 标志，向外网查询时一律填 false，拒绝向上游索要加密签名！
@@ -388,15 +387,14 @@ async fn lookup_ip(
                 };
 
                 // 1. 处理测速结果：谁现实里第一个冲过终点线拿到真实 IP，谁就赢！
-                if let Some(ping_result) = ping_res {
-                    if let Some(ip) = ping_result {
+                if let Some(ping_result) = ping_res
+                    && let Some(ip) = ping_result {
                         // 只要有任何一个模式（如 TCP 或降级的 ICMP）测通了，瞬间结束！
                         fastest_ip = Some(ip);
                         break;
                     }
                     // 如果这个 IP 的所有模式都失败了（ping_result 为 None）
                     // 绝对不 break！什么都不做，继续等其他还在查询或测速的任务！
-                }
 
                 // 2. 处理上游查询结果：滚动发车！
                 if let Some(q_res) = query_res {

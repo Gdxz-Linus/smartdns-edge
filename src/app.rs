@@ -448,8 +448,8 @@ async fn process(
                                     .map(|edns| edns.max_payload().clamp(512, 4096))
                                     .unwrap_or(512) as usize;
 
-                                if let Ok(bytes) = response_message.to_vec() {
-                                    if bytes.len() > max_payload {
+                                if let Ok(bytes) = response_message.to_vec()
+                                    && bytes.len() > max_payload {
                                         // 2. 超过动态接收尺寸限制，贴上黄牌 (TC 截断标志)
                                         response_message.set_truncated(true);
                                         
@@ -458,11 +458,10 @@ async fn process(
                                         response_message.take_authorities();
                                         
                                         // 仅做最后一次防线校验：防止极端超大的 Answer 依然撑爆 Payload
-                                        if let Ok(shrunk_bytes) = response_message.to_vec() {
-                                            if shrunk_bytes.len() > max_payload {
+                                        if let Ok(shrunk_bytes) = response_message.to_vec()
+                                            && shrunk_bytes.len() > max_payload {
                                                 response_message.take_answers();
                                             }
-                                        }
 
                                         // 🌟 核心修复（治理影响 A）：一旦触发物理截断，必须重新核对并覆写 Header 计数清单！
                                         let counts = HeaderCounts {
@@ -474,7 +473,6 @@ async fn process(
                                         let synced_header = update_header_counts(response_message.header(), response_message.truncated(), counts);
                                         response_message.set_header(synced_header);
                                     }
-                                }
                             }
 
                             SerialMessage::raw(response_message, addr, protocol)
@@ -705,13 +703,12 @@ impl crate::middleware::Middleware<crate::dns::DnsContext, crate::dns::DnsReques
             }
         }
 
-        if let Some(group) = matched_group {
-            if ctx.server_opts.rule_group.as_deref() != Some(group.as_str()) {
+        if let Some(group) = matched_group
+            && ctx.server_opts.rule_group.as_deref() != Some(group.as_str()) {
                 crate::log::debug!("Client {} matched client-rule, routing to group: {}", client_ip, group);
                 ctx.server_opts.rule_group = Some(group.clone());
                 ctx.domain_rule = ctx.cfg().find_domain_rule(req.query().original().name(), &group);
             }
-        }
 
         next.run(ctx, req).await
     }

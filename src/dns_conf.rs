@@ -83,7 +83,7 @@ impl RuntimeConfig {
                 std::path::Component::CurDir => continue, // 遇到 '.' 直接丢弃
                 std::path::Component::ParentDir => {
                     // 遇到 '..' 时，只有上一级是普通文件夹才安全退格（防误删盘符或根目录）
-                    if let Some(std::path::Component::Normal(_)) = normalized.components().last() {
+                    if let Some(std::path::Component::Normal(_)) = normalized.components().next_back() {
                         normalized.pop();
                     } else {
                         normalized.push(comp);
@@ -777,7 +777,7 @@ impl RuntimeConfigBuilder {
         });
         let ip_alias = Arc::new(IpMap::from_iter(ip_alias));
 
-        for (_, rule) in self.rule_groups.iter_mut() {
+        for rule in self.rule_groups.values_mut() {
             if !rule.cnames.is_empty() {
                 rule.cnames.dedup_by(|a, b| a.domain == b.domain);
             }
@@ -1167,9 +1167,9 @@ fn resolve_filepath<P: AsRef<Path>>(filepath: P, base_file: Option<&PathBuf>) ->
         return filepath.to_path_buf();
     }
 
-    if !filepath.is_absolute() {
-        if let Some(base_conf_file) = base_file {
-            if let Some(dir) = base_conf_file.parent() {
+    if !filepath.is_absolute()
+        && let Some(base_conf_file) = base_file
+            && let Some(dir) = base_conf_file.parent() {
                 let new_path = dir.join(filepath);
 
                 if new_path.is_file() {
@@ -1186,23 +1186,18 @@ fn resolve_filepath<P: AsRef<Path>>(filepath: P, base_file: Option<&PathBuf>) ->
                     }
                 }
 
-                if let Ok(new_path) = std::env::current_dir().map(|dir| dir.join(filepath)) {
-                    if new_path.is_file() {
+                if let Ok(new_path) = std::env::current_dir().map(|dir| dir.join(filepath))
+                    && new_path.is_file() {
                         return new_path;
                     }
-                }
 
                 if let Some(new_path) = std::env::current_exe()
                     .ok()
                     .and_then(|exe| exe.parent().map(|dir| dir.join(filepath)))
-                {
-                    if new_path.is_file() {
+                    && new_path.is_file() {
                         return new_path;
                     }
-                }
             }
-        }
-    }
 
     // try to resolve absolute path by extracting its file_name
     match filepath.file_name().map(Path::new) {

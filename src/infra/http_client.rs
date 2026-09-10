@@ -15,7 +15,7 @@ where
         // 🌟 核心修复 1：拦截并动态装配 ureq 代理引擎
         if let Ok(proxy) = ureq::Proxy::new(p) {
             let agent = ureq::Agent::config_builder().proxy(Some(proxy)).build().new_agent();
-            return Ok(agent.get(uri).call()?);
+            return agent.get(uri).call();
         }
     }
     // 代理无效或未提供时，回退直连

@@ -35,11 +35,10 @@ impl IdentityZoneProvider {
         // 1. 无锁光速尝试读取缓存
         {
             let mut cache = self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((mac, expire_at)) = cache.get(&client_ip) {
-                if now < *expire_at {
+            if let Some((mac, expire_at)) = cache.get(&client_ip)
+                && now < *expire_at {
                     return mac.clone();
                 }
-            }
         }
 
         // 2. 缓存穿透，准备请求操作系统。
