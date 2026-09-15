@@ -1,8 +1,13 @@
 [workspace]
 resolver = "2"
+# 实际拷入本仓库的只有这两个 crate（smartdns-edge 用到的就是它们）。
+# 原清单里还写着 "crates/recursor"，但该目录并未一并拷入，
+# 导致任何需要读取本 workspace 清单的工具都会失败（例如 cargo fmt 直接报
+# "failed to load manifest for workspace member .../crates/recursor"），
+# 这里按实际保留的目录列出。
 members = [
     "crates/proto",
-    "crates/recursor",
+    "crates/resolver",
 ]
 exclude = ["fuzz"]
 
@@ -20,9 +25,10 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # hickory
-hickory-recursor = { version = "0.26.0-alpha.1", path = "crates/recursor", default-features = false }
+# 原始清单里还有 `hickory-recursor`（path 指向未被拷入的 crates/recursor）
+# 和一行 `test-support.path = "tests/test-support"`（tests/ 目录未拷入，
+# 且该写法本身也不是合法的依赖声明），二者都会让 workspace 清单无法加载，故移除。
 hickory-proto = { version = "0.26.0-alpha.1", path = "crates/proto", default-features = false, features = ["std"] }
-test-support.path = "tests/test-support"
 
 
 # logging

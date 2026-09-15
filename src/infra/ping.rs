@@ -604,22 +604,22 @@ mod https {
         stream: &mut S,
         domain: Option<&str>,
     ) -> io::Result<bool> {
-        use tokio::io::AsyncReadExt; 
-        
+        use tokio::io::AsyncReadExt;
+
         // 抹除域名末尾的 '.'，防止 Host 头和 SNI 解析报错
         let safe_domain = domain.unwrap_or("").trim_end_matches('.');
-        
+
         let request = if safe_domain.is_empty() {
             "GET / HTTP/1.1\r\nConnection: close\r\n\r\n".to_string()
         } else {
             format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", safe_domain)
         };
-        
+
         stream.write_all(request.as_bytes()).await?;
-        
-        let mut buf =[0u8; 5];
+
+        let mut buf = [0u8; 5];
         stream.read_exact(&mut buf).await?;
-        
+
         Ok(&buf == b"HTTP/")
     }
 
@@ -687,7 +687,7 @@ mod https {
         // 🌟 核心修复 3：真正的 SNI 注入！
         let safe_domain = domain.unwrap_or("").trim_end_matches('.');
         let server_name = ServerName::try_from(safe_domain)
-            .map(|s| s.to_owned()) 
+            .map(|s| s.to_owned())
             .unwrap_or_else(|_| ServerName::IpAddress(addr.ip().into()));
 
         let connector = TlsConnector::from(config);
@@ -757,26 +757,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ping_addr_http() {
-        let c = PingAddr::from_str("http://223.5.5.5:80").unwrap();
+    fn test_parse_ping_addr_https_port_80() {
+        let c = PingAddr::from_str("https://223.5.5.5:80").unwrap();
         assert!(
-            matches!(c, PingAddr::Http(ip) if ip == "223.5.5.5:80".parse::<SocketAddr>().unwrap() )
-        );
-    }
-
-    #[test]
-    fn test_parse_ping_addr_http_omit_port() {
-        let c = PingAddr::from_str("http://223.5.5.5").unwrap();
-        assert!(
-            matches!(c, PingAddr::Http(ip) if ip == "223.5.5.5:80".parse::<SocketAddr>().unwrap() )
-        );
-    }
-
-    #[test]
-    fn test_parse_ping_addr_https() {
-        let c = PingAddr::from_str("https://223.5.5.5:4431").unwrap();
-        assert!(
-            matches!(c, PingAddr::Https(ip) if ip == "223.5.5.5:4431".parse::<SocketAddr>().unwrap() )
+            matches!(c, PingAddr::Https(ip) if ip == "223.5.5.5:80".parse::<SocketAddr>().unwrap() )
         );
     }
 
@@ -789,6 +773,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ping_addr_https() {
+        let c = PingAddr::from_str("https://223.5.5.5:4431").unwrap();
+        assert!(
+            matches!(c, PingAddr::Https(ip) if ip == "223.5.5.5:4431".parse::<SocketAddr>().unwrap() )
+        );
+    }
+
+        #[test]
     fn test_ping_simple() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -803,6 +795,7 @@ mod tests {
                     "tcp://223.5.5.5:443".parse().unwrap(),
                     "tcp://223.5.5.5:4446".parse().unwrap(),
                 ],
+                None,
                 PingOptions::default()
                     .with_times(10)
                     .with_timeout(Duration::from_secs(3))
@@ -834,6 +827,7 @@ mod tests {
                         "tcp://223.5.5.5:4446".parse().unwrap(),
                     ]
                     .into(),
+                    None,
                     Default::default(),
                 )
                 .await
@@ -842,14 +836,35 @@ mod tests {
             });
     }
 
-    #[test]
+    /// 环境变量（都可选，便于在不同网络环境下运行本测试）：
+    /// - `SMARTDNS_TEST_PING_HTTPS_URL`：探测目标，默认 `https://223.5.5.5:443`
+    ///   （阿里公共 DNS，国内可直连；腾讯的 `https://1.12.12.12:443` 亦可）
+    /// - `SMARTDNS_TEST_PING_HTTPS_DOMAIN`：探测域名，默认 `dns.alidns.com`
+    ///
+    /// ⚠️ 本测试与生产保持同一条链路：`speed-check-mode https` 走的就是这条
+    /// **直连**探测路径（见 `config/speed_mode.rs` 的 `to_ping_addr` →
+    /// `PingAddr::Https(候选IP:443)`），并且 `dns_mw_ns.rs` / `dns_mw_dualstack.rs`
+    /// **始终把被解析的域名传进来**（用于 SNI 与 Host 头）。
+    /// 因此这里也必须直连、且带域名——不能借道任何代理，
+    /// 否则测到的就不是生产真正会走的那条路。
+    ///
+    /// 本机若无法直连目标，可以把目标换成直连可达的 HTTPS 站点，
+    /// 或者就让它保持失败——那正是生产会遭遇的情形（该候选 IP 会被判为不可达）。
+        #[test]
     fn test_ping_https() {
+        let target = std::env::var("SMARTDNS_TEST_PING_HTTPS_URL")
+            .unwrap_or_else(|_| "https://223.5.5.5:443".to_string());
+        let domain = std::env::var("SMARTDNS_TEST_PING_HTTPS_DOMAIN")
+            .unwrap_or_else(|_| "dns.alidns.com".to_string());
+
+        let dest: super::PingAddr = target.parse().unwrap();
+
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(async {
-                let res = ping("https://1.1.1.1:443".parse().unwrap(), Default::default())
+                let res = super::ping(dest, Some(&domain), Default::default())
                     .await
                     .unwrap();
                 assert!(res.duration < Duration::from_secs(5))

@@ -146,6 +146,10 @@ pub struct ResolveCommand {
     short: bool,
 
     /// is in the Domain Name System
+    ///
+    /// 注意：此处的位置参数定义只用于生成 --help 与 `dig`/`nslookup` 同名的调用路径。
+    /// `smartdns resolve ...` 的真实参数解析由 ResolveCommand::try_parse_from 那套
+    /// 手写解析器完成（见 cli.rs 的拦截逻辑），因此调整下面的 clap 属性不会影响实际行为。
     #[arg(value_name = "domain", num_args = 1, value_parser = Variant::parse::<Domain>)]
     domains: Vec<Domain>,
 
@@ -154,7 +158,13 @@ pub struct ResolveCommand {
     record_types: Vec<RecordType>,
 
     /// is one of (in,hs,ch,...)
-    #[arg(value_name = "q-class", value_parser = Variant::parse::<DNSClass>)]
+    ///
+    /// 修复：clap 对 Vec 字段一律按「可多值」处理，于是 domain、q-type 都是多值位置参数，
+    /// 而它们后面还跟着 q-class —— 违反 clap 的规则：多值位置参数之后的那个位置参数
+    /// 必须设置 required(true) 或 last(true)。不设置时 clap 的调试断言会直接 panic
+    /// （`smartdns resolve --help` 以退出码 101 崩溃就是这么来的）。
+    /// 这里按 clap 的建议加 last(true)；由于实际解析走手写解析器，不影响命令行用法。
+    #[arg(value_name = "q-class", last = true, value_parser = Variant::parse::<DNSClass>)]
     q_class: Option<DNSClass>,
 
     /// Specify the DNS server to query (e.g. -s 119.29.29.29)

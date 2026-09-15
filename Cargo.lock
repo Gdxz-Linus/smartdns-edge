@@ -805,12 +805,10 @@ dependencies = [
 [[package]]
 name = "dhcproto"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f77998aa4d800695f2a6c746b2350c72ad4512ae556d515b69d12122d5467e05"
 dependencies = [
  "dhcproto-macros",
  "hex",
- "hickory-proto 0.25.2",
+ "hickory-proto",
  "ipnet",
  "rand 0.9.2",
  "thiserror 2.0.16",
@@ -1250,28 +1248,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hickory-proto"
-version = "0.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
-dependencies = [
- "async-trait",
- "cfg-if",
- "data-encoding",
- "enum-as-inner",
- "futures-channel",
- "futures-util",
- "idna",
- "ipnet",
- "once_cell",
- "rand 0.9.2",
- "thiserror 2.0.16",
- "tinyvec",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "hickory-proto"
 version = "0.26.0-alpha.1"
 dependencies = [
  "async-trait",
@@ -1313,7 +1289,7 @@ version = "0.26.0-alpha.1"
 dependencies = [
  "cfg-if",
  "futures-util",
- "hickory-proto 0.26.0-alpha.1",
+ "hickory-proto",
  "ipconfig",
  "moka",
  "once_cell",
@@ -3056,7 +3032,7 @@ dependencies = [
  "futures-util",
  "glob",
  "h3-util",
- "hickory-proto 0.26.0-alpha.1",
+ "hickory-proto",
  "hickory-resolver",
  "hostname",
  "http",

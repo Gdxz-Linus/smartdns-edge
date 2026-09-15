@@ -21,17 +21,24 @@ cfg_if! {
 }
 
 const SERVICE_FILE_PATH: &str = "/Library/LaunchDaemons/smartdns-rs.plist";
-const SERVICE_FILE: &str = include_str!("files/Library/LaunchDaemons/smartdns-rs.plist");
 
 #[inline]
 pub fn create_service_definition() -> ServiceDefinition {
     let service_file_path = SERVICE_FILE_PATH;
 
+    // 🌟 P1-8 修复：plist 不再 `include_str!` 静态嵌入。
+    // 那个静态文件里写死的是 `/usr/local/sbin/smartdns` 与
+    // `/usr/local/etc/smartdns/smartdns.conf`，而 Apple Silicon 上二进制被装到
+    // `/opt/homebrew/sbin/smartdns`，于是 launchd 去启动一个不存在的可执行文件、
+    // `-c` 指向一个不存在的配置 —— 服务启动即失败。
+    // 现在按当前架构的 BIN_PATH / CONF_PATH 现算，二者不可能再各说各话。
+    let service_file = super::super::render_launchd_plist(BIN_PATH, CONF_PATH);
+
     let installer = Installer::builder()
         .install_current_exe_to(BIN_PATH)
         .add_item((CONF_DIR, RemoveIfEmpty))
         .add_item((CONF_PATH, crate::DEFAULT_CONF, 0o644, Preserve, Keep))
-        .add_item((SERVICE_FILE_PATH, SERVICE_FILE, 0o644))
+        .add_item((SERVICE_FILE_PATH, service_file.as_str(), 0o644))
         .add_item((
             std::path::PathBuf::from(CONF_DIR).join("managed"),
             RemoveIfEmpty,

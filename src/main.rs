@@ -182,6 +182,18 @@ impl Cli {
                 }
                 app::serve(cfg);
                 good_bye();
+
+                // 🌟 P1-14：退出前把日志队列里还没写进文件的内容真正排空。
+                // 日志 dispatch 是进程的全局默认值，退出时不会被 Drop，所以必须在这里显式调用，
+                // 否则"关机/重启前后的关键日志"会随进程一起消失（这正是原来最容易被吞掉的一段）。
+                let (flushed, total) =
+                    crate::infra::mapped_file::flush_all(std::time::Duration::from_secs(2));
+                if flushed < total {
+                    eprintln!(
+                        "[smartdns] WARN: only {flushed}/{total} log writer(s) were flushed before exit; \
+                         some log lines may be missing."
+                    );
+                }
             }
             #[cfg(feature = "service")]
             Commands::Service {
@@ -244,6 +256,15 @@ impl Cli {
                 crate::hello_starting();
                 cfg.summary();
                 
+                // 🔐 用和真正启动时完全相同的一套检查：
+                // 配置自检说"通过"，就必须真的能启动——否则用户会被"✅ 通过"骗到，
+                // 等到重启服务时才发现起不来。
+                if let Err(msg) = crate::api::check_exposure(cfg.binds(), cfg.api_token()) {
+                    crate::log::error!("{msg}");
+                    eprintln!("[smartdns] {msg}");
+                    std::process::exit(crate::dns_conf::EXIT_CODE_CONFIG_ERROR);
+                }
+
                 // 🌟 明确告诉用户测试通过！
                 crate::log::info!("✅ Configuration test passed successfully!");
             }

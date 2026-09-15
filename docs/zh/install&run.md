@@ -74,5 +74,40 @@ docker run -d \
   --restart always \
   --network host \
   -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns-edge:lastest
+  ghcr.io/gdxz-linus/smartdns-edge:latest
+```
+
+
+## 从旧版本升级：一件你需要知道的事
+
+管理后台的访问口令**不再有默认值**（旧版本里那个默认口令已经作废，用不了）。升级后按你的配置分三种情况：
+
+1. **没开管理后台**（配置里没有 `bind-http` / `bind-https` / `bind-h3`）
+   → 什么都不用做，DNS 解析服务不受任何影响。
+
+2. **开了管理后台，且只绑在本机**（例如 `bind-http 127.0.0.1:6080`）
+   → 启动后到日志里找一行随机口令，用它登录即可。
+   如果你希望口令固定下来，在配置里加一行：`api-token 你的口令`。
+
+3. **开了管理后台，且绑在对外地址**（例如 `bind-http 0.0.0.0:6080`）
+   → 如果你没有在配置里设置 `api-token`，**服务会拒绝启动**并给出中文提示。
+   这是有意为之：管理后台可以修改解析规则、增删自定义域名，绝不能在没有口令的情况下对全网开放。
+   解决办法：先设置 `api-token 你的口令`，或者按下面的方式用 SSH 隧道访问。
+
+**更安全的做法（推荐）**：不要把后台端口暴露到公网，改用 SSH 隧道：
+
+```bash
+ssh -L 6080:127.0.0.1:6080 你的服务器     # 然后本机浏览器访问 http://127.0.0.1:6080
+```
+
+### 容器（Docker / NAS）部署注意
+
+容器里的行为跟上面完全一致：如果挂载进容器的配置把管理后台绑到了 `0.0.0.0` 却没有 `api-token`，
+容器会**拒绝启动**（退出码 2）。这种情况下用环境变量注入口令最方便：
+
+```bash
+docker run -d --name smartdns --restart always --network host \
+  -e SMARTDNS_API_TOKEN=你的口令 \
+  -v /你的路径/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns-edge:latest
 ```

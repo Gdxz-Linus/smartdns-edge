@@ -235,6 +235,13 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             "no-speed-check" => opts.no_speed_check = Some(true),
             "no-cache" => opts.no_cache = Some(true),
             "no-rule-soa" => opts.no_rule_soa = Some(true),
+            // 该监听只提供 DoH，不挂管理后台
+            "no-api" => opts.no_api = Some(true),
+            // 该监听单独设置连接上限（用于"内网宽松、公网收紧"这类部署）
+            "max-connections" => opts.max_connections = v.and_then(|s| s.trim().parse().ok()),
+            "max-connections-per-ip" => {
+                opts.max_connections_per_ip = v.and_then(|s| s.trim().parse().ok())
+            }
             "no-serve-expired" => opts.no_serve_expired = Some(true),
             "no-dualstack-selection" => opts.no_dualstack_selection = Some(true),
             "force-aaaa-soa" => opts.force_aaaa_soa = Some(true),

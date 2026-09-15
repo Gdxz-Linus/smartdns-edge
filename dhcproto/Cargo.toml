@@ -1,0 +1,54 @@
+[package]
+name = "dhcproto"
+version = "0.13.0"
+authors = [
+	"Ian Laidlaw <ilaidlaw@bluecatnetworks.com>",
+	"Evan Cameron <cameron.evan@gmail.com>",
+]
+edition = "2024"
+description = """
+A DHCP parser and encoder for DHCPv4/DHCPv6. `dhcproto` aims to be a functionally complete DHCP implementation.
+"""
+categories = ["network-programming", "encoding", "parser-implementations"]
+repository = "https://github.com/bluecatengineering/dhcproto"
+keywords = ["dhcp", "dhcpv4", "dhcpv6"]
+license = "MIT"
+
+# ==============================================================================
+# 本文件是上游 dhcproto 0.13.0 清单的本地副本。
+#
+# 与上游的实质差别就在于下面那一行 hickory-proto：
+#   上游：hickory-proto = { version = "0.25.2", default-features = false }
+#          —— 会从 crates.io 再拉一份 hickory-proto 0.25.2，
+#             与本仓库内嵌的 0.26.0-alpha.1 并存，等于两个 DNS 报文解析器
+#             同时处理外部输入，安全更新路径还各自割裂。
+#   本地：改为 path 指向本仓库内嵌的那一份（并打开 std，理由见该行注释）
+#          —— 全图只剩一个 hickory-proto。
+# 详见 dhcproto/VENDORED.md。
+#
+# 另外两处非实质改动：去掉上游的 [dev-dependencies] 与 [[bench]]
+# （benches/ 未拷入本仓库，留着会因找不到 bench 目标而报错）。
+# ==============================================================================
+
+[dependencies]
+thiserror = "2.0.12"
+rand = "0.9"
+serde = { version = "1.0", features = ["derive"], optional = true }
+hex = "0.4.3"
+# 本地改动（见 dhcproto/VENDORED.md 第 3 节）：
+#   上游这里是 hickory-proto = { version = "0.25.2", default-features = false }，
+#   会从 crates.io 再拉一份 0.25.2，与本仓库内嵌的 0.26 并存 —— 两个 DNS 报文解析器。
+# 这里改为指向内嵌那一份，并显式打开 std：
+#   内嵌的 hickory-proto 在 no_std 下编译不过（xfer/dns_response.rs 缺
+#   alloc::boxed::Box 与 ProtoErrorKind 的导入，是上游 alpha 的遗留），而本项目只用 std。
+#   对 smartdns 的构建结果没有任何影响 —— 特性合并后 std 本来就是开着的
+#   （可用 `cargo tree -e features -i hickory-proto` 自行确认）；
+#   好处是 dhcproto 这个目录从此能单独编译、单独跑它自带的单测。
+hickory-proto = { path = "../hickory-dns/crates/proto", features = ["std"] }
+url = "2.5.4"
+dhcproto-macros = { version = "0.1.0" }
+ipnet = "2.5"
+
+[features]
+default = []
+serde = ["dep:serde", "url/serde", "ipnet/serde", "hickory-proto/serde"]

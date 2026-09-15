@@ -28,6 +28,7 @@ mod client_rule;
 mod domain;
 mod domain_rule;
 mod domain_set;
+mod group_match;
 mod ip_set;
 mod log;
 mod nameserver;
@@ -44,6 +45,7 @@ pub use client_rule::*;
 pub use domain::*;
 pub use domain_rule::*;
 pub use domain_set::*;
+pub use group_match::*;
 pub use ip_set::*;
 pub use log::*;
 pub use nameserver::*;
@@ -64,6 +66,14 @@ pub type HttpsRecords = Vec<ConfigForDomain<HttpsRecordRule>>;
 
 #[derive(Default)]
 pub struct Config {
+    /// 管理后台（WebAPI / 网页控制台）的口令。
+    ///
+    /// 配置里写了 `api-token <口令>` 就用它；没写则退回环境变量
+    /// `SMARTDNS_API_TOKEN`；两者都没有时，进程启动后第一次用到会随机生成一个
+    /// 并打印出来（**代码里不再保留任何写死的默认口令**）。
+    pub api_token: Option<String>,
+
+    /// dns server name, default is host namepub struct Config {
     /// dns server name, default is host name
     ///
     /// ```
@@ -113,6 +123,25 @@ pub struct Config {
     ///
     /// tcp-idle-time [second]
     pub tcp_idle_time: Option<u64>,
+
+    /// max-connections [number]
+    ///
+    /// 所有 DNS 监听合计允许的**同时连接数**上限（0 或未配置 = 按物理内存自动推算）。
+    /// 超限时拒绝新连接（不影响已有连接），并计入统计。
+    pub max_connections: Option<usize>,
+
+    /// max-connections-per-ip [number]
+    ///
+    /// 单一来源允许的同时连接数上限（IPv6 按 /64 前缀聚合计数；0 或未配置 = 自动）。
+    /// 企业环境里 NAT/代理后面的客户端共用一个 IP，所以默认值取得比较宽。
+    pub max_connections_per_ip: Option<usize>,
+
+    /// first-packet-timeout [second]
+    ///
+    /// 连接建立后、"读到一个完整 DNS 报文之前"允许等待的秒数（默认 5，0 表示不限制）。
+    /// 用途：把"只发长度前缀就不发正文"的慢速攻击窗口从空闲超时（默认 120 秒）压到几秒，
+    /// 同时对正常客户端（握手后立刻发查询）没有任何影响，也不影响长连接复用。
+    pub first_packet_timeout: Option<u64>,
 
     pub cache: CacheConfig,
 

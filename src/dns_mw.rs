@@ -22,6 +22,12 @@ pub struct DnsMiddlewareHandler {
 }
 
 impl DnsMiddlewareHandler {
+    /// 只读访问运行时配置。app 层组装客户端答复时要用到（例如给自造的否定 SOA 取 TTL）。
+    #[inline]
+    pub fn cfg(&self) -> &Arc<RuntimeConfig> {
+        &self.cfg
+    }
+
     pub async fn search(
         &self,
         req: &DnsRequest,

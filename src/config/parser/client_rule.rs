@@ -42,7 +42,7 @@ mod tests {
                 "",
                 ClientRule {
                     group: "a".to_string(),
-                    client: Client::MacAddr("01:23:45:67:89:ab".to_string())
+                    client: Client::Mac("01:23:45:67:89:ab".to_string())
                 }
             ))
         );

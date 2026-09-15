@@ -52,12 +52,27 @@ impl From<ServiceDefinition> for ServiceManager {
 
 impl ServiceManager {
     pub fn install(&self) -> io::Result<()> {
-        // 🌟 智能防呆：安装前先探针，如果存在直接提示，绝不重复破坏现场！
-        if let Ok(status) = self.status()
-            && matches!(status, ServiceStatus::Running(_) | ServiceStatus::Dead(_)) {
-                println!("💡 SmartDNS service is already installed.");
+        // 🌟 P1-7 修复：只有"确实已经在运行"才算真的装好了。
+        //
+        // 原实现把"已停止"也算作"已安装"直接返回，而 Linux/macOS 上"服务根本不存在"
+        // 又会被 status() 误读成"已停止"（退出码语义不同，见文件末尾的 classify_status），
+        // 于是全新机器上执行 `service install` 只打印一句 "already installed" 就退出，
+        // 装机动作整个没有发生。
+        match self.status() {
+            Ok(ServiceStatus::Running(_)) => {
+                println!("💡 SmartDNS service is already installed and running.");
                 return Ok(());
             }
+            Ok(ServiceStatus::Dead(_)) => {
+                // 已安装但没在跑：继续走安装流程（幂等重写文件 + 启动），
+                // 这样"换了新二进制以后再 install 一次"也能真正生效。
+                println!("ℹ️ SmartDNS service is installed but not running; reinstalling and starting it.");
+            }
+            Ok(ServiceStatus::NotInstalled) => {
+                println!("ℹ️ SmartDNS service is not installed yet; installing now.");
+            }
+            _ => {}
+        }
 
         let _ = self.uninstall(false, true);
 
@@ -162,21 +177,29 @@ impl ServiceManager {
         let status = match self.definition.commands.status.as_ref() {
             Some(cmd) => {
                 let output = cmd.output()?;
-                // 🌟 精准感知：直接读取底层的退出码 2 来断定服务不存在
-                match output.status.code() {
-                    Some(0) => ServiceStatus::Running(output),
-                    Some(1) => ServiceStatus::Dead(output),
-                    Some(2) => ServiceStatus::NotInstalled,
-                    _ => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        if stdout.contains("NOT installed") {
-                            ServiceStatus::NotInstalled
-                        } else if output.status.success() {
-                            ServiceStatus::Running(output)
-                        } else {
-                            ServiceStatus::Dead(output)
-                        }
+
+                // 🌟 P1-7 修复：各平台对"退出码"的约定根本不一样，不能再一律按
+                // Windows 自建脚本的 0/1/2 去解读（systemd/LSB 把"未找到该服务"编成 4、
+                // "已停止"编成 3，于是全落进兜底分支被判成 Dead）。
+                // 另外"服务不存在"这句话有时只出现在 stderr 里，所以两股输出一起看。
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
                     }
+                    text.push_str(stderr.trim());
+                }
+
+                match classify_status(
+                    StatusCodeConvention::for_current_os(),
+                    output.status.code(),
+                    output.status.success(),
+                    &text,
+                ) {
+                    ServiceStatusKind::Running => ServiceStatus::Running(output),
+                    ServiceStatusKind::Dead => ServiceStatus::Dead(output),
+                    ServiceStatusKind::NotInstalled => ServiceStatus::NotInstalled,
                 }
             }
             None => ServiceStatus::Unknown,
@@ -278,6 +301,229 @@ pub enum ServiceStatus {
     Dead(std::process::Output),
     NotInstalled, // 🌟 新增：专门识别未安装状态
     Unknown,
+}
+
+/// 🌟 P1-7：各平台服务管理器对"退出码"的约定并不相同，必须分开解读。
+///
+/// 原实现一律按 Windows 自建脚本的 0/1/2 去解读，导致 Linux 上"服务不存在"（systemctl
+/// 返回 4）和"装了但停了"（返回 3）都落进兜底分支被判成"已停止"，于是
+/// `service install` 在全新机器上只会打印 "already installed" 就退出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusCodeConvention {
+    /// Windows 自建 PowerShell 脚本：0=运行中，1=已停止，2=未安装
+    WindowsScript,
+    /// systemd 与 LSB init 脚本：0=运行中，3=已停止（单元存在），4=未找到该服务
+    SystemdLsb,
+    /// launchd：退出码不可靠，只能看输出文本
+    Launchd,
+}
+
+impl StatusCodeConvention {
+    /// 当前平台使用的约定。
+    pub const fn for_current_os() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::WindowsScript
+        } else if cfg!(target_os = "macos") {
+            Self::Launchd
+        } else {
+            // Linux/Android：systemd 或 initd（见 service/linux/mod.rs），
+            // runit 环境也退回 initd 实现，语义一致。
+            Self::SystemdLsb
+        }
+    }
+}
+
+/// 状态分类的中间结果（`ServiceStatus` 要携带原始 Output，不便比较，故先分类）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceStatusKind {
+    Running,
+    Dead,
+    NotInstalled,
+}
+
+/// 输出里出现这些片段（不区分大小写），就说明"服务不存在 / 未安装"。
+///
+/// 逐条都有出处，不是随手联想：
+/// - `not installed`                       → 本项目 Windows 脚本自己的措辞
+/// - `could not find service`              → launchctl list（macOS）
+/// - `could not be found` / `not-found`    → systemctl status（单元不存在）
+/// - `failed to get unit`                  → systemctl 的另一种报法
+/// - `unable to change to service directory` → runit `sv status`（Termux 等）
+/// - `no such process`                     → launchctl / 部分 init 脚本
+const NOT_INSTALLED_HINTS: &[&str] = &[
+    "not installed",
+    "could not find service",
+    "could not be found",
+    "not-found",
+    "failed to get unit",
+    "unable to change to service directory",
+    "no such process",
+];
+
+fn text_says_not_installed(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    NOT_INSTALLED_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// 把"某个平台约定下的退出码 + 输出文本"翻译成服务状态。
+///
+/// 判定顺序：
+/// 1. 文本里明确写着"服务不存在" —— 这是最强的证据，优先采信
+///    （systemd 有时给出的退出码会随版本变化，文本能兜住）；
+/// 2. 按当前平台的退出码约定翻译；
+/// 3. 都不匹配时，只以"命令是否成功"作最后依据。
+fn classify_status(
+    convention: StatusCodeConvention,
+    code: Option<i32>,
+    success: bool,
+    text: &str,
+) -> ServiceStatusKind {
+    if text_says_not_installed(text) {
+        return ServiceStatusKind::NotInstalled;
+    }
+
+    let by_code = match convention {
+        StatusCodeConvention::WindowsScript => match code {
+            Some(0) => Some(ServiceStatusKind::Running),
+            Some(1) => Some(ServiceStatusKind::Dead),
+            Some(2) => Some(ServiceStatusKind::NotInstalled),
+            _ => None,
+        },
+        StatusCodeConvention::SystemdLsb => match code {
+            Some(0) => Some(ServiceStatusKind::Running),
+            // LSB：1=有 pid 但已死，2=有 lock 但已死，3=没在运行
+            Some(1) | Some(2) | Some(3) => Some(ServiceStatusKind::Dead),
+            // systemd：单元不存在
+            Some(4) => Some(ServiceStatusKind::NotInstalled),
+            _ => None,
+        },
+        // launchd 的退出码随版本与调用方式而变，不做码位映射。
+        StatusCodeConvention::Launchd => None,
+    };
+
+    by_code.unwrap_or(if success {
+        ServiceStatusKind::Running
+    } else {
+        ServiceStatusKind::Dead
+    })
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    const WIN: StatusCodeConvention = StatusCodeConvention::WindowsScript;
+    const SD: StatusCodeConvention = StatusCodeConvention::SystemdLsb;
+    const LAUNCHD: StatusCodeConvention = StatusCodeConvention::Launchd;
+
+    #[test]
+    fn windows_script_codes_keep_working() {
+        assert_eq!(classify_status(WIN, Some(0), true, ""), ServiceStatusKind::Running);
+        assert_eq!(classify_status(WIN, Some(1), false, ""), ServiceStatusKind::Dead);
+        assert_eq!(
+            classify_status(WIN, Some(2), false, "\n❌ SmartDNS service is NOT installed."),
+            ServiceStatusKind::NotInstalled
+        );
+    }
+
+    #[test]
+    fn systemd_fresh_machine_is_not_installed() {
+        // 🌟 P1-7 的回归点：全新机器上单元不存在，systemctl 返回 4。
+        // 修复前这里被判成 Dead → install() 直接打印 "already installed" 就返回。
+        assert_eq!(
+            classify_status(
+                SD,
+                Some(4),
+                false,
+                "Unit smartdns-rs.service could not be found."
+            ),
+            ServiceStatusKind::NotInstalled
+        );
+        assert_eq!(
+            classify_status(SD, Some(0), true, "Active: active (running)"),
+            ServiceStatusKind::Running
+        );
+        assert_eq!(
+            classify_status(SD, Some(3), false, "Active: inactive (dead)"),
+            ServiceStatusKind::Dead
+        );
+    }
+
+    #[test]
+    fn systemd_text_wins_when_exit_code_differs() {
+        // 退出码退回 3（已停止）但文本明说单元不存在 → 仍判未安装
+        assert_eq!(
+            classify_status(SD, Some(3), false, "Unit smartdns-rs.service not-found"),
+            ServiceStatusKind::NotInstalled
+        );
+    }
+
+    #[test]
+    fn lsb_initd_codes() {
+        assert_eq!(
+            classify_status(SD, Some(1), false, "smartdns-rs is dead but pid file exists"),
+            ServiceStatusKind::Dead
+        );
+        assert_eq!(
+            classify_status(SD, Some(2), false, "smartdns-rs dead but subsys locked"),
+            ServiceStatusKind::Dead
+        );
+    }
+
+    #[test]
+    fn runit_missing_service_is_not_installed() {
+        assert_eq!(
+            classify_status(
+                SD,
+                Some(1),
+                false,
+                "fail: smartdns-rs: unable to change to service directory: file does not exist"
+            ),
+            ServiceStatusKind::NotInstalled
+        );
+    }
+
+    #[test]
+    fn launchd_ignores_exit_code_and_reads_text() {
+        // 未装：文本说找不到
+        assert_eq!(
+            classify_status(
+                LAUNCHD,
+                Some(113),
+                false,
+                "Could not find service \"smartdns-rs\" in domain for system"
+            ),
+            ServiceStatusKind::NotInstalled
+        );
+        // 已加载：不以退出码下判
+        assert_eq!(
+            classify_status(LAUNCHD, Some(0), true, "-\t0\tsmartdns-rs"),
+            ServiceStatusKind::Running
+        );
+        // 装了但没加载：既没成功也没"不存在"字样 → 保守判 Dead（可用性优先）
+        assert_eq!(
+            classify_status(LAUNCHD, Some(1), false, "smartdns-rs: not loaded"),
+            ServiceStatusKind::Dead
+        );
+    }
+
+    #[test]
+    fn unknown_codes_fall_back_to_exit_status() {
+        assert_eq!(classify_status(SD, Some(7), true, "weird"), ServiceStatusKind::Running);
+        assert_eq!(classify_status(WIN, None, false, "killed by signal"), ServiceStatusKind::Dead);
+    }
+
+    #[test]
+    fn convention_follows_platform() {
+        let expected = if cfg!(target_os = "windows") {
+            StatusCodeConvention::WindowsScript
+        } else if cfg!(target_os = "macos") {
+            StatusCodeConvention::Launchd
+        } else {
+            StatusCodeConvention::SystemdLsb
+        };
+        assert_eq!(StatusCodeConvention::for_current_os(), expected);
+    }
 }
 
 #[cfg(test)]

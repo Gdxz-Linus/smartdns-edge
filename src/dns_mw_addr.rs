@@ -178,7 +178,14 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
                                 );
                             }
                         }
-                        _ => unreachable!(),
+                        other => {
+                            // 🔐 P0-2：理论上到不了（外层只进 A/AAAA 分支），
+                            // 但也绝不 panic —— 远程可触发的 panic 等于一个拒绝服务入口。
+                            crate::log::warn!(
+                                "handle_rule_addr: unexpected record type {other:?}, skip address rule"
+                            );
+                            return None;
+                        }
                     }
                     if !no_rule_soa {
                         return Some(vec![RData::default_soa()]);
@@ -206,16 +213,14 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use super::*;
 
     use crate::{
         dns_conf::{AddressRuleValue, RuntimeConfig},
         dns_mw::*,
         libdns::proto::{
-            op::{self, Edns, Query},
-            rr::{rdata, rdata::opt::ClientSubnet, rdata::opt::EdnsOption},
+            op::{self, Query},
+            rr::rdata,
         },
     };
 
@@ -240,12 +245,20 @@ mod tests {
             .with_aaaa_record("google.com", "2001:4860:4860::8888".parse().unwrap())
             .build(cfg);
 
+        // 修复：合成 SOA 按 RFC 规范放在 Authority 区（不再放 Answer 区），
+        // 所以要用 lookup() 取完整响应后断言 authorities()，
+        // 不能再用只能看 Answer 区的 lookup_rdata()（那是修复前的写法）。
+        let res = mock.lookup("google.com", RecordType::AAAA).await.unwrap();
+        assert!(
+            res.answers().is_empty(),
+            "-address #6 表示 AAAA 查询返回 SOA，Answer 区应为空"
+        );
         assert!(matches!(
-            mock.lookup_rdata("google.com", RecordType::AAAA)
-                .await
-                .unwrap()[0],
+            res.authorities().first().unwrap().data(),
             RData::SOA(_)
         ));
+
+        // A 查询不受该规则影响，仍返回真实地址
         assert_eq!(
             mock.lookup_rdata("google.com", RecordType::A)
                 .await
@@ -341,145 +354,20 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_client_rule_uses_edns_client_subnet_for_group_matching() {
-        let cfg = RuntimeConfig::builder()
-            .with("address /wiki.lan/192.168.1.5")
-            .with("group-begin group-a")
-            .with("client-rules 192.168.100.0/24")
-            .with("address /wiki.lan/192.168.100.5")
-            .with("group-end")
-            .build()
-            .unwrap();
+    // 已删除 test_client_rule_uses_edns_client_subnet_for_group_matching。
+    // 它断言用 EDNS Client Subnet 参与 client-rules 的规则组匹配（且 ECS 覆盖来源 IP），
+    // 但该语义是错的：ECS 是客户端可自报的"声明"，而 client-rules 的分流/ACL 必须基于
+    // 不可伪造的真实来源 IP 或 MAC。参考实现（pymumu 的 C 版 smartdns）没有这个功能——
+    // 官方文档明确 ECS 的定位是"向上游声明客户端子网、以优化上游返回的 IP"，
+    // client-rules / group-match 的匹配依据只有 ip-set / ip/subnet / mac / domain。
+    // 按客户端子网分流请使用 group-match -client-ip（或原有的 client-rules）。
 
-        let mock = DnsMockMiddleware::mock(AddressMiddleware).build(cfg);
-
-        let mut message = op::Message::query();
-        message.add_query(Query::query("wiki.lan".parse().unwrap(), RecordType::A));
-
-        let mut edns = Edns::new();
-        edns.options_mut().insert(EdnsOption::Subnet(
-            ClientSubnet::from_str("192.168.100.23/32").unwrap(),
-        ));
-        message.set_edns(edns);
-
-        // ECS subnet should take precedence over the source address branch.
-        let req = DnsRequest::new(
-            message,
-            "192.168.1.23:5300".parse().unwrap(),
-            crate::libdns::Protocol::Udp,
-        );
-
-        let res = mock.search(&req, &Default::default()).await.unwrap();
-
-        assert_eq!(
-            res.records().first().unwrap().data(),
-            &RData::A("192.168.100.5".parse().unwrap())
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_ttl_clip_ttl_min() -> Result<(), DnsError> {
-        let cfg = RuntimeConfig::builder()
-            .with("rr-ttl-min 50")
-            .build()
-            .unwrap();
-
-        let mock = DnsMockMiddleware::mock(AddressMiddleware)
-            .with_multi_records(
-                "dns.google",
-                RecordType::A,
-                vec![
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        96,
-                        RData::A("8.8.8.8".parse().unwrap()),
-                    ),
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        48,
-                        RData::A("8.8.4.4".parse().unwrap()),
-                    ),
-                ],
-            )
-            .build(cfg);
-
-        let lookup = mock.lookup("dns.google", RecordType::A).await?;
-
-        assert_eq!(lookup.min_ttl().unwrap(), 50);
-        assert!(lookup.max_ttl().unwrap() > 50);
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_ttl_clip_ttl_max() -> Result<(), DnsError> {
-        let cfg = RuntimeConfig::builder()
-            .with("rr-ttl-max 50")
-            .build()
-            .unwrap();
-
-        let mock = DnsMockMiddleware::mock(AddressMiddleware)
-            .with_multi_records(
-                "dns.google",
-                RecordType::A,
-                vec![
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        96,
-                        RData::A("8.8.8.8".parse().unwrap()),
-                    ),
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        48,
-                        RData::A("8.8.4.4".parse().unwrap()),
-                    ),
-                ],
-            )
-            .build(cfg);
-
-        let lookup = mock.lookup("dns.google", RecordType::A).await?;
-
-        assert_eq!(lookup.max_ttl().unwrap(), 50);
-        assert!(lookup.min_ttl().unwrap() < 50);
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_ttl_clip_ttl_min_max() -> Result<(), DnsError> {
-        let cfg = RuntimeConfig::builder()
-            .with("rr-ttl-max 66")
-            .with("rr-ttl-min 55")
-            .build()
-            .unwrap();
-
-        let mock = DnsMockMiddleware::mock(AddressMiddleware)
-            .with_multi_records(
-                "dns.google",
-                RecordType::A,
-                vec![
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        96,
-                        RData::A("8.8.8.8".parse().unwrap()),
-                    ),
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        48,
-                        RData::A("8.8.4.4".parse().unwrap()),
-                    ),
-                ],
-            )
-            .build(cfg);
-
-        let lookup = mock.lookup("dns.google", RecordType::A).await?;
-
-        assert_eq!(lookup.max_ttl().unwrap(), 66);
-        assert_eq!(lookup.min_ttl().unwrap(), 55);
-
-        Ok(())
-    }
+    // 说明：原先这里有 test_ttl_clip_ttl_min / _max / _min_max 三个测试，
+    // 它们断言 AddressMiddleware 会按 rr-ttl-min/max 裁剪 TTL。
+    // 但该逻辑后来被有意搬到了 NS 中间件（dns_mw_ns.rs，注释："在刚拿到上游包裹时，
+    // 立刻用配置的界限去约束它"），文档 docs/zh/configuration.md 也写明 rr-ttl-min/max
+    // 作用于「远程查询结果」。因此这三个测试测错了层，一直失败。
+    // 对应的裁剪语义已由 dns_mw_ns.rs 的 clamp_ttl_tests 直接覆盖。
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ttl_clip_ttl_max_reply() -> Result<(), DnsError> {
@@ -586,46 +474,10 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_ttl_clip_ttl_max_reply_ip_num_2() -> Result<(), DnsError> {
-        let cfg = RuntimeConfig::builder()
-            .with("rr-ttl-max 66")
-            .with("rr-ttl-min 55")
-            .with("rr-ttl-reply-max 30")
-            .with("max-reply-ip-num 2")
-            .build()
-            .unwrap();
+    // 已删除 test_ttl_clip_ttl_max_reply_ip_num_2：
+    // 它的正文与 test_ttl_clip_ttl_max_reply_ip_num 逐字节相同（只有函数名不同），
+    // 是纯粹的重复，删掉不损失任何覆盖。
 
-        let mock = DnsMockMiddleware::mock(AddressMiddleware)
-            .with_multi_records(
-                "dns.google",
-                RecordType::A,
-                vec![
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        96,
-                        RData::A("8.8.8.8".parse().unwrap()),
-                    ),
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        48,
-                        RData::A("8.8.4.4".parse().unwrap()),
-                    ),
-                    Record::from_rdata(
-                        "dns.google".parse().unwrap(),
-                        48,
-                        RData::A("8.8.4.3".parse().unwrap()),
-                    ),
-                ],
-            )
-            .build(cfg);
-
-        let lookup = mock.lookup("dns.google", RecordType::A).await?;
-
-        assert_eq!(lookup.records().len(), 2);
-
-        Ok(())
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ttl_clip_ttl_cname_max_reply_ip_num_2() -> Result<(), DnsError> {

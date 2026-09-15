@@ -198,15 +198,23 @@ impl QuicStream {
         // bytes.  This maximum size is enforced by the use of a 2-octet message length field in DNS
         // over TCP [RFC1035] and DoT [RFC7858], and by the definition of the
         // "application/dns-message" for DoH [RFC8484].  DoQ enforces the same restriction.
-        let mut bytes = BytesMut::with_capacity(len);
-        bytes.resize(len, 0);
-        if let Err(e) = self.receive_stream.read_exact(&mut bytes[..len]).await {
-            debug!("received bad packet len: {} bytes: {:?}", len, bytes);
+        // 🌟 P0-5 修复：与 TCP 同理，绝不按客户端声明的长度一次性分配。
+        // 攻击者只发 2 字节（声明 65535）时，服务端只占 4 KiB 而不是 64 KiB；
+        // 内存占用只与实际收到的字节数成正比。
+        const READ_CHUNK: usize = 4096;
+        let mut bytes = BytesMut::with_capacity(len.min(READ_CHUNK));
+        while bytes.len() < len {
+            let start = bytes.len();
+            let want = (len - start).min(READ_CHUNK);
+            bytes.resize(start + want, 0);
+            if let Err(e) = self.receive_stream.read_exact(&mut bytes[start..]).await {
+                debug!("received bad packet len: {} bytes: {:?}", len, bytes);
 
-            self.reset(DoqErrorCode::ProtocolError)
-                .map_err(|_| debug!("stream already closed"))
-                .ok();
-            return Err(e.into());
+                self.reset(DoqErrorCode::ProtocolError)
+                    .map_err(|_| debug!("stream already closed"))
+                    .ok();
+                return Err(e.into());
+            }
         }
 
         debug!("received packet len: {} bytes: {:x?}", len, bytes);

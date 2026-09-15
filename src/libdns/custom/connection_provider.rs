@@ -1,3 +1,14 @@
+// Copyright 2015-2019 Benjamin Fry <benjaminfry@me.com>
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// https://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// https://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+//
+// 本文件派生自 hickory-dns 的 crates/resolver/src/name_server/connection_provider.rs
+// （上游源文件与许可证头见本仓库内嵌副本 hickory-dns/crates/resolver/src/name_server/）。
+// 上游的版权与双许可声明按 Apache-2.0 / MIT 的要求保留于此；本文件在其基础上按本项目
+// 的需要做了修改（例如为补上"上游把 UDP 的 connect() 注释掉"这个安全缺口，见下面 P1-9 的改动）。
 use crate::dns_client::{BootstrapResolver, GenericResolverExt};
 use crate::dns_url::{DnsUrl, Host, HttpsPrefer, ProtocolConfig};
 use crate::libdns::custom::warmup::DnsHandleWarmpup;
@@ -708,7 +719,7 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
     fn bind_udp(
         &self,
         local_addr: SocketAddr,
-        _server_addr: SocketAddr,
+        server_addr: SocketAddr,
     ) -> Pin<Box<dyn Send + Future<Output = io::Result<Self::Udp>>>> {
         let proxy_config = self.proxy.clone();
         let so_mark = self.so_mark;
@@ -722,6 +733,15 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
             
             // UDP 是无连接的，在首个发包前设置即可立刻生效
             setup_socket(&udp_socket, None, so_mark, device.clone());
+
+            // 🌟 P1-9 修复：直连 UDP 上游必须真正 connect ——
+            // 否则应答只按 16 位事务 ID 认领，任何能到达该临时端口并猜中 ID 的主机
+            // 都能注入伪造应答（C 原版 client_udp.c:144 就是这么 connect 的）。
+            // connect 后由内核完成源 IP + 源端口过滤，防护等级最高、成本为零。
+            // 多播（mDNS 等，如 224.0.0.251）必须排除：它本来就允许多个来源。
+            if proxy_config.is_none() && !server_addr.ip().is_multicast() {
+                udp_socket.connect(server_addr).await?;
+            }
 
             let tcp_stream = if let Some(proxy) = &proxy_config {
                 let target_addr = proxy.server;
@@ -738,7 +758,16 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                 None
             };
 
-            proxy::handshake_udp(tcp_stream, udp_socket, proxy_config.as_ref()).await
+            let socket = proxy::handshake_udp(tcp_stream, udp_socket, proxy_config.as_ref()).await?;
+
+            // 🌟 P1-9 修复（代理路径的补充防护）：SOCKS5 数据报头部带着应答来源地址
+            // （RFC 1928 §7）。握手已经把 UDP 套接字 connect 到中继地址（内核挡掉非中继来源），
+            // 这里再登记"我们查询的上游"，让 SocksDatagram 丢弃头部来源不符的数据报。
+            if let proxy::UdpSocket::Proxy(datagram) = &socket {
+                datagram.set_expected_source(server_addr);
+            }
+
+            Ok(socket)
         })
     }
 
@@ -876,4 +905,70 @@ fn next_random_udp(bind_addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
         }
     }
     std::net::UdpSocket::bind(bind_addr)
+}
+
+#[cfg(test)]
+mod p1_9_direct_udp_tests {
+    use super::*;
+    use crate::libdns::proto::runtime::RuntimeProvider;
+    use crate::libdns::proto::udp::DnsUdpSocket;
+    use std::ops::Deref;
+    use std::time::Duration;
+
+    /// P1-9：直连 UDP 上游的套接字必须真的 connect ——
+    /// 这样内核只放行该上游 IP + 端口发来的报文，杜绝伪造应答注入。
+    #[tokio::test]
+    async fn test_direct_upstream_socket_is_connected_and_filters_sources() {
+        let provider = TokioRuntimeProvider::new(None, None, None);
+
+        // 假上游（本机的一个 UDP 端口）
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+
+        let socket = provider
+            .bind_udp("0.0.0.0:0".parse().unwrap(), upstream_addr)
+            .await
+            .expect("bind_udp 应成功");
+
+        // ① 机制：已连接到上游（未连接的套接字 peer_addr 会报错）
+        assert_eq!(
+            socket.deref().peer_addr().expect("直连上游套接字必须已 connect"),
+            upstream_addr,
+            "P1-9：直连 UDP 上游套接字必须 connect 到该上游"
+        );
+
+        // ② 效果：上游发来的包能正常收到（功能没被 connect 弄坏）
+        let local = socket.deref().local_addr().unwrap();
+        upstream.send_to(b"ok", local).await.unwrap();
+        let mut buf = [0u8; 64];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
+            .await
+            .expect("应当能收到上游的应答")
+            .unwrap();
+        assert_eq!(&buf[..n], b"ok");
+
+        // ③ 效果：第三方来源（同机、只是端口不同）的伪造包必须被内核丢弃
+        let attacker = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        attacker.send_to(b"forged", local).await.unwrap();
+        let res =
+            tokio::time::timeout(Duration::from_millis(500), socket.recv_from(&mut buf)).await;
+        assert!(res.is_err(), "来源不符的报文必须被丢弃，实际收到 {res:?}");
+    }
+
+    /// 多播（mDNS 等）必须排除在 connect 之外：它本来就允许多个来源。
+    #[tokio::test]
+    async fn test_multicast_upstream_is_not_connected() {
+        let provider = TokioRuntimeProvider::new(None, None, None);
+        let socket = provider
+            .bind_udp(
+                "0.0.0.0:0".parse().unwrap(),
+                "224.0.0.251:5353".parse().unwrap(),
+            )
+            .await
+            .expect("bind_udp 应成功");
+        assert!(
+            socket.deref().peer_addr().is_err(),
+            "多播上游不能被 connect，否则 mDNS 会彻底失效"
+        );
+    }
 }

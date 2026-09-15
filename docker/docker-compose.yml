@@ -12,3 +12,7 @@ services:
     volumes:
       - ./smartdns.conf:/etc/smartdns/smartdns.conf # 🌟 统一挂载路径到标准目录
     restart: always
+    # ⚠️ 若挂载进容器的 smartdns.conf 把管理后台绑到 0.0.0.0 而这里没设置口令，容器会拒绝启动（退出码 2）。
+    # 需要时取消下面三行的注释：
+    # environment:
+    #   SMARTDNS_API_TOKEN: change-me

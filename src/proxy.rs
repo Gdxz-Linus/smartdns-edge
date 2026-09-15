@@ -137,12 +137,24 @@ impl Deref for UdpSocket {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     pub proto: ProxyProtocol,
     pub server: SocketAddr,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// 🌟 安全修复：手写 Debug，口令属于敏感信息，不得出现在任何日志/错误输出中。
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("proto", &self.proto)
+            .field("server", &self.server)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 impl Display for ProxyConfig {
@@ -155,9 +167,13 @@ impl Display for ProxyConfig {
         if let Some(user) = self.username.as_deref() {
             f.write_str(user)?;
 
-            if let Some(pwd) = self.password.as_deref() {
-                f.write_char(':')?;
-                f.write_str(pwd)?;
+            // 🌟 安全修复：口令不参与展示。
+            // 本 Display 会被启动横幅（dns_conf.rs 的 summary）以及 NameServerInfo 的 Display 使用，
+            // 原实现直接输出明文，导致 `socks5://user:password@host` 被持久化进磁盘日志文件。
+            // 注意：连接与认证路径读取的是 self.password 字段本身（见本文件 handshake_tcp/handshake_udp），
+            // 不经过 Display，因此打码不会影响代理可用性。
+            if self.password.is_some() {
+                f.write_str(":***")?;
             }
             f.write_char('@')?;
         }

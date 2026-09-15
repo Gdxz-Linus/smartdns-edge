@@ -17,6 +17,7 @@ mod domain_set;
 mod file_mode;
 mod forward_rule;
 mod glob_pattern;
+mod group_match;
 mod https_record;
 mod ip_alias;
 mod ip_net;
@@ -83,6 +84,7 @@ impl NomParser for String {
 #[allow(clippy::large_enum_variant)]
 pub enum ConfigItem {
     Address(AddressRule),
+    ApiToken(String),
     AuditEnable(bool),
     AuditFile(PathBuf),
     AuditFileMode(FileMode),
@@ -104,6 +106,7 @@ pub enum ConfigItem {
     SrvRecord(ConfigForDomain<SRV>),
     GroupBegin(String),
     GroupEnd,
+    GroupMatch(GroupMatch),
     HttpsRecord(ConfigForDomain<HttpsRecordRule>),
     ConfFile(PathBuf),
     DnsmasqLeaseFile(PathBuf),
@@ -152,6 +155,9 @@ pub enum ConfigItem {
     RrTtlReplyMax(u64),
     SpeedMode(Option<SpeedCheckModeList>),
     TcpIdleTime(u64),
+    FirstPacketTimeout(u64),
+    MaxConnections(usize),
+    MaxConnectionsPerIp(usize),
     WhitelistIp(IpOrSet),
     User(String),
     IpSetProvider(IpSetProvider),
@@ -326,6 +332,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     ));
 
     let group4 = alt((
+        // 注意：nom 的 alt 元组最多 21 项，加新指令前先数一下（当前 14 项）
+        map(config("api-token"), ConfigItem::ApiToken),
         map(config("resolv-hostanme"), ConfigItem::ResolvHostname),
         map(config("response-mode"), ConfigItem::ResponseMode),
         map(config("server-name"), ConfigItem::ServerName),
@@ -340,8 +348,14 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("srv-record"), ConfigItem::SrvRecord),
         map(config("resolv-hostname"), ConfigItem::ResolvHostname),
         map(config("tcp-idle-time"), ConfigItem::TcpIdleTime),
+        map(config("first-packet-timeout"), ConfigItem::FirstPacketTimeout),
+        map(config("max-connections"), ConfigItem::MaxConnections),
+        map(config("max-connections-per-ip"), ConfigItem::MaxConnectionsPerIp),
         map(config("nftset"), ConfigItem::NftSet),
         map(config("user"), ConfigItem::User),
+        // ⚠️ 注意：每个 groupN 最多只能有 21 个入口——这是 nom 对 alt/Choice 元组
+        // 元素数量的硬上限（group2 已达 21 个）。以后新增配置指令时，请放到元素较少的组。
+        map(config("group-match"), ConfigItem::GroupMatch),
     ));
 
     let group5 = alt((

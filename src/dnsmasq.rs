@@ -259,7 +259,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(client_info.expires_at.and_utc().timestamp(), 1702763919);
+        // 修复编译错误：expires_at 已从"日期时间对象"改为纯 i64 时间戳，直接比整数即可。
+        assert_eq!(client_info.expires_at, 1702763919);
         assert_eq!(client_info.host, Name::from_str("andy-pc").unwrap());
         assert_eq!(client_info.ip, "192.168.100.16".parse::<IpAddr>().unwrap());
     }
@@ -300,12 +301,17 @@ mod tests {
             store.lookup(&"iphone-abc".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
-                .map(|s| s.into())
+                // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
+                // （从"返回一个 IP"改为"返回一组完整的 DNS 记录"），期待值也要包成记录数组。
+                .map(|s| vec![RData::from(s)])
         );
 
+        // 修复：设备存在但只登记了 IPv6 时，查 A 记录按设计必须返回「空数组」而非 None
+        // （源码注释明确写着：绝不能返回 None，否则内网设备名会流向外网泄露）。
+        // 原测试断言的是这次改动之前的行为。
         assert_eq!(
             store.lookup(&"iphone-abc".parse().unwrap(), RecordType::A).await,
-            None
+            Some(vec![])
         );
     }
 
@@ -317,12 +323,15 @@ mod tests {
             store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
-                .map(|s| s.into())
+                // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
+                // （从"返回一个 IP"改为"返回一组完整的 DNS 记录"），期待值也要包成记录数组。
+                .map(|s| vec![RData::from(s)])
         );
 
+        // 同上：类型不匹配时按设计返回空数组，而不是 None
         assert_eq!(
             store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::A).await, 
-            None
+            Some(vec![])
         );
     }
 
@@ -334,12 +343,15 @@ mod tests {
             store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::AAAA).await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
-                .map(|s| s.into())
+                // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
+                // （从"返回一个 IP"改为"返回一组完整的 DNS 记录"），期待值也要包成记录数组。
+                .map(|s| vec![RData::from(s)])
         );
 
+        // 同上：类型不匹配时按设计返回空数组，而不是 None
         assert_eq!(
             store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A).await,
-            None
+            Some(vec![])
         );
     }
 }

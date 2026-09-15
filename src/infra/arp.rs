@@ -117,7 +117,13 @@ fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
         ) -> u32;
     }
 
-    let dest_ip = u32::from_be_bytes(client_ip.octets());
+    // 🌟 P1-2 修复：SendARP 的 DestIP 参数与 C 的 inet_addr() 返回值同序
+    // （即"内存中的字节序列 = IP 的四个字节"），因此必须用 from_ne_bytes。
+    // 原来用 from_be_bytes 会得到字节序颠倒的值，SendARP 返回 67 (ERROR_BAD_NET_NAME)，
+    // MAC 永远取不到 → README 主推的"MAC 地址智能分流"在 Windows 上从未生效，
+    // 且全程静默无报错（只有 1.2.2.1 这类回文地址偶然可用）。
+    // 实测：10.118.55.8 → from_be_bytes=0x0A763708 取不到；同序值=0x0837760A 正常取到 MAC。
+    let dest_ip = u32::from_ne_bytes(client_ip.octets());
     let mut mac = [0u8; 6];
     let mut mac_len = 6u32;
 
@@ -152,6 +158,29 @@ fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sendarp_dest_ip_byte_order() {
+        // 锁定字节序：SendARP 需要 inet_addr() 同序的值 ——
+        // 它的内存字节序列必须与 IP 的四个字节完全一致。
+        for ip_str in ["10.118.55.8", "192.168.1.1", "1.2.2.1", "255.255.255.255"] {
+            let ip: Ipv4Addr = ip_str.parse().unwrap();
+            let dest_ip = u32::from_ne_bytes(ip.octets());
+            assert_eq!(
+                dest_ip.to_ne_bytes(),
+                ip.octets(),
+                "{ip_str} 传给 SendARP 的字节序错了（MAC 查询会返回 67 而静默失败）"
+            );
+        }
+
+        // 本机实测基准值：C 的 inet_addr("10.118.55.8") = 0x0837760A
+        #[cfg(target_endian = "little")]
+        assert_eq!(
+            u32::from_ne_bytes([10, 118, 55, 8]),
+            0x0837_760A,
+            "必须与 Windows 的 inet_addr() 保持一致"
+        );
+    }
 
     #[test]
     fn test_client_ipv4_for_arp() {
@@ -225,3 +254,27 @@ mod tests {
         assert_eq!(entries[0].mac.to_string(), "aa:bb:cc:dd:ee:ff");
     }
 }
+
+    /// 真机验证 SendARP 真的能取到 MAC（需要同网段、可 ARP 解析的目标，通常是默认网关）。
+    /// 与其它环境相关测试一致：环境变量缺失就打印说明并跳过，不硬编码任何地址。
+    #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
+    #[test]
+    fn test_sendarp_real_lookup() {
+        let target = match std::env::var("SMARTDNS_TEST_ARP_TARGET") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => {
+                println!(
+                    "跳过 test_sendarp_real_lookup：未设置 SMARTDNS_TEST_ARP_TARGET \
+                     （可设为本机默认网关，例如 172.20.10.1）"
+                );
+                return;
+            }
+        };
+        let ip: Ipv4Addr = target.trim().parse().expect("SMARTDNS_TEST_ARP_TARGET 要是 IPv4 地址");
+        match lookup_client_mac_from_arp_v4(ip) {
+            Some(mac) => println!("SendARP 取到 {ip} 的 MAC = {mac} ✓（字节序正确）"),
+            None => panic!(
+                "SendARP 取不到 {ip} 的 MAC —— 字节序可能仍然不对（只发 2 字节前缀那种静默失败）"
+            ),
+        }
+    }

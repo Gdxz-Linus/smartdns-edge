@@ -188,7 +188,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
-    #[ignore]
+    #[ignore = "需要局域网内存在真实 DHCP 服务器：本测试会在本机网段实际发出 DHCP DISCOVER"]
     #[tokio::test]
     async fn test_dhcp_get_dns() -> anyhow::Result<()> {
         let msg = discover_v4(None).await?;

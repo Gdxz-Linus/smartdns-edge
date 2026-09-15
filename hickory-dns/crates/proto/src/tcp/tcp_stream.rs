@@ -53,6 +53,14 @@ enum WriteTcpState {
 }
 
 /// Current state of a TCP stream as it's being read.
+/// 分块读取的块大小。
+///
+/// 🌟 P0-5 修复：DNS over TCP/DoT 的长度前缀只有 2 字节，最大可声明 65535 字节。
+/// 原实现按声明长度一次性分配（vec![0; length]），攻击者只发 2 字节就能白占 64 KiB；
+/// 现在改为按需分块增长，内存只与实际收到的字节数成正比。
+/// 4096 是折中：足够小（不成为攻击杠杆），又足够大（不增加额外系统调用）。
+const READ_CHUNK: usize = 4096;
+
 pub(crate) enum ReadTcpState {
     /// Currently reading the length of the TCP packet
     LenBytes {
@@ -65,8 +73,10 @@ pub(crate) enum ReadTcpState {
     Bytes {
         /// Current position while reading the buffer
         pos: usize,
-        /// buffer being read into
+        /// buffer being read into（按需分块增长，不是一次分配 planned 大小）
         bytes: Vec<u8>,
+        /// 报文声明的总长度（来自长度前缀）
+        planned: usize,
     },
 }
 
@@ -318,14 +328,27 @@ impl<S: DnsTcpStream> Stream for TcpStream<S> {
                     } else {
                         let length = u16::from_be_bytes(*bytes);
                         debug!("got length: {}", length);
-                        let mut bytes = vec![0; length as usize];
-                        bytes.resize(length as usize, 0);
-
-                        debug!("move ReadTcpState::Bytes: {}", bytes.len());
-                        Some(ReadTcpState::Bytes { pos: 0, bytes })
+                        // 🌟 P0-5 修复：绝不按客户端声明的长度分配内存。
+                        let planned = length as usize;
+                        let initial = READ_CHUNK.min(planned);
+                        debug!("move ReadTcpState::Bytes: {}", planned);
+                        Some(ReadTcpState::Bytes {
+                            pos: 0,
+                            bytes: vec![0; initial],
+                            planned,
+                        })
                     }
                 }
-                ReadTcpState::Bytes { pos, bytes } => {
+                ReadTcpState::Bytes {
+                    pos,
+                    bytes,
+                    planned,
+                } => {
+                    // 当前块读满了、报文还没读完 → 再扩一块（最多 READ_CHUNK）
+                    if *pos >= bytes.len() && bytes.len() < *planned {
+                        let newsize = (bytes.len() + READ_CHUNK).min(*planned);
+                        bytes.resize(newsize, 0);
+                    }
                     let read = ready!(socket.as_mut().poll_read(cx, &mut bytes[*pos..]))?;
                     if read == 0 {
                         // the Stream was closed!
@@ -342,8 +365,8 @@ impl<S: DnsTcpStream> Stream for TcpStream<S> {
                     debug!("in ReadTcpState::Bytes: {}", bytes.len());
                     *pos += read;
 
-                    if *pos < bytes.len() {
-                        debug!("remain ReadTcpState::Bytes: {}", bytes.len());
+                    if *pos < *planned {
+                        debug!("remain ReadTcpState::Bytes: {}", planned);
                         None
                     } else {
                         debug!("reset ReadTcpState::LenBytes: {}", 0);
@@ -358,7 +381,7 @@ impl<S: DnsTcpStream> Stream for TcpStream<S> {
             // this will move to the next state,
             //  if it was a completed receipt of bytes, then it will move out the bytes
             if let Some(state) = new_state {
-                if let ReadTcpState::Bytes { pos, bytes } = mem::replace(read_state, state) {
+                if let ReadTcpState::Bytes { pos, bytes, .. } = mem::replace(read_state, state) {
                     debug!("returning bytes");
                     assert_eq!(pos, bytes.len());
                     ret_buf = Some(bytes);

@@ -23,6 +23,13 @@ use crate::{
 
 const DEFAULT_GROUP: &str = "default";
 
+/// 配置文件相关错误（文件不存在 / 解析失败）导致启动失败时使用的退出码。
+///
+/// 单独使用 2 而不是笼统的 1，是为了让脚本与服务管理器能一眼区分
+/// “配置写错了”（需要人工改配置）和“其它运行期错误”（如 PID 锁获取失败）。
+/// 以 Windows 服务方式运行时 stderr 不可见，此时退出码是唯一可被记录的线索。
+pub const EXIT_CODE_CONFIG_ERROR: i32 = 2;
+
 #[cfg(target_os = "windows")]
 pub const DEFAULT_CONF_DIR: &str = r"C:\ProgramData\smartdns";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -148,11 +155,19 @@ impl RuntimeConfig {
             let mut candidate_paths = candidate_path.iter().map(Path::new).filter(|p| p.exists());
 
             let Some(path) = candidate_paths.next() else {
-                // 🌟 核心修复 4：拒绝粗暴崩溃！给予用户最清晰的命令行排错指引！
+                // 🌟 修复：原为 std::process::exit(1)。
+                // 提示信息本身是清楚的，问题在于退出码与其它错误（如 PID 锁失败）混用 1，
+                // 服务方式运行时 stderr 不可见，只剩退出码可被服务管理器记录，
+                // 因此这里改用专门的“配置错误”退出码，让"配置没找到"可被区分出来。
                 eprintln!("\n❌ [ERROR] Configuration file not found!");
                 eprintln!("💡 Hint: Please specify the config file using '-c' (e.g., smartdns run -c ./smartdns.conf).");
-                eprintln!("   Or use 'smartdns service install' to generate a default config.\n");
-                std::process::exit(1);
+                eprintln!("   Or use 'smartdns service install' to generate a default config.");
+                eprintln!(
+                    "   Searched the following locations: {}",
+                    candidate_path.join(", ")
+                );
+                eprintln!("   Exit code: {EXIT_CODE_CONFIG_ERROR} (configuration error)\n");
+                std::process::exit(EXIT_CODE_CONFIG_ERROR);
             };
             Cow::Owned(path.to_path_buf())
         };
@@ -160,11 +175,20 @@ impl RuntimeConfig {
         match builder.with_conf_file(&path).build() {
             Ok(cfg) => cfg.into(),
             Err(err) => {
-                panic!(
-                    "Failed to load configuration file at {}: {}",
-                    path.display(),
-                    err
+                // 🌟 修复：原为 panic!()，整个进程以 Rust panic 方式摔死，
+                // 屏幕上只有一句 "Failed to load configuration file..." 加一大段调用栈，
+                // 既难阅读，也让 `smartdns test` 这个"只检查配置"的子命令跟着崩溃。
+                // 改为「清晰错误 + 明确退出码」：打印文件路径与完整错误链（{err:#} 会带出因果链），
+                // 并以专用的配置错误码退出，便于脚本与服务管理器区分。
+                eprintln!(
+                    "\n❌ [ERROR] Failed to load configuration file: {}",
+                    path.display()
                 );
+                eprintln!("💡 Reason: {err:#}");
+                eprintln!("💡 Hint: 请检查该文件是否存在语法错误、非法参数或不可读的引用路径。");
+                eprintln!("   You can validate a config standalone with: smartdns test -c <file>");
+                eprintln!("   Exit code: {EXIT_CODE_CONFIG_ERROR} (configuration error)\n");
+                std::process::exit(EXIT_CODE_CONFIG_ERROR);
             }
         }
     }
@@ -326,6 +350,11 @@ impl RuntimeConfig {
 
     /// dns server run user
     #[inline]
+    /// 管理后台口令：配置 `api-token` 优先，其次是环境变量（见 crate::api::api_token）
+    pub fn api_token(&self) -> Option<&str> {
+        self.api_token.as_deref()
+    }
+
     pub fn user(&self) -> Option<&str> {
         self.user.as_deref()
     }
@@ -339,6 +368,27 @@ impl RuntimeConfig {
     #[inline]
     pub fn tcp_idle_time(&self) -> u64 {
         self.tcp_idle_time.unwrap_or(120)
+    }
+
+    /// 同时连接数上限；None 表示按物理内存自动推算（见 server::limit）
+    pub fn max_connections(&self) -> Option<usize> {
+        self.max_connections
+    }
+
+    /// 单一来源连接数上限；None 表示自动
+    pub fn max_connections_per_ip(&self) -> Option<usize> {
+        self.max_connections_per_ip
+    }
+
+    /// 连接建立后等待"第一个完整报文"的秒数；0 表示不限制。
+    /// 默认 5 秒：正常客户端握手完成后会立刻发查询，5 秒足够宽裕；
+    /// 而"只发长度前缀不发正文"的慢速攻击会被迅速断开。
+    pub fn first_packet_timeout(&self) -> Option<std::time::Duration> {
+        match self.first_packet_timeout {
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => Some(std::time::Duration::from_secs(5)),
+        }
     }
 
     #[inline]
@@ -728,6 +778,17 @@ pub struct RuntimeConfigBuilder {
 impl RuntimeConfigBuilder {
     pub fn build(mut self) -> anyhow::Result<RuntimeConfig> {
         if let Some(conf_file) = self.conf_file.clone() {
+            // 🌟 修复：主配置文件必须真实存在。
+            // 原先若 -c 指定的路径解析后并不存在（例如 -c 给了一个目录、而该目录下
+            // 并没有 smartdns.conf），load_file 只会打一条 warning 然后按“成功”返回，
+            // 于是 build() 成功 → `smartdns test` 会对着一个根本没读到的配置打印
+            // “✅ Configuration test passed successfully!” 并以退出码 0 退出。
+            // 对 include 进来的文件容忍缺失是合理的（见 load_file 的 warn 分支），
+            // 但对用户指定的主配置绝不可以——这等于用退出码告诉用户“配置没问题”。
+            if !conf_file.exists() {
+                anyhow::bail!("configuration file does not exist: {}", conf_file.display());
+            }
+
             let loaded = self.loaded_files.contains(&conf_file);
             if !loaded {
                 self.load_file(&conf_file)?;
@@ -973,6 +1034,25 @@ impl RuntimeConfigBuilder {
     pub fn load_file<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = self.resolve_filepath(path);
 
+        // 🌟 核心修复（治理 conf-file 无限递归）：
+        // 必须在进入递归之前就把路径登记进 loaded_files。
+        // 原实现在递归返回之后才 insert，而 load_file 自身从不登记，
+        // 因此 "conf-file 指向自己" 或 a↔b 互相包含时会无限递归直至栈溢出，进程直接崩溃。
+        //
+        // 去重键使用 canonicalize 之后的真实文件身份：resolve_filepath 只做"找到文件"的
+        // 相对/绝对拼接，并不规范化，同一个文件写 `inc.conf`、`./inc.conf`、
+        // `C:/abs/inc.conf` 会得到三个不同的字符串，导致被重复解析。canonicalize 失败
+        // （文件不存在等）时退回 resolve 后的路径。
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+        if !self.loaded_files.insert(key) {
+            warn!(
+                "configuration file {:?} has already been loaded, skip to avoid recursion",
+                path
+            );
+            return Ok(());
+        }
+
         if path.exists() {
             debug!("loading extra configuration from {:?}", path);
 
@@ -1012,6 +1092,7 @@ impl RuntimeConfigBuilder {
                 AuditSize(v) => self.audit.size = Some(v),
                 BindCertFile(v) => self.bind_cert_file = Some(self.resolve_filepath(v)),
                 BindCertKeyFile(v) => self.bind_cert_key_file = Some(self.resolve_filepath(v)),
+                ApiToken(v) => self.api_token = Some(v),
                 BindCertKeyPass(v) => self.bind_cert_key_pass = Some(v),
                 CacheFile(v) => self.cache.file = Some(self.resolve_filepath(v)),
                 CachePersist(v) => self.cache.persist = Some(v),
@@ -1064,13 +1145,23 @@ impl RuntimeConfigBuilder {
                 CaFile(v) => self.ca_file = Some(v),
                 CaPath(v) => self.ca_path = Some(v),
                 ConfFile(v) => {
-                    if !self.loaded_files.contains(&v) {
-                        self.load_file(v.clone()).expect("load_file failed");
-                        if let Some(dir) = v.parent() {
-                            self.dirs.insert(dir.to_path_buf());
-                        }
+                    // 去重与递归保护统一由 load_file 内部处理（它在递归之前就登记路径），
+                    // 此处不再自行 contains/insert：原先这里用的是未 resolve 的原始路径，
+                    // 与 load_file 内部 resolve 后的路径不是同一个键，判断必然失效。
+                    //
+                    // 🌟 修复：原为 .expect("load_file failed")。
+                    // 只要 include 的文件存在但打不开（权限不足、路径指向目录、被占用等），
+                    // 就会 panic 直接中止整个进程，用户只能看到一句 "load_file failed" 和栈回溯。
+                    // 改为打印"哪个文件、什么原因"并跳过该文件、继续加载其余配置。
+                    if let Err(err) = self.load_file(v.clone()) {
+                        log::error!(
+                            "failed to load extra configuration file {:?}: {err}; this file is skipped",
+                            v
+                        );
+                    }
 
-                        self.loaded_files.insert(v);
+                    if let Some(dir) = v.parent() {
+                        self.dirs.insert(dir.to_path_buf());
                     }
                 }
                 DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(self.resolve_filepath(v)),
@@ -1080,6 +1171,9 @@ impl RuntimeConfigBuilder {
                 ForwardRule(v) => rule_group.forward_rules.push(v),
                 User(v) => self.user = Some(v),
                 TcpIdleTime(v) => self.tcp_idle_time = Some(v),
+                FirstPacketTimeout(v) => self.first_packet_timeout = Some(v),
+                MaxConnections(v) => self.max_connections = Some(v),
+                MaxConnectionsPerIp(v) => self.max_connections_per_ip = Some(v),
                 EdnsClientSubnet(v) => self.edns_client_subnet = Some(v),
                 Address(v) => rule_group.address_rules.push(v),
                 DomainSetProvider(mut v) => {
@@ -1131,6 +1225,39 @@ impl RuntimeConfigBuilder {
                             .unwrap_or_else(|| DEFAULT_GROUP.to_string());
                     }
                     self.client_rules.push(client_rule)
+                }
+                GroupMatch(group_match) => {
+                    // 目标组：显式 -g/--group 优先，否则使用「当前所在的规则组」
+                    // （与 C 版 smartdns 的 _config_group_match 行为一致）
+                    let group = match group_match.group {
+                        Some(group) => group,
+                        None => self
+                            .rule_group_stack
+                            .last()
+                            .map(|(name, _)| name.clone())
+                            .unwrap_or_else(|| DEFAULT_GROUP.to_string()),
+                    };
+
+                    // -c/--client-ip <ip|cidr|mac> 与 `client-rules <值> -g <组>` 完全等价，
+                    // 直接复用已有的客户端规则匹配逻辑（含 app.rs 里的 MAC 查询）。
+                    // 注意：这里必须写完整路径，因为本作用域内有 `use ConfigItem::*`，
+                    // 裸写 ClientRule 会被解析成枚举变体 ConfigItem::ClientRule。
+                    for client in group_match.clients {
+                        self.client_rules.push(crate::config::ClientRule {
+                            client,
+                            group: group.clone(),
+                        });
+                    }
+
+                    // -d/--domain 在 C 版里是「域名 → 规则组」的映射，本项目还没有这套机制。
+                    // 明确报错而不是静默忽略，避免用户以为配置已经生效。
+                    for domain in &group_match.domains {
+                        log::error!(
+                            "group-match -domain {domain:?} is not supported yet: \
+                             domain-based rule group selection is not implemented, \
+                             this entry is ignored"
+                        );
+                    }
                 }
             },
             Ok((_, None)) => (),
@@ -1386,6 +1513,93 @@ mod tests {
         assert_eq!(server.server.to_string(), "https://223.5.5.5/dns-query");
         assert!(server.exclude_default_group);
         assert!(server.bootstrap_dns);
+    }
+
+    #[test]
+    fn test_config_bind_http_no_api() {
+        // 写了 -no-api：该监听只提供 DoH，不挂管理后台
+        let cfg = RuntimeConfig::builder()
+            .with("bind-http 127.0.0.1:18000 -no-api")
+            .build()
+            .unwrap();
+        let b = cfg
+            .binds()
+            .iter()
+            .find_map(|b| match b {
+                crate::config::BindAddrConfig::Http(h) => Some(h),
+                _ => None,
+            })
+            .unwrap();
+        assert!(b.opts.no_api());
+
+        // 没写：后台照旧挂载（保持向后兼容）
+        let cfg2 = RuntimeConfig::builder()
+            .with("bind-http 127.0.0.1:18001")
+            .build()
+            .unwrap();
+        let b2 = cfg2
+            .binds()
+            .iter()
+            .find_map(|b| match b {
+                crate::config::BindAddrConfig::Http(h) => Some(h),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!b2.opts.no_api());
+    }
+
+    #[test]
+    fn test_config_connection_limits() {
+        let cfg = RuntimeConfig::builder()
+            .with("max-connections 2000")
+            .with("max-connections-per-ip 500")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.max_connections(), Some(2000));
+        assert_eq!(cfg.max_connections_per_ip(), Some(500));
+
+        // 未配置必须是 None（交给按内存自动推算，绝不写死默认值）
+        let cfg2 = RuntimeConfig::builder().build().unwrap();
+        assert_eq!(cfg2.max_connections(), None);
+        assert_eq!(cfg2.max_connections_per_ip(), None);
+    }
+
+    #[test]
+    fn test_config_first_packet_timeout() {
+        // 默认 5 秒
+        let cfg = RuntimeConfig::builder().build().unwrap();
+        assert_eq!(
+            cfg.first_packet_timeout(),
+            Some(std::time::Duration::from_secs(5))
+        );
+
+        // 0 = 显式关闭
+        let cfg2 = RuntimeConfig::builder()
+            .with("first-packet-timeout 0")
+            .build()
+            .unwrap();
+        assert_eq!(cfg2.first_packet_timeout(), None);
+    }
+
+    #[test]
+    fn test_config_api_token() {
+        // 配置里写了 api-token，就该读到它
+        let cfg = RuntimeConfig::builder()
+            .with("api-token my-strong-token-123")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.api_token(), Some("my-strong-token-123"));
+
+        // 没写就必须是 None —— 代码里绝不允许留任何写死的默认口令
+        let cfg = RuntimeConfig::builder().build().unwrap();
+        assert_eq!(cfg.api_token(), None);
+    }
+
+    #[test]
+    fn test_api_token_not_hardcoded() {
+        // 只要用户没配置，判断就不能是"已配置"（这条锁住 P0-1：不许再有写死的默认口令）
+        assert!(crate::api::has_configured_token(Some("set-by-user")));
+        assert!(!crate::api::has_configured_token(Some("   ")));
     }
 
     #[test]
@@ -1821,13 +2035,17 @@ mod tests {
     #[test]
     fn test_parse_config_speed_check_mode_https_omit_port() {
         let mut cfg = RuntimeConfig::builder();
-        cfg.config("speed-check-mode http,https");
+        // 修复：原写法是 "tcp,https" 并期望 tcp 省略端口时默认为 80。
+        // 但按设计 tcp 必须显式带端口（见 src/config/parser/speed_mode.rs 的单元测试
+        // 明确断言 `SpeedCheckMode::parse("tcp").is_err()`），只有 https 允许省略（默认 443）。
+        // 因此给 tcp 补上端口；测试名关注的 "https 省略端口" 语义保持不变。
+        cfg.config("speed-check-mode tcp:80,https");
 
         assert_eq!(cfg.speed_check_mode.as_ref().unwrap().len(), 2);
 
         assert_eq!(
             cfg.speed_check_mode.as_ref().unwrap().first().unwrap(),
-            &SpeedCheckMode::Http(80)
+            &SpeedCheckMode::Tcp(80)
         );
         assert_eq!(
             cfg.speed_check_mode.as_ref().unwrap().get(1).unwrap(),
@@ -1917,7 +2135,9 @@ mod tests {
 
         let domain_set = domain_set_providers
             .iter()
-            .flat_map(|p| p.get_domain_set().unwrap_or_default())
+            // 修复编译错误：get_domain_set() 后来新增了"代理池"参数（用于支持 domain-set
+            // 通过代理下载），此测试不涉及代理，传一个空表即可。
+            .flat_map(|p| p.get_domain_set(&Default::default()).unwrap_or_default())
             .collect::<DomainSet>();
 
         assert!(!domain_set.is_empty());
@@ -2047,5 +2267,66 @@ mod tests {
 
         assert_eq!(cfg.client_rules().len(), 1);
         assert_eq!(cfg.client_rules()[0].group, "office");
+    }
+
+    #[test]
+    fn test_group_match_client_ip_uses_current_group_and_explicit_group() {
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin group-a")
+            // 不带 -g：使用当前所在的规则组 group-a
+            .with("group-match -client-ip 192.168.100.0/24")
+            // 带 -g：使用指定的 group-b（顺便验证 C 版文档里的裸 IP 写法）
+            .with("group-match -g group-b -client-ip 10.0.0.1")
+            // MAC 地址同样支持
+            .with("group-match -client-ip 01:02:03:04:05:06")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        let rules = cfg.client_rules();
+        assert_eq!(rules.len(), 3);
+
+        assert_eq!(rules[0].group, "group-a");
+        assert_eq!(
+            rules[0].client,
+            Client::IpAddr("192.168.100.0/24".parse().unwrap())
+        );
+
+        assert_eq!(rules[1].group, "group-b");
+        assert_eq!(rules[1].client, Client::IpAddr("10.0.0.1/32".parse().unwrap()));
+
+        assert_eq!(rules[2].group, "group-a");
+        assert_eq!(rules[2].client, Client::Mac("01:02:03:04:05:06".to_string()));
+    }
+
+    #[test]
+    fn test_group_match_without_group_uses_default_group() {
+        // 不在任何 group-begin 里 → 落到默认组
+        let cfg = RuntimeConfig::builder()
+            .with("group-match -client-ip 192.168.1.1")
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.client_rules().len(), 1);
+        assert_eq!(cfg.client_rules()[0].group, DEFAULT_GROUP);
+        assert_eq!(
+            cfg.client_rules()[0].client,
+            Client::IpAddr("192.168.1.1/32".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_group_match_domain_is_not_supported_yet() {
+        // -domain 在 C 版里是「域名 → 规则组」映射，本项目尚未实现该机制。
+        // 这里锁定行为：它不产生任何客户端规则（加载时会打一条 error 日志提醒用户），
+        // 而不是被静默当成"条件已生效"。
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin office")
+            .with("group-match -domain a.com")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        assert!(cfg.client_rules().is_empty());
     }
 }

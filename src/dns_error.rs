@@ -39,7 +39,19 @@ impl PartialEq for LookupError {
 
 impl LookupError {
     pub fn is_nx_domain(&self) -> bool {
-        matches!(self, Self::ResponseCode(resc) if resc.eq(&ResponseCode::NXDomain))
+        // "上游明确说这个域名不存在"有两种形态，都要认：
+        //   1) 错误本身就是一个 ResponseCode（历史上预留的形态）；
+        //   2) hickory 把非 NOERROR 的应答包成 NoRecordsFound —— 真实路径走的就是这个：
+        //      NXDOMAIN 的 SOA 可有可无，带 SOA 时会被 as_soa() 赦免成 Ok，不带的就只剩这个错误。
+        match self {
+            Self::ResponseCode(resc) => resc.eq(&ResponseCode::NXDomain),
+            Self::Proto(err) => matches!(
+                err.kind(),
+                ProtoErrorKind::NoRecordsFound(NoRecords { response_code, .. })
+                    if response_code.eq(&ResponseCode::NXDomain)
+            ),
+            _ => false,
+        }
     }
 
     #[inline]

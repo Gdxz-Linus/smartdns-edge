@@ -275,11 +275,13 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
             .and_then(|edns| edns.option(crate::libdns::proto::rr::rdata::opt::EdnsCode::Subnet))
             .and_then(|opt| match opt {
                 crate::libdns::proto::rr::rdata::opt::EdnsOption::Subnet(subnet) => {
-                    Some(format!("{}/{}", subnet.addr(), subnet.scope_prefix()))
+                    // 请求侧要用 source_prefix（客户端声明的"我的地址前 N 位"）；
+                    // scope_prefix 是上游在应答里回填的作用域，请求里恒为 0，用它等于丢掉前缀。
+                    Some(format!("{}/{}", subnet.addr(), subnet.source_prefix()))
                 }
                 _ => None,
             })
-            .or_else(|| ctx.domain_rule.get_ref(|r| r.subnet.as_ref()).map(|s| format!("{}/{}", s.addr(), s.scope_prefix())));
+            .or_else(|| ctx.domain_rule.get_ref(|r| r.subnet.as_ref()).map(|s| format!("{}/{}", s.addr(), s.source_prefix())));
 
         let cache_key = CacheKey {
             query: req.query().original().to_owned(),
@@ -323,7 +325,14 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                     let other_type = match cache_key.query.query_type() {
                                         RecordType::A => RecordType::AAAA,
                                         RecordType::AAAA => RecordType::A,
-                                        _ => unreachable!(),
+                                        other => {
+                                            // 🔐 P0-2：上游已用 is_ip_addr() 过滤（仅 A/AAAA），
+                                            // 到不了这里；真到了也不 panic，退回缓存结果。
+                                            crate::log::warn!(
+                                                "prefetch: unexpected record type {other:?}, skip prefetch"
+                                            );
+                                            return Ok(res);
+                                        }
                                     };
                                     let other_key = CacheKey {
                                         query: Query::query(cache_key.query.name().clone(), other_type),
@@ -411,7 +420,17 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 flatten_cname(&mut lookup, &cache_key.query);
 
                 if !ctx.no_cache {
-                    self.cache.insert_full_response(cache_key.clone(), lookup.clone(), Instant::now()).await;
+                    // 🚫 截断包（TC=1）不入缓存：它只是"答案太大装不下"的半成品，一旦入库就会在整个
+                    // TTL 内把所有客户端都喂成残缺结果，而且不会自我纠正（P1-5）。
+                    if lookup.truncated() {
+                        debug!(
+                            "name: {} {}: response is truncated (TC=1), not cached",
+                            cache_key.query.name(),
+                            cache_key.query.query_type()
+                        );
+                    } else {
+                        self.cache.insert_full_response(cache_key.clone(), lookup.clone(), Instant::now()).await;
+                    }
 
                     // 🌟 完美收取双栈探针带回的战利品，同样组装完整 CacheKey
                     let extra_records = std::mem::take(&mut ctx.extra_cache_records);
@@ -425,10 +444,20 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             group: ctx.server_group_name().to_string(), // 现在可以畅通无阻地读取 ctx 了
                             ecs: ecs_str.clone(),
                         };
-                        self.cache.insert_full_response(extra_key, extra_resp, Instant::now()).await;
+                        if extra_resp.truncated() {
+                            debug!(
+                                "name: {} {}: dual-stack extra response is truncated (TC=1), not cached",
+                                extra_key.query.name(),
+                                extra_key.query.query_type()
+                            );
+                        } else {
+                            self.cache.insert_full_response(extra_key, extra_resp, Instant::now()).await;
+                        }
                     }
 
-                    if ctx.cfg().prefetch_domain()
+                    // 截断包没有进缓存，也就没有"到期再预取"这回事
+                    if !lookup.truncated()
+                        && ctx.cfg().prefetch_domain()
                         && let Some(ttl) = lookup.min_ttl() {
                             self.cache.prefetch_notify
                                 .notify_after(Duration::from_secs(ttl as u64))

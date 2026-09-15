@@ -91,7 +91,15 @@ impl DomainRuleMap {
 
         for rule in nftsets {
             for name in expand_domain(&rule.domain) {
-                name_rule_map.entry(name).or_default().nftset = Some(rule.config.clone());
+                // 🌟 P1-12 修复：这里是**覆盖赋值**，导致同一域名配置多条 nftset 时
+                // 只有最后一条生效（README 声称的"多个 nftset 集合数组级平滑合并"因此没有兑现）。
+                // 下游中间件（dns_mw_nftset.rs）本来就是遍历数组逐条写入防火墙集合的，
+                // 所以这里改成"合并"即可，无需改动下游。
+                let entry = name_rule_map.entry(name).or_default();
+                entry
+                    .nftset
+                    .get_or_insert_with(Vec::new)
+                    .extend(rule.config.iter().cloned());
             }
         }
 
@@ -218,6 +226,57 @@ mod tests {
     use std::{net::Ipv4Addr, ptr};
 
     use super::*;
+
+    #[test]
+    fn test_nftset_merge_same_domain() {
+        // P1-12：同一域名配置多条 nftset，必须全部保留（不是只剩最后一条）
+        let nftsets = vec![
+            ConfigForDomain {
+                domain: "a.com".parse().unwrap(),
+                config: vec![ConfigForIP::V4(NFTsetConfig {
+                    family: "inet",
+                    table: "t1".to_string(),
+                    name: "s1".to_string(),
+                })],
+            },
+            ConfigForDomain {
+                domain: "a.com".parse().unwrap(),
+                config: vec![ConfigForIP::V4(NFTsetConfig {
+                    family: "inet",
+                    table: "t2".to_string(),
+                    name: "s2".to_string(),
+                })],
+            },
+        ];
+
+        let map = DomainRuleMap::create(
+            &mut Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &nftsets,
+        );
+
+        let rule = map.find(&"a.com".parse().unwrap()).expect("a.com 的规则应存在");
+        let got = rule.get(|n| n.nftset.as_ref().cloned()).unwrap_or_default();
+
+        assert_eq!(
+            got.len(),
+            2,
+            "两条 nftset 都应生效，实际只有 {:?}",
+            got
+        );
+        assert!(
+            got.iter().any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t1" && c.name == "s1"))
+                && got.iter().any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t2" && c.name == "s2")),
+            "t1#s1 与 t2#s2 都应保留，实际 {:?}",
+            got
+        );
+    }
 
     #[test]
     fn test_zone_rule() {

@@ -36,6 +36,19 @@ pub struct ServeState {
     pub dns_handle: DnsHandle,
 }
 
+/// 只提供 DoH（`/dns-query`）、不挂管理后台的路由。
+/// 给 bind 加了 `-no-api` 的监听使用：对外提供加密 DNS，但不暴露 `/api` 接口。
+pub fn dns_only_routes() -> axum::Router<Arc<ServeState>> {
+    let (router, _openapi) = Router::new().merge(serve_dns::routes()).split_for_parts();
+
+    router.layer(
+        ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
+            header::SERVER,
+            HeaderValue::from_static(crate::NAME),
+        )),
+    )
+}
+
 pub fn routes() -> axum::Router<Arc<ServeState>> {
     use utoipa::openapi::InfoBuilder;
     let (router, mut openapi) = Router::new()
@@ -51,20 +64,24 @@ pub fn routes() -> axum::Router<Arc<ServeState>> {
         cfg_if! {
             if #[cfg(feature = "swagger-ui-cdn")]
             {
-                router.merge(openapi::swagger_cdn("/api/docs", "/api/openapi.json", openapi, None))
+                router.merge(
+                    openapi::swagger_cdn("/api/docs", "/api/openapi.json", openapi, None)
+                        .route_layer(middleware::from_fn(api_auth_middleware)),
+                )
             }
             else if #[cfg(feature = "swagger-ui-embed")]
             {
                 use utoipa_swagger_ui::{Config, SwaggerUi};
                 router.merge(
-                    SwaggerUi::new("/api/docs")
+                    (SwaggerUi::new("/api/docs")
                         .config(
                             Config::default()
                                 .show_extensions(true)
                                 .show_common_extensions(true)
                                 .use_base_layout(),
                         )
-                        .url("/api/openapi.json", openapi),
+                        .url("/api/openapi.json", openapi))
+                        .route_layer(middleware::from_fn(api_auth_middleware)),
                 )
             } else {
                 router
@@ -167,34 +184,172 @@ impl<T> From<Vec<T>> for DataListPayload<T> {
 }
 
 // 🌟 核心修复：API 控制面鉴权拦截器
+// 🔐 管理接口口令（token）
+//
+// 设计原则：**代码里绝不保留任何写死的默认口令**。取值顺序：
+//   1. 配置里的 `api-token <口令>`（启动时由 set_configured_token 登记）；
+//   2. 环境变量 `SMARTDNS_API_TOKEN`；
+//   3. 都没有时，第一次用到就随机生成一个强口令，打印到控制台与日志，
+//      并提示用户「想固定就写进配置」。
+//
+// 原实现在这里留了一串写死的默认口令：口令公开写在源码里，
+// 等于全世界装了本项目的人共用一个管理密码。
+static API_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static API_TOKEN_FROM_USER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 生成一个 32 位十六进制的随机口令（rand 的 ThreadRng 由操作系统熵源播种）
+fn generate_api_token() -> String {
+    let mut token = String::with_capacity(32);
+    for _ in 0..16 {
+        token.push_str(&format!("{:02x}", rand::random::<u8>()));
+    }
+    token
+}
+
+/// 启动流程调用：把配置里写的口令先登记好（必须在任何请求之前调用）
+pub fn set_configured_token(token: Option<String>) {
+    if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+        API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = API_TOKEN.set(token);
+    }
+}
+
+/// 用户自己配置过口令吗？（只看配置与环境变量，**不做任何生成**——给启动检查用，
+/// 免得"拒绝启动"之前还先打印出一个随机口令，让人以为服务已经起来了）
+pub fn has_configured_token(config_token: Option<&str>) -> bool {
+    let non_empty = |t: &str| !t.trim().is_empty();
+    config_token.is_some_and(non_empty)
+        || std::env::var("SMARTDNS_API_TOKEN").is_ok_and(|t| non_empty(&t))
+}
+
+/// 当前生效的口令：配置 → 环境变量 → 随机生成（并打印一次提示）
+pub fn api_token() -> &'static str {
+    API_TOKEN.get_or_init(|| {
+        if let Ok(token) = std::env::var("SMARTDNS_API_TOKEN")
+            && !token.trim().is_empty()
+        {
+            API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
+            return token;
+        }
+
+        let token = generate_api_token();
+        crate::log::warn!(
+            "管理后台没有配置口令，已随机生成：{token}（想固定下来，请在配置里加一行：api-token {token}）"
+        );
+        println!("[smartdns] 管理后台口令（本次运行随机生成）：{token}");
+        println!("[smartdns] 想固定下来，请在配置文件里加一行：api-token {token}");
+        token
+    })
+}
+
+/// 口令是否来自用户自己的配置/环境变量（而不是自动生成的）
+pub fn api_token_configured() -> bool {
+    let _ = api_token();
+    API_TOKEN_FROM_USER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 口令错误次数限制（防暴力破解）：同一来源 IP 在窗口期内错太多次，就暂时拒之门外。
+static AUTH_FAILS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const AUTH_FAIL_LIMIT: u32 = 10;
+const AUTH_FAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn auth_record_failure(ip: std::net::IpAddr) -> u32 {
+    let mut map = AUTH_FAILS.lock().unwrap();
+    map.retain(|_, (_, since)| since.elapsed() < AUTH_FAIL_WINDOW); // 顺手清理过期记录
+    let entry = map.entry(ip).or_insert((0, std::time::Instant::now()));
+    entry.0 += 1;
+    entry.0
+}
+
+fn auth_record_success(ip: std::net::IpAddr) {
+    AUTH_FAILS.lock().unwrap().remove(&ip);
+}
+
+/// 启动前检查：管理后台是否"绑到了非本机地址、却又没有配置口令"。
+/// 返回 Err(中文说明) 表示这种组合必须拒绝启动（启动时与 `smartdns test` 都调用它）。
+pub fn check_exposure(
+    binds: &[crate::config::BindAddrConfig],
+    config_token: Option<&str>,
+) -> Result<(), String> {
+    use crate::dns_conf::IBindConfig;
+
+    let exposed: Vec<String> = binds
+        .iter()
+        .filter(|b| match b {
+            crate::config::BindAddrConfig::Http(_) => true,
+            #[cfg(feature = "dns-over-https")]
+            crate::config::BindAddrConfig::Https(_) => true,
+            #[cfg(feature = "dns-over-h3")]
+            crate::config::BindAddrConfig::H3(_) => true,
+            _ => false,
+        })
+        .map(|b| b.sock_addr())
+        .filter(|addr| !addr.ip().is_loopback())
+        .map(|addr| addr.to_string())
+        .collect();
+
+    if exposed.is_empty() || has_configured_token(config_token) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "拒绝启动：管理后台绑定了非本机地址 [{}]，但没有设置口令。\n\
+         这会让同网络（甚至整个互联网）上的任何人登录你的管理后台，改掉 DNS 解析结果。\n\
+         请二选一：\n\
+         \x20 1) 配置里加一行自己的口令：api-token <你的强口令>\n\
+         \x20 2) 让后台只监听本机：bind-http 127.0.0.1:8000\n\
+         \x20    只对外提供 DoH、不想暴露后台：给该监听加 -no-api\n\
+         \x20    要远程管理，建议用 SSH 隧道：ssh -L 8000:127.0.0.1:8000 服务器",
+        exposed.join(", ")
+    ))
+}
+
 async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    // 从环境变量读取 API 密钥，如果没有配置，则默认使用 "admin_secret"
-    let expected_token = std::env::var("SMARTDNS_API_TOKEN").unwrap_or_else(|_| "admin_secret".to_string());
+    let expected_token = api_token();
+    let client_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
 
     // 提取 HTTP Header 中的 Authorization 字段
     if let Some(auth_header) = req.headers().get(http::header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
+        && let Some(provided_token) = auth_str.strip_prefix("Bearer ")
     {
-        // 校验 Bearer Token
-        if let Some(provided_token) = auth_str.strip_prefix("Bearer ") {
-            // 🌟 上帝视角安全防御：恒定时间比较 (Constant-Time Comparison)
-            // 绝不使用原生的 `==` 短路比较，防止黑客通过极其微小的微秒级响应时间差，逐位爆破出你的管理密码。
-            if provided_token.len() == expected_token.len() {
-                let mut diff = 0;
-                for (a, b) in provided_token.bytes().zip(expected_token.bytes()) {
-                    // 使用 std::hint::black_box 蒙蔽 LLVM 的窥视优化，
-                    // 强迫 CPU 无论匹配与否，都必须老老实实做完所有的异或和位或运算，保证耗时绝对恒定！
-                    diff |= std::hint::black_box(a ^ b);
-                }
-                if diff == 0 {
-                    // 密码正确，放行！进入真正的 API 处理逻辑
-                    return Ok(next.run(req).await);
-                }
+        // 恒定时间比较：长度不同、或第几位不同都不提前返回，
+        // 免得攻击者靠响应时间差一位一位把口令试出来。
+        let (a, b) = (provided_token.as_bytes(), expected_token.as_bytes());
+        let mut diff = (a.len() ^ b.len()) as u8;
+        for i in 0..a.len().max(b.len()) {
+            let x = *a.get(i).unwrap_or(&0);
+            let y = *b.get(i).unwrap_or(&0);
+            diff |= std::hint::black_box(x ^ y);
+        }
+        if diff == 0 {
+            // 口令正确，放行。注意：正确口令永远不会被限速挡住——
+            // 否则攻击者只要故意错几次，就能把你的管理员锁在后台之外。
+            if let Some(ip) = client_ip {
+                auth_record_success(ip);
             }
+            return Ok(next.run(req).await);
         }
     }
-    
-    // 拦截非法访问，并打印警告日志记录黑客 IP
+
+    // 口令不对：记一次失败，错太多次就返回 429（只影响出错的那次请求）
+    if let Some(ip) = client_ip {
+        let count = auth_record_failure(ip);
+        if count >= AUTH_FAIL_LIMIT {
+            crate::log::warn!("来源 {ip} 在窗口期内连续 {count} 次口令错误");
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
+    // 拦截非法访问，并打印警告日志记录来源 IP
     crate::log::warn!("Unauthorized API access attempt to: {}", req.uri().path());
     Err(StatusCode::UNAUTHORIZED)
 }
+

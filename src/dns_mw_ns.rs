@@ -128,10 +128,74 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             group_name
         );
 
+        // IP 类查询要用的选项：**提前在这里算好**。原先它在下面的异步块里构造，那时折叠键
+        // 早已算完，导致等待者只能拿到"领跑者"的处理结果；现在折叠键会覆盖这几项（见下）。
+        let ip_opts = rtype.is_ip_addr().then(|| {
+            let cfg = ctx.cfg();
+
+            let mut opts = match ctx.domain_rule.as_ref() {
+                Some(rule) => LookupIpOptions {
+                    response_strategy: rule
+                        .get(|n| n.response_mode)
+                        .unwrap_or_else(|| cfg.response_mode()),
+                    speed_check_mode: match rule.speed_check_mode.as_ref() {
+                        Some(mode) => Some(mode.clone()),
+                        None => cfg.speed_check_mode().cloned(),
+                    },
+                    no_speed_check: ctx.server_opts.no_speed_check(),
+                    ignore_ip: cfg.ignore_ip().clone(),
+                    blacklist_ip: cfg.blacklist_ip().clone(),
+                    whitelist_ip: cfg.whitelist_ip().clone(),
+                    ip_alias: cfg.ip_alias().clone(),
+                    lookup_options: lookup_options.clone(),
+                },
+                None => LookupIpOptions {
+                    response_strategy: cfg.response_mode(),
+                    speed_check_mode: cfg.speed_check_mode().cloned(),
+                    no_speed_check: ctx.server_opts.no_speed_check(),
+                    ignore_ip: cfg.ignore_ip().clone(),
+                    blacklist_ip: cfg.blacklist_ip().clone(),
+                    whitelist_ip: cfg.whitelist_ip().clone(),
+                    ip_alias: cfg.ip_alias().clone(),
+                    lookup_options: lookup_options.clone(),
+                },
+            };
+
+            if ctx.server_opts.is_background {
+                opts.response_strategy = ResponseMode::FastestIp;
+            }
+
+            opts
+        });
+
         ctx.source = LookupFrom::Server(group_name.to_string());
 
         // 🌟 【底层收费站合并器】：彻底终结 Dualstack 和 Cache 带来的 4 倍风暴！
-        let cache_key = format!("{}:{}:{}", name, rtype, group_name);
+        //
+        // 折叠键必须覆盖**所有会影响这次上游查询结果的请求级差异**，否则等待者会拿到
+        // "为别人算出来"的答案（P1-4）。进键的四类差异：
+        //   1. name/type —— 查询本身；
+        //   2. group —— 客户端规则能带来的差异只有"选哪个分组"，已经在这里；
+        //   3. ecs —— 客户端自带的 EDNS0 Client Subnet（读不到时用域规则的 -subnet）。
+        //      不区分它，不同网段的客户端会共用一次上游查询、拿到别人地区的 IP，而且这个错答案
+        //      还会被缓存层按自己的 ECS 键存下来，在整个 TTL 内持续污染；
+        //   4. 处理选项（响应模式 / 测速模式 / 绑定级 -no-speed-check）—— 它们会被"固化"进
+        //      共享答案（测速排序、按模式挑选 IP），所以不同绑定的客户端也不能互相借用。
+        let fold_ecs = lookup_options
+            .client_subnet
+            .map(|subnet| format!("{}/{}", subnet.addr(), subnet.source_prefix()))
+            .unwrap_or_default();
+        let fold_proc = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            if let Some(opts) = ip_opts.as_ref() {
+                opts.response_strategy.hash(&mut hasher);
+                opts.speed_check_mode.hash(&mut hasher);
+                opts.no_speed_check.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let cache_key = format!("{}:{}:{}:{}:{:x}", name, rtype, group_name, fold_ecs, fold_proc);
 
         let rx = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,41 +227,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         // 🌟 修复第一步：用一个 async 块（闭包）把底层的外网查询逻辑打包起来，作为挂炸弹的目标
         let lookup_future = async {
             if rtype.is_ip_addr() {
-                let cfg = ctx.cfg();
-
-                let mut opts = match ctx.domain_rule.as_ref() {
-                    Some(rule) => LookupIpOptions {
-                        response_strategy: rule
-                            .get(|n| n.response_mode)
-                            .unwrap_or_else(|| cfg.response_mode()),
-                        speed_check_mode: match rule.speed_check_mode.as_ref() {
-                            Some(mode) => Some(mode.clone()),
-                            None => cfg.speed_check_mode().cloned(),
-                        },
-                        no_speed_check: ctx.server_opts.no_speed_check(),
-                        ignore_ip: cfg.ignore_ip().clone(),
-                        blacklist_ip: cfg.blacklist_ip().clone(),
-                        whitelist_ip: cfg.whitelist_ip().clone(),
-                        ip_alias: cfg.ip_alias().clone(),
-                        lookup_options,
-                    },
-                    None => LookupIpOptions {
-                        response_strategy: cfg.response_mode(),
-                        speed_check_mode: cfg.speed_check_mode().cloned(),
-                        no_speed_check: ctx.server_opts.no_speed_check(),
-                        ignore_ip: cfg.ignore_ip().clone(),
-                        blacklist_ip: cfg.blacklist_ip().clone(),
-                        whitelist_ip: cfg.whitelist_ip().clone(),
-                        ip_alias: cfg.ip_alias().clone(),
-                        lookup_options,
-                    },
+                let Some(opts) = ip_opts.as_ref() else {
+                    // 逻辑上到不了：ip_opts 与 rtype.is_ip_addr() 是同一个条件构造的
+                    return Err(ProtoErrorKind::NoConnections.into());
                 };
 
-                if ctx.server_opts.is_background {
-                    opts.response_strategy = ResponseMode::FastestIp;
-                }
-
-                lookup_ip(name_server.deref(), name.clone(), &opts).await
+                lookup_ip(name_server.deref(), name.clone(), opts).await
             } else {
                 // 🌟 同理洗白非 IP 类的查询
                 match name_server.lookup(name.clone(), lookup_options).await {
@@ -241,16 +276,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             let rr_ttl_max = ctx.domain_rule.as_ref().and_then(|r| r.rr_ttl_max).map(|i| i as u32)
                 .unwrap_or_else(|| ctx.cfg().rr_ttl_max().unwrap_or(86400) as u32);
             
+            // 裁剪逻辑抽成独立函数 clamp_record_ttl（见本文件末尾），便于单元测试直接覆盖。
             let clamp_ttl = |record: &mut Record| {
-                let current_ttl = record.ttl();
-                
-                // 🌟 优先使用 rr-ttl，否则才使用 min/max 夹逼
-                let new_ttl = if let Some(exact_ttl) = rr_ttl {
-                    exact_ttl
-                } else {
-                    current_ttl.clamp(rr_ttl_min, rr_ttl_max)
-                };
-                record.set_ttl(new_ttl);
+                clamp_record_ttl(record, rr_ttl, rr_ttl_min, rr_ttl_max)
             };
 
             res.answers_mut().iter_mut().for_each(&clamp_ttl);
@@ -531,11 +559,21 @@ async fn lookup_ip(
     };
 
     if let Some(selected_ip) = selected_ip {
-        for mut res in ok_tasks {
+        // 🔐 P0-2：这里原来是 `for mut res in ok_tasks { ... }` 加末尾的 unreachable!()。
+        // 一旦"选中了 IP、却没有任何答案包含它"（缓存/过滤后可能出现这种不一致），
+        // 就会直接 panic —— 远程可触发的 panic 等于一个拒绝服务入口。
+        // 现在改为按索引定位：只在真正找到时才取出并返回；
+        // 找不到则保持 ok_tasks 完好，继续走下面的通用优选兜底（与后面逻辑的假设一致）。
+        let mut selected: Option<DnsResponse> = None;
+        for idx in 0..ok_tasks.len() {
             // 先检查这个包裹里有没有赢家 IP
-            let has_target = res.answers().iter().any(|r| matches!(r.data().ip_addr(), Some(ip) if ip == selected_ip));
-            
+            let has_target = ok_tasks[idx]
+                .answers()
+                .iter()
+                .any(|r| matches!(r.data().ip_addr(), Some(ip) if ip == selected_ip));
+
             if has_target {
+                let mut res = ok_tasks.remove(idx);
                 // 🌟 核心修复：忠实还原完整的 CNAME 链路！
                 // 仅仅剔除落选的其他 IP 记录，而 CNAME 等非 IP 记录无条件保留。
                 res.answers_mut().retain(|record| {
@@ -544,10 +582,16 @@ async fn lookup_ip(
                         None => true,                  // 不是 IP（如 CNAME），无条件保留！
                     }
                 });
-                return Ok(res);
+                selected = Some(res);
+                break;
             }
         }
-        unreachable!()
+
+        if let Some(res) = selected {
+            return Ok(res);
+        }
+
+        crate::log::warn!("selected ip not found in answers, fall through to generic selection");
     }
 
     // =================================================================================
@@ -863,6 +907,76 @@ async fn per_nameserver_lookup_ip(
     }
 }
 
+/// 用 rr-ttl / rr-ttl-min / rr-ttl-max 约束单条记录的 TTL。
+///
+/// 语义：配置了 rr-ttl 时直接采用它（优先级最高），否则把 TTL 夹逼到
+/// `[ttl_min, ttl_max]` 区间内。
+///
+/// 抽成独立函数是为了能被单元测试直接覆盖：这段裁剪逻辑原先只在 Address
+/// 中间件里留有测试，而实现后来被搬到了本中间件，导致那三个测试长期失败
+/// （见 dns_mw_addr.rs 测试模块里的说明）。
+fn clamp_record_ttl(record: &mut Record, rr_ttl: Option<u32>, ttl_min: u32, ttl_max: u32) {
+    let new_ttl = match rr_ttl {
+        // rr-ttl 拥有最高统治权
+        Some(exact_ttl) => exact_ttl,
+        None => record.ttl().clamp(ttl_min, ttl_max),
+    };
+    record.set_ttl(new_ttl);
+}
+
+#[cfg(test)]
+mod clamp_ttl_tests {
+    use crate::libdns::proto::rr::{RData, Record};
+
+    use super::clamp_record_ttl;
+
+    fn rec(ttl: u32) -> Record {
+        Record::from_rdata(
+            "dns.google".parse().unwrap(),
+            ttl,
+            RData::A("8.8.8.8".parse().unwrap()),
+        )
+    }
+
+    /// rr-ttl-min：过短的抬到下限，区间内的不动
+    #[test]
+    fn test_clamp_ttl_min() {
+        let (mut lo, mut hi) = (rec(48), rec(96));
+        clamp_record_ttl(&mut lo, None, 50, 86400);
+        clamp_record_ttl(&mut hi, None, 50, 86400);
+        assert_eq!(lo.ttl(), 50, "低于 rr-ttl-min 的应抬到下限");
+        assert_eq!(hi.ttl(), 96, "区间内的不应改动");
+    }
+
+    /// rr-ttl-max：过长的压到上限，区间内的不动
+    #[test]
+    fn test_clamp_ttl_max() {
+        let (mut lo, mut hi) = (rec(48), rec(96));
+        clamp_record_ttl(&mut lo, None, 0, 50);
+        clamp_record_ttl(&mut hi, None, 0, 50);
+        assert_eq!(hi.ttl(), 50, "高于 rr-ttl-max 的应压到上限");
+        assert_eq!(lo.ttl(), 48, "区间内的不应改动");
+    }
+
+    /// rr-ttl-min 与 rr-ttl-max 同时生效
+    #[test]
+    fn test_clamp_ttl_min_max() {
+        let (mut lo, mut hi) = (rec(48), rec(96));
+        clamp_record_ttl(&mut lo, None, 55, 66);
+        clamp_record_ttl(&mut hi, None, 55, 66);
+        assert_eq!(lo.ttl(), 55);
+        assert_eq!(hi.ttl(), 66);
+    }
+
+    /// rr-ttl 优先级最高：直接覆盖，min/max 不再参与
+    #[test]
+    fn test_exact_rr_ttl_overrides_bounds() {
+        let mut r = rec(96);
+        clamp_record_ttl(&mut r, Some(20), 50, 60);
+        assert_eq!(r.ttl(), 20, "配了 rr-ttl 时应直接采用它");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -872,7 +986,7 @@ mod tests {
     use super::*;
     use crate::{dns_conf::RuntimeConfig, third_ext::FutureJoinAllExt};
 
-    #[test]
+        #[test]
     fn test_edns_client_subnet() {
         async fn inner_test(i: usize) -> bool {
             let servers =[

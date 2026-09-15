@@ -107,7 +107,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
         let (aaaa_resp_ref, a_resp_ref) = match query_type {
             AAAA => (&this_resp, &that_resp),
             A => (&that_resp, &this_resp),
-            _ => unreachable!(),
+            other => {
+                // 🔐 P0-2：本中间件只做 A/AAAA 双栈选择；遇到别的类型直接旁路
+                // （原样返回本次查询对应的响应），不 panic。
+                crate::log::warn!("dualstack: unexpected record type {other:?}, bypass");
+                return Ok(this_resp);
+            }
         };
 
         let mut aaaa_blocked = false;

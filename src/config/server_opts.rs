@@ -34,6 +34,18 @@ pub struct ServerOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_rule_soa: Option<bool>,
 
+    /// 该监听只提供加密 DNS（DoH），不挂管理后台。
+    ///
+    /// 用途：对外提供 DoH 时，不必连带把 `/api` 管理接口一起暴露出去。
+    /// 对应 bind 的 `-no-api` 选项。
+    pub no_api: Option<bool>,
+
+    /// 该监听单独设置的连接总数上限（对应 bind 的 `-max-connections N`）
+    pub max_connections: Option<usize>,
+
+    /// 该监听单独设置的单一来源连接数上限（对应 `-max-connections-per-ip N`）
+    pub max_connections_per_ip: Option<usize>,
+
     /// Disable dualstack ip selection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_dualstack_selection: Option<bool>,
@@ -56,6 +68,11 @@ pub struct ServerOpts {
 }
 
 impl ServerOpts {
+    /// 该监听是否只提供 DoH、不挂管理后台（对应 bind 的 `-no-api`）
+    pub fn no_api(&self) -> bool {
+        self.no_api.unwrap_or_default()
+    }
+
     /// set domain request to use the appropriate server group.
     #[inline]
     pub fn group(&self) -> Option<&str> {
@@ -131,6 +148,9 @@ impl ServerOpts {
             no_speed_check,
             no_cache,
             no_rule_soa,
+            no_api: _,
+            max_connections: _,
+            max_connections_per_ip: _,
             no_dualstack_selection,
             force_aaaa_soa,
             force_https_soa,

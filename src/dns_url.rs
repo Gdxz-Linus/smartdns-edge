@@ -961,8 +961,8 @@ mod tests {
 
     #[test]
     fn test_parse_enable_sni_true() {
-        let url = DnsUrl::from_str("tls://cloudflare-dns.com?enable_sni=false").unwrap();
-        assert!(url.sni_off());
+        let url = DnsUrl::from_str("tls://cloudflare-dns.com?enable_sni=true").unwrap();
+        assert!(!url.sni_off());
         assert!(url.ip().is_none());
     }
 

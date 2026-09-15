@@ -17,6 +17,7 @@ pub fn serve(
     app: App,
     listener: net::TcpListener,
     dns_handle: DnsHandle,
+    api_enabled: bool,
 ) -> io::Result<CancellationToken> {
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
@@ -25,11 +26,21 @@ pub fn serve(
 
     let state = Arc::new(ServeState { app, dns_handle });
 
-    let make_service = crate::api::routes()
+    let make_service = (if api_enabled {
+        crate::api::routes()
+    } else {
+        crate::api::dns_only_routes()
+    })
         .with_state(state.clone())
         .into_make_service_with_connect_info::<SocketAddr>();
 
     tokio::spawn(async move {
+        // 🔐 逐监听连接上限（若该监听单独配了 max-connections*，与全局限额同时生效）
+        let listener_limiter = listener
+            .local_addr()
+            .ok()
+            .and_then(crate::server::limit::for_listener);
+
         let mut inner_join_set = JoinSet::new();
         loop {
             let (tcp_stream, src_addr) = tokio::select! {
@@ -56,9 +67,30 @@ pub fn serve(
                 continue;
             }
 
+            // 🔐 P0-5：连接数上限。超出预算就拒绝新连接（不影响已有连接），保护进程内存。
+            // 默认上限按物理内存自动推算：家庭小机器自动收紧，企业大机器自动放宽。
+            let Some(conn_guard) = crate::server::limit::global().acquire(src_addr.ip()) else {
+                log::debug!("连接数超出上限，拒绝 {src_addr} 的新连接");
+                continue;
+            };
+
+            // 🔐 该监听自身（若单独配置过）的限额也要通过
+            let listener_guard = match listener_limiter.as_ref() {
+                Some(l) => match l.acquire(src_addr.ip()) {
+                    Some(guard) => Some(guard),
+                    None => {
+                        log::debug!("该监听连接数超限，拒绝 {src_addr} 的新连接");
+                        continue;
+                    }
+                },
+                None => None,
+};
+
             // kick out to a different task immediately, let them do the TLS handshake
             let mut make_service = make_service.clone();
             inner_join_set.spawn(async move {
+                let _conn_guard = conn_guard; // 连接结束时自动归还配额
+                    let _listener_guard = listener_guard;
                 log::debug!("starting HTTP request from: {}", src_addr);
 
                 let socket = tcp_stream;

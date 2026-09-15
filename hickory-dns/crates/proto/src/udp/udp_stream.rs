@@ -354,11 +354,18 @@ impl UdpSocket for tokio::net::UdpSocket {
     }
 
     /// same as connect, but binds to the specified local address for sending address
-    async fn connect_with_bind(_addr: SocketAddr, bind_addr: SocketAddr) -> io::Result<Self> {
+    async fn connect_with_bind(addr: SocketAddr, bind_addr: SocketAddr) -> io::Result<Self> {
         let socket = Self::bind(bind_addr).await?;
 
-        // TODO: research connect more, it appears to break UDP receiving tests, etc...
-        // socket.connect(addr).await?;
+        // 🌟 P1-9 修复（本项目内嵌此库正是为了让这类"契约没兑现"的地方能改）：
+        // 上游原版把这行注释掉了（TODO: "it appears to break UDP receiving tests"），
+        // 结果是本函数的文档承诺（"will only receive packets from the associated address"）
+        // 完全落空：套接字仍是未连接状态，任何能到达该临时端口、猜中 16 位事务 ID 的主机
+        // 都能注入伪造应答。这里恢复真正的 connect，由内核完成源 IP + 源端口过滤。
+        //
+        // 说明：上游说会破坏它的 UDP 接收测试，那是测试自身"从别的套接字发包"造成的，
+        // 与生产语义无关；本项目不使用该函数的路径不改变行为（未连接 = 与修复前一致）。
+        socket.connect(addr).await?;
 
         Ok(socket)
     }

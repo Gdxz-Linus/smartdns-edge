@@ -628,6 +628,19 @@ pub struct SocksDatagram<S> {
     socket: UdpSocket,
     proxy_addr: AddrKind,
     stream: S,
+    /// 期望的应答来源（= 我们查询的上游地址）；未设置时不做来源过滤。
+    expected_source: std::sync::OnceLock<SocketAddr>,
+}
+
+/// 因"数据报头部来源地址"与我们所查询的上游不符而被丢弃的数量（P1-9 投毒防护的可观测项）。
+///
+/// 注意：直连路径由内核丢弃来源不符的报文，那一层我们看不到、也无法计数；
+/// 这个计数只反映**代理路径**上被用户态校验拦下的数据报。
+pub static UDP_SOURCE_REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取被丢弃的"来源不符"数据报数（供管理接口展示）。
+pub fn rejected_by_source() -> u64 {
+    UDP_SOURCE_REJECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl<S> SocksDatagram<S>
@@ -655,7 +668,35 @@ where
             socket,
             proxy_addr,
             stream: proxy_stream,
+            expected_source: std::sync::OnceLock::new(),
         })
+    }
+
+    /// 仅供测试：跳过 SOCKS5 握手直接组装，用于验证来源校验这条生产代码路径。
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test(socket: UdpSocket, proxy_addr: AddrKind, stream: S) -> Self {
+        Self {
+            socket,
+            proxy_addr,
+            stream,
+            expected_source: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// 登记"期望的应答来源"，此后头部来源不符的数据报会被丢弃并计数（RFC 1928 §7）。
+    pub fn set_expected_source(&self, addr: SocketAddr) {
+        let _ = self.expected_source.set(addr);
+    }
+
+    /// 该数据报的来源是否为我们查询的那个上游？
+    /// 未登记期望来源时（例如单独使用本类型）不做过滤，保持原有行为。
+    fn source_is_expected(&self, addr: &AddrKind) -> bool {
+        match (self.expected_source.get(), addr) {
+            (None, _) => true,
+            (Some(expected), AddrKind::Ip(got)) => got == expected,
+            // 我们配置的上游是 IP，来源报域名的数据报一律不接受
+            (Some(_), _) => false,
+        }
     }
 
     pub fn proxy_addr(&self) -> &AddrKind {
@@ -847,36 +888,50 @@ where
             &mut heap_buf[..]
         };
 
-        let mut read_buf = tokio::io::ReadBuf::new(target_buf);
+        // 🌟 P1-9 修复：来源校验循环 —— 只接受"我们查询的那个上游"回来的数据报。
+        // 遇到来源不符的：计数后丢弃，继续读下一个（最多 32 个，避免长时间占住执行器）。
+        const MAX_SKIPPED: usize = 32;
+        for _ in 0..=MAX_SKIPPED {
+            let mut read_buf = tokio::io::ReadBuf::new(&mut target_buf[..]);
 
-        match self.socket.poll_recv(cx, &mut read_buf) {
-            std::task::Poll::Ready(Ok(())) => {
-                let filled = read_buf.filled();
-                if filled.is_empty() {
-                    return std::task::Poll::Ready(Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "Empty packet",
-                    ))));
-                }
-
-                match Self::parse_header_sync(filled) {
-                    Ok((header_len, addr)) => {
-                        let payload_len = filled.len() - header_len;
-                        if payload_len > buf.len() {
-                            return std::task::Poll::Ready(Err(Error::Io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "User buffer too small for UDP payload",
-                            ))));
-                        }
-                        buf[..payload_len].copy_from_slice(&filled[header_len..]);
-                        std::task::Poll::Ready(Ok((payload_len, addr)))
+            match self.socket.poll_recv(cx, &mut read_buf) {
+                std::task::Poll::Ready(Ok(())) => {
+                    let filled = read_buf.filled();
+                    if filled.is_empty() {
+                        return std::task::Poll::Ready(Err(Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "Empty packet",
+                        ))));
                     }
-                    Err(e) => std::task::Poll::Ready(Err(e)),
+
+                    match Self::parse_header_sync(filled) {
+                        Ok((header_len, addr)) => {
+                            if !self.source_is_expected(&addr) {
+                                UDP_SOURCE_REJECTED
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                continue;
+                            }
+                            let payload_len = filled.len() - header_len;
+                            if payload_len > buf.len() {
+                                return std::task::Poll::Ready(Err(Error::Io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "User buffer too small for UDP payload",
+                                ))));
+                            }
+                            buf[..payload_len].copy_from_slice(&filled[header_len..]);
+                            return std::task::Poll::Ready(Ok((payload_len, addr)));
+                        }
+                        Err(e) => return std::task::Poll::Ready(Err(e)),
+                    }
                 }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(Error::Io(e))),
             }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(Error::Io(e))),
         }
+
+        // 连续丢弃达到上限：让出执行权，但必须保证被再次唤醒，否则可能永久卡住。
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 
     // 🌟 核心优化：直接复用 poll 方法，极大地瘦身协程体积，删除了原来慢速臃肿的 Cursor/Vec 逻辑
@@ -910,110 +965,221 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tokio::{io::BufStream, net::TcpStream};
+    use tokio::net::TcpStream;
 
-    const PROXY_ADDR: &str = "127.0.0.1:1080";
-    const PROXY_AUTH_ADDR: &str = "127.0.0.1:1081";
+    use crate::proxy::{
+        handshake_tcp, handshake_udp, ProxyConfig, ProxyProtocol, UdpSocket as ProxyUdpSocket,
+    };
+
     const DATA: &[u8] = b"Hello, world!";
 
-    async fn connect(addr: &str, auth: Option<Auth>) {
-        let socket = TcpStream::connect(addr).await.unwrap();
-        let mut socket = BufStream::new(socket);
-        super::connect(
-            &mut socket,
-            AddrKind::Domain("google.com".to_string(), 80),
-            auth,
-        )
-        .await
-        .unwrap();
+    /// 测试用代理一律从环境变量读取，不硬编码到某台机器/某个人的本地环境。
+    ///
+    /// | 环境变量 | 含义 | 回退顺序 |
+    /// | --- | --- | --- |
+    /// | `SMARTDNS_TEST_SOCKS5_PROXY` | 普通 SOCKS5 代理（无需认证） | `ALL_PROXY`/`all_proxy` → `HTTP_PROXY`/`HTTPS_PROXY`（含小写）｜**无默认值**：都没有就跳过 |
+    /// | `SMARTDNS_TEST_SOCKS5_PROXY_AUTH` | 需要用户名/口令认证的 SOCKS5 代理 | 同上 ｜ **无默认值**：都没有就跳过 |
+    /// | `SMARTDNS_TEST_SOCKS5_USER` | 认证用户名 | `hyper` |
+    /// | `SMARTDNS_TEST_SOCKS5_PASSWORD` | 认证口令 | `proxy` |
+    /// | `SMARTDNS_TEST_SOCKS5_TARGET` | CONNECT 的探测目标（`IP:端口`） | `1.1.1.1:443` |
+    ///
+    /// 取值既可以是 `主机:端口`，也可以是 `socks5://用户:口令@主机:端口` 或
+    /// `http://主机:端口` 这类 URL（会自动取出主机与端口），
+    /// 因此可以直接复用系统里已有的代理环境变量。
+    ///
+    /// ⚠️ 这里**刻意经过生产入口** `crate::proxy::handshake_tcp` / `handshake_udp`
+    /// 来驱动本模块的实现，而不是直接调 `connect` / `associate`：
+    /// 这样测到的就是生产真正走的链路——协议选择、认证参数组装，以及下面这一层协议实现。
+    ///
+    /// 生产不使用 SOCKS5 `BIND`（`handshake_tcp` 只发 CONNECT、`handshake_udp` 只发
+    /// UDP ASSOCIATE），所以这里不再保留 BIND 的测试。
+    /// `connect_no_auth_panic` 需要一台强制认证的代理，故用 `#[ignore]` 标注。
+    ///
+    /// 代理地址**只从环境变量读取，不设任何硬编码默认值**；环境里没有代理时这些测试会打印说明并跳过。
+    fn env_first(names: &[&str]) -> Option<String> {
+        names
+            .iter()
+            .find_map(|name| std::env::var(name).ok())
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// 从 `主机:端口` / `scheme://[用户:口令@]主机:端口[/路径]` 中取出 `主机:端口`
+    fn host_port(raw: &str) -> String {
+        let s = raw.trim();
+        let s = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
+        let s = s.split(['/', '?', '#']).next().unwrap_or(s);
+        s.rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(s)
+            .to_string()
+    }
+
+    /// 普通（无认证）测试代理地址
+    fn proxy_addr() -> Option<String> {
+        env_first(&[
+            "SMARTDNS_TEST_SOCKS5_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+            // 系统里常见的代理变量（如 Windows 上的 HTTP_PROXY=http://127.0.0.1:10808）
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+        ])
+        .map(|value| host_port(&value))
+    }
+
+    /// 需要认证的测试代理地址；未单独指定时退回普通代理地址
+    fn proxy_auth_addr() -> Option<String> {
+        env_first(&[
+            "SMARTDNS_TEST_SOCKS5_PROXY_AUTH",
+            "SMARTDNS_TEST_SOCKS5_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+            // 系统里常见的代理变量（如 Windows 上的 HTTP_PROXY=http://127.0.0.1:10808）
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+        ])
+        .map(|value| host_port(&value))
+    }
+
+    /// 环境里没配置代理时跳过：本模块测的就是「经代理走 SOCKS5」，没有代理就无从测起。
+    /// 这里刻意不回退到任何硬编码地址——硬编码的 127.0.0.1:1080 只对写它的人那台机器有意义，
+    /// 换一台机器就变成一条假命题（既可能误报通过，也可能误报失败）。
+    fn skip_no_proxy(test: &str) {
+        eprintln!(
+            "跳过 {test}：环境变量里没有可用代理（可设 SMARTDNS_TEST_SOCKS5_PROXY；也认 ALL_PROXY / HTTP_PROXY / HTTPS_PROXY）"
+        );
+    }
+
+    /// 组装生产使用的代理配置；`with_auth` 决定是否带上用户名/口令
+    /// （与生产一致：`proxy.rs` 只在 `username` 存在时才发认证）。
+    fn proxy_config(addr: &str, with_auth: bool) -> ProxyConfig {
+        let (username, password) = if with_auth {
+            (
+                Some(
+                    std::env::var("SMARTDNS_TEST_SOCKS5_USER")
+                        .unwrap_or_else(|_| "hyper".to_string()),
+                ),
+                Some(
+                    std::env::var("SMARTDNS_TEST_SOCKS5_PASSWORD")
+                        .unwrap_or_else(|_| "proxy".to_string()),
+                ),
+            )
+        } else {
+            (None, None)
+        };
+
+        ProxyConfig {
+            proto: ProxyProtocol::Socks5,
+            server: addr
+                .parse()
+                .unwrap_or_else(|_| panic!("代理地址必须是 主机:端口 形式，当前为 {addr:?}")),
+            username,
+            password,
+        }
+    }
+
+    /// CONNECT 的探测目标
+    fn target_addr() -> SocketAddr {
+        std::env::var("SMARTDNS_TEST_SOCKS5_TARGET")
+            .unwrap_or_else(|_| "1.1.1.1:443".to_string())
+            .parse()
+            .unwrap_or_else(|_| panic!("SMARTDNS_TEST_SOCKS5_TARGET 必须是 IP:端口 形式"))
+    }
+
+    /// 与生产一致：先连上代理的 TCP，再交给 `handshake_tcp` 完成协议握手与认证
+    async fn connect(addr: &str, with_auth: bool) {
+        let cfg = proxy_config(addr, with_auth);
+        let stream = TcpStream::connect(cfg.server).await.unwrap();
+        handshake_tcp(stream, target_addr(), Some(&cfg))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn connect_auth() {
-        connect(PROXY_AUTH_ADDR, Some(Auth::new("hyper", "proxy"))).await;
+        let Some(addr) = proxy_auth_addr() else {
+            return skip_no_proxy("connect_auth");
+        };
+        connect(&addr, true).await;
     }
 
     #[tokio::test]
     async fn connect_no_auth() {
-        connect(PROXY_ADDR, None).await;
+        let Some(addr) = proxy_addr() else {
+            return skip_no_proxy("connect_no_auth");
+        };
+        connect(&addr, false).await;
     }
 
+    #[ignore = "需要一台强制用户名/口令认证的 SOCKS5 代理（普通代理不具备该行为）；用 SMARTDNS_TEST_SOCKS5_PROXY_AUTH 指定地址后加 --ignored 运行"]
     #[should_panic = "ConnectionNotAllowedByRules"]
     #[tokio::test]
     async fn connect_no_auth_panic() {
-        connect(PROXY_AUTH_ADDR, None).await;
+        // 生产行为：未配置用户名时不发认证，遇到强制认证的代理即被拒绝
+        let Some(addr) = proxy_auth_addr() else {
+            return skip_no_proxy("connect_no_auth_panic");
+        };
+        connect(&addr, false).await;
     }
 
-    #[tokio::test]
-    async fn bind() {
-        let server_addr = AddrKind::Domain("127.0.0.1".to_string(), 80);
-
-        let client = TcpStream::connect(PROXY_ADDR).await.unwrap();
-        let client = BufStream::new(client);
-        let client = SocksListener::bind(client, server_addr, None)
-            .await
-            .unwrap();
-
-        let server_addr = client.proxy_addr.to_socket_addr();
-        let mut server = TcpStream::connect(&server_addr).await.unwrap();
-
-        let (mut client, _) = client.accept().await.unwrap();
-
-        server.write_all(DATA).await.unwrap();
-
-        let mut buf = [0; DATA.len()];
-        client.read_exact(&mut buf).await.unwrap();
-        assert_eq!(buf, DATA);
-    }
-
-    type TestStream = BufStream<TcpStream>;
-    type TestDatagram = SocksDatagram<TestStream>;
+    type TestDatagram = SocksDatagram<TcpStream>;
     type TestHalves = (Arc<TestDatagram>, Arc<TestDatagram>);
 
     trait UdpClient {
-        async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize>
+        async fn send_to<A>(&self, buf: &[u8], addr: A) -> Result<usize>
         where
             A: Into<AddrKind> + Send;
 
-        async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, AddrKind)>;
+        async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, AddrKind)>;
     }
 
     impl UdpClient for TestDatagram {
-        async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize, Error>
+        async fn send_to<A>(&self, buf: &[u8], addr: A) -> Result<usize, Error>
         where
             A: Into<AddrKind> + Send,
         {
             SocksDatagram::send_to(self, buf, addr).await
         }
 
-        async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, AddrKind), Error> {
+        async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, AddrKind), Error> {
             SocksDatagram::recv_from(self, buf).await
         }
     }
 
     impl UdpClient for TestHalves {
-        async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize, Error>
+        async fn send_to<A>(&self, buf: &[u8], addr: A) -> Result<usize, Error>
         where
             A: Into<AddrKind> + Send,
         {
             self.1.send_to(buf, addr).await
         }
 
-        async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, AddrKind), Error> {
+        async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, AddrKind), Error> {
             self.0.recv_from(buf).await
         }
     }
 
-    const CLIENT_ADDR: &str = "127.0.0.1:2345";
-    const SERVER_ADDR: &str = "127.0.0.1:23456";
+    /// 客户端与"服务器"都绑随机端口：原来硬编码 127.0.0.1:2345 / :23456，
+    /// 两个 UDP 测试并行时会抢同一个端口，导致其中一个 bind 失败。
+    const EPHEMERAL_ADDR: &str = "127.0.0.1:0";
 
-    async fn create_client() -> TestDatagram {
-        let proxy = TcpStream::connect(PROXY_ADDR).await.unwrap();
-        let proxy = BufStream::new(proxy);
-        let client = UdpSocket::bind(CLIENT_ADDR).await.unwrap();
-        SocksDatagram::associate(proxy, client, None, None::<SocketAddr>)
+    /// 与生产一致：先连上代理的 TCP 控制连接，再交给 `handshake_udp` 完成 UDP ASSOCIATE
+    async fn create_client(addr: &str) -> TestDatagram {
+        let cfg = proxy_config(addr, false);
+        let stream = TcpStream::connect(cfg.server).await.unwrap();
+        let socket = UdpSocket::bind(EPHEMERAL_ADDR).await.unwrap();
+
+        match handshake_udp(Some(stream), socket, Some(&cfg))
             .await
             .unwrap()
+        {
+            ProxyUdpSocket::Proxy(datagram) => datagram,
+            ProxyUdpSocket::Tokio(_) => panic!("配置了代理，却拿到直连的 UDP socket"),
+        }
     }
 
     struct UdpTest<C> {
@@ -1023,9 +1189,12 @@ mod tests {
     }
 
     impl<C: UdpClient> UdpTest<C> {
-        async fn test(mut self) {
+        async fn test(&self) {
             let mut buf = vec![0; DATA.len()];
-            self.client.send_to(DATA, self.server_addr).await.unwrap();
+            self.client
+                .send_to(DATA, self.server_addr.clone())
+                .await
+                .unwrap();
             let (len, addr) = self.server.recv_from(&mut buf).await.unwrap();
             assert_eq!(len, buf.len());
             assert_eq!(buf.as_slice(), DATA);
@@ -1039,12 +1208,11 @@ mod tests {
     }
 
     impl UdpTest<TestDatagram> {
-        async fn datagram() -> Self {
-            let client = create_client().await;
+        async fn datagram(addr: &str) -> Self {
+            let client = create_client(addr).await;
 
-            let server_addr: SocketAddr = SERVER_ADDR.parse().unwrap();
-            let server = UdpSocket::bind(server_addr).await.unwrap();
-            let server_addr = AddrKind::Ip(server_addr);
+            let server = UdpSocket::bind(EPHEMERAL_ADDR).await.unwrap();
+            let server_addr = AddrKind::Ip(server.local_addr().unwrap());
 
             Self {
                 client,
@@ -1055,8 +1223,8 @@ mod tests {
     }
 
     impl UdpTest<TestHalves> {
-        async fn halves() -> Self {
-            let this = UdpTest::<TestDatagram>::datagram().await;
+        async fn halves(addr: &str) -> Self {
+            let this = UdpTest::<TestDatagram>::datagram(addr).await;
             let client = Arc::new(this.client);
             Self {
                 client: (client.clone(), client),
@@ -1066,13 +1234,107 @@ mod tests {
         }
     }
 
+    /// 与生产一致：经 `handshake_udp` 拿到的 datagram 转发 UDP 报文
     #[tokio::test]
     async fn udp_associate() {
-        UdpTest::datagram().await.test().await
+        let Some(addr) = proxy_addr() else {
+            return skip_no_proxy("udp_associate");
+        };
+        UdpTest::datagram(&addr).await.test().await
+    }
+
+    /// 生产会把同一个 datagram 共享出去（读写分离），这里验证共享后收发互不干扰
+    #[tokio::test]
+    async fn udp_datagram_halves() {
+        let Some(addr) = proxy_addr() else {
+            return skip_no_proxy("udp_datagram_halves");
+        };
+        UdpTest::halves(&addr).await.test().await
+    }
+}
+
+#[cfg(test)]
+mod p1_9_source_validation_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 造一条 SOCKS5 UDP 数据报：头部声明来源为 src，负载为 payload。
+    fn build_datagram(src: &str, payload: &[u8]) -> Vec<u8> {
+        let addr = AddrKind::Ip(src.parse().unwrap());
+        let mut buf = vec![0u8; payload.len() + 262];
+        let header_len =
+            SocksDatagram::<tokio::io::DuplexStream>::write_header_sync(&mut buf, &addr);
+        buf[header_len..header_len + payload.len()].copy_from_slice(payload);
+        buf.truncate(header_len + payload.len());
+        buf
     }
 
     #[tokio::test]
-    async fn udp_datagram_halves() {
-        UdpTest::halves().await.test().await
+    async fn test_udp_source_validation_drops_spoofed_datagram() {
+        // 直接驱动生产代码路径：SocksDatagram::poll_recv_from 里的来源校验（P1-9）
+        let before = UDP_SOURCE_REJECTED.load(std::sync::atomic::Ordering::Relaxed);
+
+        let (stream, _keep) = tokio::io::duplex(64);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = socket.local_addr().unwrap();
+        let dgram = SocksDatagram::from_parts_for_test(
+            socket,
+            AddrKind::Ip(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 1080)),
+            stream,
+        );
+        dgram.set_expected_source("1.1.1.1:53".parse().unwrap());
+
+        // 第三方套接字发来一条头部声明来源为 9.9.9.9:53 的伪造应答
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        peer.send_to(&build_datagram("9.9.9.9:53", b"forged"), local)
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 512];
+        let res =
+            tokio::time::timeout(Duration::from_millis(300), dgram.recv_from(&mut buf)).await;
+        assert!(res.is_err(), "来源不符的数据报必须被丢弃，实际收到了 {res:?}");
+        assert_eq!(
+            UDP_SOURCE_REJECTED.load(std::sync::atomic::Ordering::Relaxed) - before,
+            1,
+            "被丢弃的来源不符数据报必须计数（管理接口要靠它可观测）"
+        );
+
+        // 再来一条来源正确的 → 必须正常收到
+        peer.send_to(&build_datagram("1.1.1.1:53", b"legit"), local)
+            .await
+            .unwrap();
+        let (n, addr) = tokio::time::timeout(Duration::from_millis(300), dgram.recv_from(&mut buf))
+            .await
+            .expect("来源正确的数据报必须被接收")
+            .unwrap();
+        assert_eq!(&buf[..n], b"legit");
+        assert_eq!(addr, AddrKind::Ip("1.1.1.1:53".parse::<SocketAddr>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_no_expected_source_keeps_old_behaviour() {
+        // 未登记期望来源时不做过滤（单独使用本类型时的向后兼容）
+        let (stream, _keep) = tokio::io::duplex(64);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = socket.local_addr().unwrap();
+        let dgram = SocksDatagram::from_parts_for_test(
+            socket,
+            AddrKind::Ip(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 1080)),
+            stream,
+        );
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        peer.send_to(&build_datagram("8.8.8.8:53", b"whatever"), local)
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 512];
+        let (n, addr) = tokio::time::timeout(Duration::from_millis(300), dgram.recv_from(&mut buf))
+            .await
+            .expect("未设置期望来源时不应过滤")
+            .unwrap();
+        assert_eq!(&buf[..n], b"whatever");
+        assert_eq!(addr, AddrKind::Ip("8.8.8.8:53".parse::<SocketAddr>().unwrap()));
     }
 }

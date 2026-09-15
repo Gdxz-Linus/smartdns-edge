@@ -4,6 +4,11 @@ name: Test
 
 on:
   workflow_dispatch: # 允许你随时在网页上点按钮手动体检
+  # 推到这些分支时也自动体检（原配置只在提 PR 时跑，直接推 main 不会触发）
+  push:
+    branches:
+      - main
+      - release/**
   pull_request:
     branches:
       - main

@@ -74,5 +74,33 @@ docker run -d \
   --restart always \
   --network host \
   -v /your/local/path/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns-edge:lastest
+  ghcr.io/gdxz-linus/smartdns-edge:latest
+```
+
+
+## Upgrading from an older version: the one thing you need to know
+
+The management console no longer ships a default password (the old default no longer works). After upgrading:
+
+1. **Console not enabled** (no `bind-http` / `bind-https` / `bind-h3`) → nothing to do; DNS service is unaffected.
+2. **Console bound to localhost only** (e.g. `bind-http 127.0.0.1:6080`) → a random token is printed in the
+   startup log; use it to log in. To pin it, add `api-token <your-token>` to the configuration.
+3. **Console bound to a public address** (e.g. `bind-http 0.0.0.0:6080`) → without an `api-token` in the
+   configuration the service **refuses to start** (with a clear message). This is deliberate: the console can
+   rewrite resolution rules, so it must never be exposed without a token. Set `api-token`, or use an SSH tunnel.
+
+**Recommended**: keep the console port off the public network and use an SSH tunnel:
+`ssh -L 6080:127.0.0.1:6080 your-server`, then open `http://127.0.0.1:6080` locally.
+
+### Containers (Docker / NAS) note
+
+The behaviour inside a container is identical: if the mounted configuration binds the console to
+`0.0.0.0` without an `api-token`, the container **refuses to start** (exit code 2). Injecting the token
+through the environment is the easiest fix:
+
+```bash
+docker run -d --name smartdns --restart always --network host \
+  -e SMARTDNS_API_TOKEN=your-token \
+  -v /your/path/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns-edge:latest
 ```

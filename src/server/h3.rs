@@ -25,6 +25,7 @@ pub fn serve(
     app: App,
     socket: net::UdpSocket,
     dns_handle: DnsHandle,
+    api_enabled: bool,
     server_cert_resolver: Arc<dyn ResolvesServerCert>,
 ) -> io::Result<CancellationToken> {
     let token = CancellationToken::new();
@@ -53,7 +54,11 @@ pub fn serve(
 
     let state = Arc::new(ServeState { app, dns_handle });
 
-    let router = crate::api::routes().with_state(state.clone());
+    let router = (if api_enabled {
+        crate::api::routes()
+    } else {
+        crate::api::dns_only_routes()
+    }).with_state(state.clone());
     let router = router.layer(Extension(ConnectInfo(SocketAddr::new(
         Ipv4Addr::UNSPECIFIED.into(),
         0,
@@ -81,12 +86,12 @@ fn transport() -> TransportConfig {
     transport_config.datagram_receive_buffer_size(None);
     transport_config.datagram_send_buffer_size(0);
     // clients never accept new bidirectional streams
-    transport_config.max_concurrent_bidi_streams(VarInt::from_u32(3));
+    transport_config.max_concurrent_bidi_streams(VarInt::from_u32(16));
     // - SETTINGS
     // - QPACK encoder
     // - QPACK decoder
     // - RESERVED (GREASE)
-    transport_config.max_concurrent_uni_streams(VarInt::from_u32(4));
+    transport_config.max_concurrent_uni_streams(VarInt::from_u32(16));
 
     transport_config
 }

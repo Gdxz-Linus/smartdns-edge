@@ -1,5 +1,7 @@
 #[cfg(feature = "dns-over-h3")]
 mod h3;
+pub(crate) mod limit;
+
 mod http;
 #[cfg(feature = "dns-over-https")]
 mod https;
@@ -44,6 +46,16 @@ pub fn serve(
     certificate_file: Option<&Path>,
     certificate_key_file: Option<&Path>,
 ) -> Result<ServerHandle, crate::Error> {
+    // 🔐 P0-5：连接建立后等待"第一个完整 DNS 报文"的超时（默认 5 秒，0 = 不限制）
+    let first_packet_timeout = cfg.first_packet_timeout();
+
+    // 🔐 逐监听连接上限：内网端口可以宽松、对公网端口单独收紧
+    crate::server::limit::register_listener(
+        bind_addr_config.sock_addr(),
+        bind_addr_config.server_opts().max_connections,
+        bind_addr_config.server_opts().max_connections_per_ip,
+    );
+
     use crate::rustls::TlsServerCertResolver;
     use net::{bind_to, setup_tcp_socket, setup_udp_socket};
     use std::time::Duration;
@@ -102,7 +114,12 @@ pub fn serve(
                 bind_addr_config.device(),
                 "TCP",
             )?;
-            tcp::serve(listener, dns_handle, Duration::from_secs(idle_time))
+            tcp::serve(
+                listener,
+                dns_handle,
+                Duration::from_secs(idle_time),
+                first_packet_timeout,
+            )
         }
         #[cfg(feature = "dns-over-tls")]
         BindAddrConfig::Tls(bind_addr_config) => {
@@ -128,6 +145,7 @@ pub fn serve(
                 dns_handle,
                 Duration::from_secs(idle_time),
                 server_cert_resolver,
+                first_packet_timeout,
             )?
         }
         BindAddrConfig::Http(bind_addr_config) => {
@@ -142,7 +160,7 @@ pub fn serve(
 
             let app = app.clone();
 
-            http::serve(app, listener, dns_handle)?
+            http::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api())?
         }
         #[cfg(feature = "dns-over-https")]
         BindAddrConfig::Https(bind_addr_config) => {
@@ -171,7 +189,7 @@ pub fn serve(
                 .filter(|c| matches!(c, BindAddrConfig::H3(_)))
                 .map(|c| c.port())
                 .next();
-            https::serve(app, listener, dns_handle, server_cert_resolver, h3_port)?
+            https::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api(), server_cert_resolver, h3_port)?
         }
         #[cfg(feature = "dns-over-h3")]
         BindAddrConfig::H3(bind_addr_config) => {
@@ -193,7 +211,7 @@ pub fn serve(
             )?;
 
             let app = app.clone();
-            h3::serve(app, listener, dns_handle, server_cert_resolver)?
+            h3::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api(), server_cert_resolver)?
         }
         #[cfg(feature = "dns-over-quic")]
         BindAddrConfig::Quic(bind_addr_config) => {
@@ -220,6 +238,7 @@ pub fn serve(
                 Duration::from_secs(idle_time),
                 server_cert_resolver,
                 ssl_config.server_name.clone(),
+                first_packet_timeout,
             )?
         }
         #[cfg(not(feature = "dns-over-tls"))]

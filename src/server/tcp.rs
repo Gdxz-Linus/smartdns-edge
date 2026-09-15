@@ -21,6 +21,7 @@ pub fn serve(
     listener: net::TcpListener,
     handler: DnsHandle,
     timeout: Duration,
+    first_packet_timeout: Option<std::time::Duration>,
 ) -> CancellationToken {
     log::debug!("TCP listener successfully registered on {}", listener.local_addr().unwrap());
 
@@ -28,6 +29,12 @@ pub fn serve(
     let cancellation_token = token.clone();
 
     tokio::spawn(async move {
+        // 🔐 逐监听连接上限（若该监听单独配了 max-connections*，与全局限额同时生效）
+        let listener_limiter = listener
+            .local_addr()
+            .ok()
+            .and_then(crate::server::limit::for_listener);
+
         let mut inner_join_set = JoinSet::new();
         loop {
             let (tcp_stream, src_addr) = tokio::select! {
@@ -54,10 +61,31 @@ pub fn serve(
                 continue;
             }
 
+            // 🔐 P0-5：连接数上限。超出预算就拒绝新连接（不影响已有连接），保护进程内存。
+            // 默认上限按物理内存自动推算：家庭小机器自动收紧，企业大机器自动放宽。
+            let Some(conn_guard) = crate::server::limit::global().acquire(src_addr.ip()) else {
+                log::debug!("连接数超出上限，拒绝 {src_addr} 的新连接");
+                continue;
+            };
+
+            // 🔐 该监听自身（若单独配置过）的限额也要通过
+            let listener_guard = match listener_limiter.as_ref() {
+                Some(l) => match l.acquire(src_addr.ip()) {
+                    Some(guard) => Some(guard),
+                    None => {
+                        log::debug!("该监听连接数超限，拒绝 {src_addr} 的新连接");
+                        continue;
+                    }
+                },
+                None => None,
+};
+
             let handler = handler.clone();
 
             // and spawn to the io_loop
             inner_join_set.spawn(async move {
+                let _conn_guard = conn_guard; // 连接结束时自动归还配额
+                    let _listener_guard = listener_guard;
                 log::debug!("accepted request from: {}", src_addr);
                 // take the created stream...
                 let (mut buf_stream, stream_handle) =
@@ -66,12 +94,27 @@ pub fn serve(
                 // 🌟 核心修复：单连接并发数上限 (防 Pipelining 任务爆炸与 OOM)
                 let conn_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(200));
 
-                while let Ok(Some(message)) = buf_stream.next().timeout(timeout).await {
-                    let message = match message {
-                        Ok(message) => message,
-                        Err(e) => {
-                            log::debug!("error in TCP request_stream src: {} error: {}", src_addr, e);
+                // 🔐 P0-5：连接建立后，"第一个完整报文"必须在首包超时内到达；之后回落到空闲超时。
+                // 攻击者"只发长度前缀、不发正文"的路子会被迅速切断，长连接复用不受影响。
+                let mut is_first_packet = true;
+                loop {
+                    let wait = if is_first_packet {
+                        first_packet_timeout.unwrap_or(timeout)
+                    } else {
+                        timeout
+                    };
+                    let next = buf_stream.next().timeout(wait).await;
+                    is_first_packet = false;
+                    let message = match next {
+                        Ok(Some(Ok(message))) => message,
+                        Ok(Some(Err(e))) => {
+                            log::debug!("error in DNS request_stream src: {} error: {}", src_addr, e);
                             return; // 网络中断，断开连接
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            log::debug!("等待 DNS 报文超时，断开连接: {}", src_addr);
+                            return;
                         }
                     };
 

@@ -7,7 +7,11 @@
 
 //! `DnsResponse` wraps a `Message` and any associated connection details
 
-#[cfg(feature = "std")]
+// 🌟 本地修复（见 hickory-dns/VENDORED.md 第 4.5 节）：`Box` 与 `ProtoErrorKind` 在下面的
+// `DnsResponse::new_with_checked()` 里是**无条件**使用的（那个函数不在 #[cfg(feature = "std")] 块里），
+// 但上游把它们放进了 std 门控的导入 —— 结果 no_std 构建直接编译失败
+// （error[E0433]: cannot find type `Box` / error[E0433]: use of undeclared type `ProtoErrorKind`）。
+// 这里把这两个导入改为无门控；它们来自 alloc/core，本身就不依赖 std。
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::{
@@ -31,8 +35,11 @@ use futures_util::{ready, stream::Stream};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+// 同上：ProtoErrorKind 被无条件的 new_with_checked() 用到，不能门控；
+// ProtoResult 只在 std 门控的 mpsc 相关代码里出现，保持门控即可。
+use crate::ProtoErrorKind;
 #[cfg(feature = "std")]
-use crate::{ProtoErrorKind, error::ProtoResult};
+use crate::error::ProtoResult;
 use crate::{
     error::ProtoError,
     op::{Message, MessageType, ResponseCode},

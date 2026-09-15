@@ -6,16 +6,22 @@
 
 | parameter | Parameter function | Default value | Value type | Example |
 | :--- | :--- | :--- | :--- | :--- |
+| max-connections | Maximum number of simultaneous connections across all DNS listeners. **Auto-derived from physical memory when unset** (tighter on small home boxes, looser on enterprise servers) | auto | integer, 0 = auto | max-connections 20000 |
+| max-connections-per-ip | Maximum simultaneous connections from a single source (IPv6 is aggregated by /64 prefix). Do not set it too low: many clients behind NAT/proxies share one IP | auto | integer, 0 = auto | max-connections-per-ip 1000 |
+| first-packet-timeout | Seconds to wait for the first complete DNS message after a connection is established. Blocks slow attacks that send only a length prefix. Normal clients send their query right after the handshake and are unaffected | 5 | seconds, 0 = unlimited | first-packet-timeout 5 |
+| api-token | Login token of the management console (WebAPI). **No built-in default password is kept**: if unset and the console listens on localhost only, a random token is generated and printed to the log; if the console is bound to a non-local address while no token is configured, the daemon refuses to start | none | any string | api-token my-secret-2026 |
 | server | Upstream UDP DNS server | None | Repeatable <br />[ip:port\|URL]: Server IP, port optional OR URL. <br />[-blacklist-ip]: filtering IPs configured by "blacklist-ip". <br />[-whitelist-ip]: only accept IP range configured in whitelist-ip. <br />[-g\|-group [group] ...]: Group to which the DNS server belongs. <br />[-e\|-exclude-default-group]: Exclude DNS servers from the default group. <br />[-set-mark mark]: set mark on packets <br /> [-p\|-proxy name]: set proxy server <br /> [-b\|-bootstrap-dns]: set as bootstrap dns server <br /> [-fallback]: set server as fallback server. <br />[-subnet]：set per server edns-client-subnet. <br /> [-subnet-all-query-types]: send all types of query with ECS. <br /> [-interface]: bind to interface. | server 8.8.8.8:53 -blacklist-ip -proxy clash<br />server tls://8.8.8.8 |
 | server-tcp | Upstream TCP DNS server | None | Repeatable, same options as `server` plus `[-tcp-keepalive]`. | server-tcp 8.8.8.8:53 |
 | server-tls | Upstream TLS DNS server | None | Repeatable. <br />[-spki-pin [sha256-pin]]: TLS verify SPKI value<br />[-host-name]:TLS Server name. - to disable SNI.<br />[-tls-host-verify]: TLS cert hostname to verify. <br />[-k\|-no-check-certificate]: No check certificate. <br /> Plus all `server` options. | server-tls 8.8.8.8:853 |
 | server-https | Upstream HTTPS DNS server | None | Repeatable. <br />https://[host][:port]/path: Server URL. <br />[-http-host]: http header host. <br /> Plus all `server-tls` options. | server-https https://cloudflare-dns.com/dns-query |
 | server-quic | Upstream Quic DNS server | None | Repeatable, same options as `server-tls`. | server-quic 8.8.8.8:853 |
 | server-h3 | Upstream HTTP3 DNS server | None | Repeatable, same options as `server-https`. | server-h3 h3://cloudflare-dns.com/dns-query |
-| bind | DNS listening port number | [::]:53 | Support binding multiple ports<br />`IP:PORT@DEVICE`: server IP, port number, and device. <br />[-group]: DNS server group used when requesting. <br />[-no-rule-addr / -nameserver / -ipset / -soa]: Skip specific rules. <br />[-no-dualstack-selection / -no-speed-check / -no-cache]: Disable corresponding features. <br />[-force-aaaa-soa / -force-https-soa / -no-serve-expired]: Force specific query behaviors. | bind :53@eth0 |
+| bind | DNS listening port number | [::]:53 | Support binding multiple ports<br />`IP:PORT@DEVICE`: server IP, port number, and device. <br />[-group]: DNS server group used when requesting. <br />[-no-rule-addr / -nameserver / -ipset / -soa]: Skip specific rules. <br />[-no-dualstack-selection / -no-speed-check / -no-cache]: Disable corresponding features. <br />[-force-aaaa-soa / -force-https-soa / -no-serve-expired]: Force specific query behaviors. <br />[-no-api]: this listener serves DoH only and does not mount the console. <br />[-max-connections N]: per-listener connection cap. <br />[-max-connections-per-ip N]: per-listener per-source cap. | bind :53@eth0 |
 | bind-tcp | TCP mode DNS listening port number | [::]:53 | Support binding multiple ports. Same options as `bind`. | bind-tcp :53 |
 | bind-tls | DOT mode DNS listening port number | [::]:853 | Support binding multiple ports. Same options as `bind`. | bind-tls :853 |
 | bind-https | DOH mode DNS listening port number | [::]:853 | Support binding multiple ports. Same options as `bind`. | bind-https :853 |
+| bind-http | Plain-HTTP listener (**also mounts the management console**; never expose it directly — use an SSH tunnel or add `-no-api`) | none | Support binding multiple ports. Same options as `bind`. | bind-http 127.0.0.1:6080 |
+| bind-h3 | DNS over HTTP/3 listening port number | none | Support binding multiple ports. Same options as `bind`. | bind-h3 :853 |
 | bind-cert-file | SSL Certificate file path | smartdns-cert.pem | path | bind-cert-file cert.pem |
 | bind-cert-key-file | SSL Certificate key file path | smartdns-key.pem | path | bind-cert-key-file key.pem |
 | bind-cert-key-pass | SSL Certificate key file password | None | string | bind-cert-key-pass password |
@@ -50,8 +56,10 @@
 | group-begin | rule group start | None | Group name:<br />[-inherit group-name]: inherit configuration from `group-name`.<br />Used with group-end, configurations between them belong to the group. | group-begin group-name |
 | group-end | rule group end | None | Used with group-begin. | group-end |
 | group-match | Match group rules | None | Use the corresponding rule group when conditions are met. <br />[-g\|group group-name]: Specify rule group.<br />[-client-ip ip-set\|ip/cidr\|mac address]: Match client.<br />[-domain domain]: Match domain name. | group-match -client-ip 1.1.1.1 -domain a.com |
-| conf-file | additional conf file | None | file [-g\|-group group-name] [-p\|-proxy proxy-name]<br /> file: File path or remote URL. <br />[-p\|-proxy]: Specify proxy server to download remote conf-file. | conf-file https://site/rule.conf -p clash | 
+| conf-file | additional conf file | None | file [-g\|-group group-name] [-p\|-proxy proxy-name]<br /> file: File path or remote URL. <br />[-p\|-proxy]: Specify proxy server to download remote conf-file. | conf-file https://site/rule.conf -p clash <br />Duplicate or circular includes are de-duplicated automatically and never recurse |
 | proxy-server | proxy server | None | Repeatable. <br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]:  proxy server name. | proxy-server socks5://user:pass@127.0.0.1:1080 -name proxy |
+> Passwords in proxy URLs are masked automatically in logs and debug output.
+
 | speed-check-mode | Speed ​​mode | ping,tcp:80,tcp:443 | [ping\|tcp:[80]\|none] | speed-check-mode ping,tcp:80,tcp:443 |
 | response-mode | First query response mode | first-ping | Mode: [first-ping\|fastest-ip\|fastest-response]<br /> [first-ping]: Shortest DNS + ping delay;<br />[fastest-ip]: Fastest IP address mode, wait to test speed. <br />[fastest-response]: Fastest DNS response mode. | response-mode first-ping |
 | address | Domain IP address | None | address /[*\|-]domain/[ip1[,ip2,...]\|-\|-4\|-6\|#\|#4\|#6]<br />`-` for ignore this rule. <br />`#` for return SOA. <br />`*` at the beginning means wildcard. | address /www.example.com/1.2.3.4 |
@@ -68,7 +76,7 @@
 | ipset | Domain IPSet | None | ipset [/domain/][ipset\|-\|#[4\|6]:[ipset\|-]] | ipset /www.example.com/#4:dns4,#6:- |
 | ipset-timeout | ipset timeout enable | no | [yes\|no] | ipset-timeout yes |
 | ipset-no-speed | Set IP to ipset when speed check fails | None | ipset \| #[4\|6]:ipset | ipset-no-speed #4:ipset4,#6:ipset6 |
-| nftset | Domain nftset | None | nftset [/domain/][#4\|#6\|-]:[family#nftable#nftset\|-] <br /> valid families are inet, ip, ip6. | nftset /www.example.com/#4:inet#tab#dns4 |
+| nftset | Domain nftset | None | nftset [/domain/][#4\|#6\|-]:[family#nftable#nftset\|-] <br /> valid families are inet, ip, ip6. | nftset /www.example.com/#4:inet#tab#dns4 <br />Multiple `nftset` entries for the same domain are **all applied** (merged, not overwritten) |
 | nftset-timeout | nftset timeout enable | no | [yes\|no] | nftset-timeout yes |
 | nftset-no-speed | Set IP to nftset when speed check fails | None | nftset-no-speed [#4\|#6]:[family#nftable#nftset] | nftset-no-speed #4:inet#tab#set4 |
 | nftset-debug | nftset debug enable | no | [yes\|no] | nftset-debug yes |
@@ -94,3 +102,98 @@
 | user | run as user | root | user [username] | user nobody |
 | ca-file | certificate file | /etc/ssl/certs/... | path | ca-file /etc/ssl/certs/ca-certificates.crt |
 | ca-path | certificates path | /etc/ssl/certs | path | ca-path /etc/ssl/certs |
+
+---
+
+## Management console (WebAPI)
+
+Configuring any of `bind-http` / `bind-https` / `bind-h3` exposes both DNS service (DoH)
+and the management console on that port (the `/api` endpoints for config, upstreams,
+address rules, cache and logs, plus `/api/docs` for the API reference).
+The console can be turned off per listener with the `-no-api` option, e.g.
+`bind-https 0.0.0.0:8000 -ssl-certificate cert.pem -ssl-certificate-key key.pem -no-api`.
+
+### Token (must read)
+
+The token is resolved in this order:
+
+1. `api-token <token>` in the configuration file;
+2. the `SMARTDNS_API_TOKEN` environment variable;
+3. otherwise a random token is generated and printed to the console/log at startup
+   (a ready-to-paste `api-token <token>` line is printed as well).
+
+There is **no hard-coded default password**. If the console is bound to a non-local
+address without a configured token, the daemon (and `smartdns test`) **refuses to start**,
+because that would expose the console to the whole network.
+
+### How to use it safely
+
+| Scenario | Recommendation |
+|---|---|
+| Local administration only | `bind-http 127.0.0.1:8000`, open `http://127.0.0.1:8000` |
+| Remote administration (recommended) | do **not** expose the port; use an SSH tunnel: `ssh -L 8000:127.0.0.1:8000 your-server`, then open `http://localhost:8000` |
+| Long-term remote access | use `bind-https 0.0.0.0:8000 -ssl-certificate ... -ssl-certificate-key ...` with a token you set yourself, and restrict the source network |
+
+⚠️ `bind-http` is plain HTTP: the token travels unencrypted. Unless you are using an SSH
+tunnel, always use `bind-https`.
+
+---
+
+## Memory protection (connection limits and slow-attack defence)
+
+DNS over TCP / DoT / DoQ messages carry a 2-byte length prefix (declaring up to 65535 bytes).
+Allocating the declared size up front means an attacker occupies 64 KiB by sending just 2 bytes;
+combined with unlimited connections that is enough to exhaust the server's memory. Three layers of
+protection are in place:
+
+| Protection | What it does |
+|---|---|
+| **The length prefix is not trusted** (root fix) | Reads are chunked at 4 KiB and grow on demand, so memory is proportional to the **bytes actually received**. 2 bytes sent ⇒ 4 KiB used (previously 64 KiB) |
+| **First-packet timeout `first-packet-timeout`** (default 5 s) | The first complete message must arrive within 5 s of connection setup, otherwise the connection is closed; the window shrinks from 120 s to 5 s. Long-lived connection reuse is unaffected (afterwards `tcp-idle-time` applies) |
+| **Connection limits** | Both the total number of simultaneous connections and the number per source are capped; over-limit connections are refused (existing ones are untouched). Defaults are derived from physical memory: budget = clamp(RAM/8, 16 MiB, 512 MiB), 32 KiB per connection → total = clamp(budget/32 KiB, 512, 16384), per source = total/8 (min 64, max 2048) |
+
+**Auto-derived defaults, for reference:**
+
+| Machine | Physical memory | Auto total | Per source |
+|---|---|---|---|
+| Home router / NAS | 256 MB | 1024 | 128 |
+| Home server | 8 GB | 16384 | 2048 |
+| Enterprise server | 32 GB+ | 16384 (raise as needed) | 2048 |
+
+**Other points:**
+
+- Connections from loopback (127.0.0.1 / ::1) **do not consume quota**, so you can always reach the
+  console locally or over an SSH tunnel even while a connection flood is going on.
+- Over-limit traffic is refused for **new** connections only; existing connections are never dropped,
+  and a rate-limited log line is written.
+- `GET /api/system/status` exposes the current connection count, the number refused, the limit, and
+  `panics_total` (should stay 0).
+- **Per-listener override**: `bind-tcp 0.0.0.0:53 -max-connections 20000` tightens or relaxes a single
+  listener; it applies **in addition to** the global limit (e.g. relaxed on the LAN, tight on a public DoH port).
+- There is no "unlimited" value: to lift the limit in practice, set a very large number.
+- **Networks behind NAT should raise the per-source limit**: if an enterprise egress is a single NAT
+  gateway, thousands of devices share one source IP and the default (total/8) can be reached by
+  **legitimate** traffic. Watch `connections_rejected` in `GET /api/system/status` and raise
+  `max-connections-per-ip` if it keeps growing.
+- It is advisable to run with the defaults for a while and watch the real peak before tuning.
+- When startup is refused because of an invalid configuration (e.g. the console bound to a public
+  address without a token), the process exits with **code 2** (2 = configuration error).
+
+---
+
+## Protocol robustness
+
+- Requests with an unsupported `OpCode` (`IQUERY` / `STATUS` / `NOTIFY` / `UPDATE` / unknown)
+  are answered with **NotImp** (RFC 1035 §4.1.1), echoing the original ID and question section.
+- A DNS **response** packet (QR=1) arriving at the server is silently dropped: such traffic is
+  usually spoofed/reflected or misconfigured, and answering a response would create a loop.
+- **Upstream response source verification (anti-poisoning)**: direct UDP upstream sockets are
+  `connect`ed to the upstream, so the kernel drops responses whose source IP/port does not match.
+  Over a SOCKS5 proxy the socket is already `connect`ed to the relay, and the source address carried
+  in the datagram header is additionally checked against the upstream being queried; mismatches are
+  dropped and counted. See `udp_source_rejected` in `GET /api/system/status` (proxy path only — on the
+  direct path the kernel drops them and the application cannot see them).
+- Any panic inside the process is logged (rate-limited) and counted; check the `panics_total`
+  field of `GET /api/system/status` (it should stay 0).
+- As a safety net, a request that hits an unexpected panic is answered with **SERVFAIL**
+  instead of leaving the client waiting until timeout.
