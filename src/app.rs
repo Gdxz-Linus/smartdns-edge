@@ -62,6 +62,18 @@ impl App {
     }
 
     pub async fn reload(&self) -> anyhow::Result<()> {
+        self.reload_inner(true).await
+    }
+
+    /// 🔐 P2：`domain-set -interval` 触发的定时刷新。
+    ///
+    /// 与手动重载（`reload`）唯一的不同：**未到自己 `-interval` 的名单直接用内存缓存**，
+    /// 不会被顺带重新下载（否则别的名单配的周期就白配了）。
+    async fn reload_reusing_domain_set_cache(&self) -> anyhow::Result<()> {
+        self.reload_inner(false).await
+    }
+
+    async fn reload_inner(&self, force_domain_set_refresh: bool) -> anyhow::Result<()> {
         log::info!("reloading configuration...");
         let cfg = self.cfg().await;
 
@@ -69,7 +81,11 @@ impl App {
         // 全部扔给 Tokio 的专用阻塞线程池！在下载规则的这几十秒内，
         // 现有的 DNS 解析业务绝不会受到任何卡顿影响，继续用老规则飞速奔跑！
         let new_cfg = tokio::task::spawn_blocking(move || {
-            cfg.reload_new()
+            if force_domain_set_refresh {
+                cfg.reload_new()
+            } else {
+                cfg.reload_new_reusing_domain_set_cache()
+            }
         })
         .await
         .map_err(|e| anyhow::anyhow!("Background config reload task panicked: {}", e))??;
@@ -80,6 +96,64 @@ impl App {
         *self.loaded_at.write().await = Instant::now();
         log::info!("configuration reloaded");
         Ok(())
+    }
+
+    /// 下一次 `-interval` 刷新要等多少秒 —— 取所有配了 `-interval` 的名单里**最小**的那个。
+    ///
+    /// 为什么取最小：名单的缓存各自按自己的周期判断"到没到期"（见 `get_with_cache`），
+    /// 所以只要按最小周期来敲，每个名单都能在自己到期后的一个周期内被刷新，谁也不会被超频重下。
+    /// 返回 `None` = 没有任何名单配了 `-interval`（或都配成 0）。
+    async fn next_domain_set_refresh_delay(&self) -> Option<u64> {
+        use crate::config::DomainSetProvider;
+
+        let cfg = self.cfg().await;
+        cfg.domain_set_providers
+            .values()
+            .flatten()
+            .filter_map(|provider| match provider {
+                DomainSetProvider::File(p) => p.interval,
+                DomainSetProvider::Http(p) => p.interval,
+            })
+            .filter(|secs| *secs > 0)
+            .map(|secs| secs as u64)
+            .min()
+    }
+
+    /// 🔐 P2：`domain-set -interval` 的定期刷新任务。
+    ///
+    /// 名单是在配置构建时被**展开进规则树**的，所以"刷新名单"必然连带重建配置 ——
+    /// 到点后就重载一次配置（与手动 `/api/config/reload` 同一条路），新名单随之生效。
+    /// 两处不同：① 未到自己周期的名单用内存缓存（不会被顺带重下）；
+    /// ② 取用失败时保留上一次的名单，不会因为一次网络抖动把规则清空。
+    fn spawn_domain_set_refresh_task(&self) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            // 没有配 `-interval` 时不做任何事，但也不退出任务：配置重载后可能就配上了，
+            // 隔一分钟醒来重新看一眼即可（代价可忽略）。
+            const IDLE_CHECK: Duration = Duration::from_secs(60);
+
+            loop {
+                let wait = match app.next_domain_set_refresh_delay().await {
+                    Some(secs) => Duration::from_secs(secs),
+                    None => IDLE_CHECK,
+                };
+
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = crate::signal::terminate() => break,
+                }
+
+                // 醒来后再确认一次：确实有配 `-interval` 的名单才值得重载配置。
+                let Some(secs) = app.next_domain_set_refresh_delay().await else {
+                    continue;
+                };
+
+                log::info!("domain-set 定时刷新：按 -interval（最小 {secs} 秒）重新加载配置");
+                if let Err(err) = app.reload_reusing_domain_set_cache().await {
+                    log::error!("domain-set 定时刷新失败：{err}");
+                }
+            }
+        });
     }
 
     pub async fn loaded_at(&self) -> Duration {
@@ -99,6 +173,8 @@ impl App {
     async fn init(&self) {
         self.update_middleware_handler().await;
         self.update_listeners().await;
+        // 🔐 P2：`domain-set -interval` 的定期刷新（没配 interval 的话它什么都不做）
+        self.spawn_domain_set_refresh_task();
         crate::banner();
         log::info!("awaiting connections...");
         log::info!("server starting up");
@@ -470,6 +546,8 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
     //   2. 检查通过后把口令定下来（没配置就随机生成并打印一次），
     //      让用户在启动日志里立刻看到，而不是等第一次访问失败才发现。
     {
+        // 🔐 P2：明文 HTTP 上挂管理后台时把风险说清楚（不改功能，只告警）
+        crate::api::warn_plaintext_api(cfg.binds());
         if let Err(msg) = crate::api::check_exposure(cfg.binds(), cfg.api_token()) {
             crate::log::error!("{msg}");
             eprintln!("[smartdns] {msg}");
@@ -782,11 +860,21 @@ async fn process_inner(
                                                 );
                                                 // 自造一条否定 SOA：TTL 跟随 rr-ttl（管理员统一指定），
                                                 // 未配置时用 60 秒——足够让客户端安静，又不会把一次上游异常长期固化。
+                                                // 🔐 P2：还要受 rr-ttl-reply-max（对客户端展示的最大 TTL）约束 ——
+                                                // 这条响应是在中间件链之外（app 层兜底）生成的，不经过地址中间件的裁剪，
+                                                // 所以必须在这里自己收一次口，否则否定缓存的寿命会比配置的上限更长。
                                                 let soa_ttl = handler
                                                     .cfg()
                                                     .rr_ttl()
                                                     .map(|v| v as u32)
-                                                    .unwrap_or(60);
+                                                    .unwrap_or(60)
+                                                    .min(
+                                                        handler
+                                                            .cfg()
+                                                            .rr_ttl_reply_max()
+                                                            .map(|v| v as u32)
+                                                            .unwrap_or(u32::MAX),
+                                                    );
                                                 let mut res = DnsResponse::empty();
                                                 res.add_query(original.to_owned());
                                                 res.add_authority(crate::dns::forge_soa_record(
@@ -1125,6 +1213,9 @@ impl crate::middleware::Middleware<crate::dns::DnsContext, crate::dns::DnsReques
         }
 
         if let Some(group) = matched_group
+            // 🔐 P2（用户定策）：后台请求（预取、双栈探针）不是"某个人"，不参与按来源 IP 判组；
+            // 否则它们的组会被按"程序自己的来源地址"重算，等于把调用方指定的组抹掉。
+            && !ctx.server_opts.is_background
             && ctx.server_opts.rule_group.as_deref() != Some(group.as_str()) {
                 crate::log::debug!("Client {} matched client-rule, routing to group: {}", client_ip, group);
                 ctx.server_opts.rule_group = Some(group.clone());

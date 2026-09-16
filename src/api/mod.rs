@@ -119,6 +119,11 @@ async fn version() -> Json<&'static str> {
 
 enum ApiError {
     Internal(anyhow::Error),
+    /// 🔐 P2：请求本身有问题（参数缺失 / 格式非法 / 域名写错）—— 应回 400，不该回 500。
+    /// 原实现把所有错误都塞进 Internal → 客户端错误被当成服务器故障，污染监控告警。
+    BadRequest(String),
+    /// 🔐 P2：目标已存在（例如重复的域名规则）—— 语义是 409 Conflict，不是 500。
+    Conflict(String),
     NotFound(String),
 }
 
@@ -126,11 +131,18 @@ enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            ApiError::Internal(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Something went wrong: {error}"),
-            )
-                .into_response(),
+            ApiError::Internal(error) => {
+                // 详情写给服务端日志，响应里也保留（本机管理后台，排障需要）；
+                // 关键是不能把它当成"客户端错误"的状态码糊弄过去。
+                crate::log::error!("API internal error: {error:?}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Something went wrong: {error}"),
+                )
+                    .into_response()
+            }
+            ApiError::BadRequest(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+            ApiError::Conflict(err) => (StatusCode::CONFLICT, err).into_response(),
             ApiError::NotFound(err) => (StatusCode::NOT_FOUND, err).into_response(),
         }
     }
@@ -149,9 +161,13 @@ where
 
 impl IntoResponse for crate::dns::DnsError {
     fn into_response(self) -> Response {
+        // 🔐 P2：不再手工拼 JSON —— 错误文本里一旦出现引号 / 反斜杠 / 换行，
+        // 拼出来的就是坏 JSON；而且细节直接回显等于把内部信息（含服务器路径）送给调用方。
+        // 这里用 serde_json 生成（自动转义），详情只写服务端日志。
+        crate::log::warn!("DoH 查询失败: {self:?}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!(r#"{{ "error": "{self}" }}"#),
+            Json(serde_json::json!({ "error": self.to_string() })),
         )
             .into_response()
     }
@@ -267,6 +283,29 @@ fn auth_record_failure(ip: std::net::IpAddr) -> u32 {
 
 fn auth_record_success(ip: std::net::IpAddr) {
     AUTH_FAILS.lock().unwrap().remove(&ip);
+}
+
+/// 🔐 P2：管理后台挂在**明文 HTTP** 上时，口令会在网络中明文传输。
+///
+/// 这里**不改功能**（容器 / 内网用户就是靠明文 HTTP 用网页控制台的，直接禁掉会把人打残），
+/// 只把风险说清楚：只绑本机的不吭声，绑到非本机地址的启动时打一条醒目告警。
+/// 想要更强的手段：改用 `bind-https`（TLS），或在前面加一层做 TLS 终结的反向代理。
+pub fn warn_plaintext_api(binds: &[crate::config::BindAddrConfig]) {
+    use crate::dns_conf::IBindConfig as _;
+
+    for b in binds {
+        if !matches!(b, crate::config::BindAddrConfig::Http(_)) {
+            continue;
+        }
+        let addr = b.sock_addr();
+        if addr.ip().is_loopback() {
+            continue;
+        }
+        crate::log::warn!(
+            "⚠️ 管理后台（网页控制台）挂在明文 HTTP 上：{addr}。口令会以明文在网络中传输 —— \
+             请只在可信内网使用；需要跨网络访问请改用 bind-https（TLS）或反向代理。"
+        );
+    }
 }
 
 /// 启动前检查：管理后台是否"绑到了非本机地址、却又没有配置口令"。

@@ -4,6 +4,9 @@ name: Test
 
 on:
   workflow_dispatch: # 允许你随时在网页上点按钮手动体检
+  # 🔐 P2：发布流程（version.yml -> build.yml）会调用本工作流做发布前门禁，
+  # 因此这里必须声明 workflow_call，否则 `uses: ./.github/workflows/test.yml` 会报错。
+  workflow_call:
   # 推到这些分支时也自动体检（原配置只在提 PR 时跑，直接推 main 不会触发）
   push:
     branches:

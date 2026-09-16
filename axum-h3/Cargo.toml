@@ -1,0 +1,31 @@
+# axum-h3 0.0.6（内嵌副本，MIT）
+#
+# 本项目对它做过本地修改（见 ../axum-h3/VENDORED.md），核心一条：
+# 把客户端对端地址注入每个请求，供 axum 的 `ConnectInfo<SocketAddr>` 使用。
+#
+# 这里只保留构建所需的最小内容：包信息 + 依赖。上游发布包里的
+# autolib/autotests 等规范化开关与文档字段对构建没有影响，已一并去掉。
+
+[package]
+name = "axum-h3"
+version = "0.0.6"
+edition = "2024"
+description = "HTTP/3 for axum（smartdns-edge 内嵌副本，含对端地址注入）"
+license = "MIT"
+repository = "https://github.com/youyuanwu/tonic-h3"
+resolver = "2"
+
+[lib]
+name = "axum_h3"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false }
+futures = "0.3"
+h3 = "0.0.8"
+h3-util = { version = "0.0.6", default-features = false }
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["service", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["macros"] }
+tower = { version = "0.5", default-features = false, features = ["buffer", "util"] }
+tracing = { version = "0.1", features = ["log"] }

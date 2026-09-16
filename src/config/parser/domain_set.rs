@@ -14,17 +14,32 @@ impl NomParser for DomainSetProvider {
 
 /// domain-set -type list -file /path/to/list
 /// domain-set -type list -f /path/to/list
+/// 🔐 P2：`-interval` 现在**真的生效**了（`App` 里的定时任务会按它重建配置，把新名单展开进规则树）。
+/// 间隔太短会让配置被频繁重载，这里提醒一句。
+fn warn_if_interval_too_short(name: &str, interval: Option<usize>) {
+    if let Some(secs) = interval.filter(|secs| *secs > 0 && *secs < 10) {
+        crate::log::warn!(
+            "domain-set {}: -interval {} 秒太短，会频繁重载配置（建议 ≥ 10 秒）",
+            name,
+            secs
+        );
+    }
+}
+
 impl NomParser for DomainSetFileProvider {
     fn parse(input: &str) -> IResult<&str, Self> {
         let mut name = None;
         let mut file = None;
+        let mut interval = None;
         let mut content_type = Default::default();
 
         let one = alt((
             map(
+                // 显式写 `String::parse`：不写的话，下面 `&name`（要 `&str`）会把推断带偏，
+                // 编译器会把 name 推成 `str` 然后报一堆 "the size for values of type str"。
                 options::parse_value(
                     alt((tag_no_case("name"), tag_no_case("n"))),
-                    NomParser::parse,
+                    String::parse,
                 ),
                 |v| {
                     name = Some(v);
@@ -33,11 +48,20 @@ impl NomParser for DomainSetFileProvider {
             map(
                 options::parse_value(
                     alt((tag_no_case("file"), tag_no_case("f"))),
-                    NomParser::parse,
+                    PathBuf::parse,
                 ),
                 |v| {
                     file = Some(v);
                 },
+            ),
+            // 🔐 P2：本地文件名单同样支持 `-interval` —— 文件内容也是在配置构建时展开进
+            // 规则树的，所以"文件改了要生效"和远程名单一样需要定期重建配置。
+            map(
+                options::parse_value(
+                    alt((tag_no_case("interval"), tag_no_case("i"))),
+                    NomParser::parse,
+                ),
+                |v: usize| interval = Some(v),
             ),
             map(
                 options::parse_value(
@@ -53,11 +77,14 @@ impl NomParser for DomainSetFileProvider {
         let (rest_input, _) = separated_list1(space1, one).parse(input)?;
 
         if let (Some(name), Some(file)) = (name, file) {
+            warn_if_interval_too_short(&name, interval);
+
             return Ok((
                 rest_input,
                 DomainSetFileProvider {
                     name,
                     file,
+                    interval,
                     content_type,
                 },
             ));
@@ -119,6 +146,11 @@ impl NomParser for DomainSetHttpProvider {
         let (rest_input, _) = separated_list1(space1, one).parse(input)?;
 
         if let (Some(name), Some(url)) = (name, url) {
+            // 🔐 P2：`-interval` 现在真的生效了 —— `App` 里的定时任务会按它重建配置，
+            // 把新名单展开进规则树；未到自己周期的名单用内存缓存，不会被顺带重下。
+            // （原来这里只告警说"不生效"，因为当时确实没有消费者。）
+            warn_if_interval_too_short(&name, interval);
+
             return Ok((
                 rest_input,
                 DomainSetHttpProvider {
@@ -158,6 +190,7 @@ mod tests {
                 DomainSetProvider::File(DomainSetFileProvider {
                     name: "proxy-server".to_string(),
                     file: PathBuf::from("proxy-server-list.txt"),
+                    interval: None,
                     content_type: Default::default(),
                 })
             ))
@@ -170,6 +203,7 @@ mod tests {
                 DomainSetProvider::File(DomainSetFileProvider {
                     name: "set".to_string(),
                     file: PathBuf::from("/path/to/list"),
+                    interval: None,
                     content_type: Default::default(),
                 })
             ))
@@ -182,6 +216,7 @@ mod tests {
                 DomainSetProvider::File(DomainSetFileProvider {
                     name: "set".to_string(),
                     file: PathBuf::from("/path/to/list"),
+                    interval: None,
                     content_type: Default::default(),
                 })
             ))
@@ -194,6 +229,7 @@ mod tests {
                 DomainSetProvider::File(DomainSetFileProvider {
                     name: "set".to_string(),
                     file: PathBuf::from("/path/to/list"),
+                    interval: None,
                     content_type: Default::default(),
                 })
             ))
@@ -206,6 +242,7 @@ mod tests {
                 DomainSetProvider::File(DomainSetFileProvider {
                     name: "set".to_string(),
                     file: PathBuf::from("/path/to/list"),
+                    interval: None,
                     content_type: Default::default(),
                 })
             ))

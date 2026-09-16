@@ -61,17 +61,17 @@ impl NomParser for DomainRule {
             map(
                 parse_value(tag_no_case("rr-ttl-min"), NomParser::parse),
                 |v| {
-                    rule.rr_ttl_min = Some(v);
+                    rule.rr_ttl_min = Some(crate::config::sanitize_ttl("rr-ttl-min", v));
                 },
             ),
             map(
                 parse_value(tag_no_case("rr-ttl-max"), NomParser::parse),
                 |v| {
-                    rule.rr_ttl_max = Some(v);
+                    rule.rr_ttl_max = Some(crate::config::sanitize_ttl("rr-ttl-max", v));
                 },
             ),
             map(parse_value(tag_no_case("rr-ttl"), NomParser::parse), |v| {
-                rule.rr_ttl = Some(v);
+                rule.rr_ttl = Some(crate::config::sanitize_ttl("rr-ttl", v));
             }),
             map(unkown_options, |(n, v)| {
                 log::warn!("domain rule: unkown options {}={:?}", n, v);

@@ -122,4 +122,40 @@ mod test {
         let n = WildcardName::from_str("*").unwrap();
         assert_eq!(n, WildcardName::Sub(Default::default(), Name::root()));
     }
+
+    /// 🔐 P2：`FromStr` 必须吃完整个输入 —— 尾部还有内容就报错，
+    /// 绝不"截断成一个合法域名"（旧行为：`"www.baidu.com 垃圾"` → `www.baidu.com`）。
+    /// 接口入参（`serde_str`）走的就是这条 `FromStr`。
+    #[test]
+    fn test_from_str_must_consume_all_input() {
+        use std::str::FromStr;
+
+        // 合法输入：照旧接受（首尾空白允许）
+        assert_eq!(
+            Domain::from_str("www.baidu.com").unwrap(),
+            Domain::Name("www.baidu.com".parse().unwrap())
+        );
+        assert_eq!(
+            Domain::from_str("  www.baidu.com  ").unwrap(),
+            Domain::Name("www.baidu.com".parse().unwrap())
+        );
+
+        // 尾部还有内容：一律报错（这些在改前都会被静默截断成 www.baidu.com）
+        for bad in [
+            "www.baidu.com 垃圾",
+            "www.baidu.com#注释",
+            "www.baidu.com/evil",
+            "www.baidu.com<-x",
+            "www.baidu.com|随便写点什么",
+        ] {
+            assert!(Domain::from_str(bad).is_err(), "{bad:?} 应被拒绝，不能被截断");
+        }
+
+        // 注意：nom 那一层（`Domain::parse`）的语义**不变**，仍然只吃到停止符为止；
+        // 严格性只在 `FromStr` 这一层加（配置文件的行解析靠上层看剩余输入）。
+        assert_eq!(
+            Domain::parse("www.baidu.com 垃圾").unwrap().0.trim(),
+            "垃圾"
+        );
+    }
 }

@@ -56,7 +56,7 @@
 | group-begin | rule group start | None | Group name:<br />[-inherit group-name]: inherit configuration from `group-name`.<br />Used with group-end, configurations between them belong to the group. | group-begin group-name |
 | group-end | rule group end | None | Used with group-begin. | group-end |
 | group-match | Match group rules | None | Use the corresponding rule group when conditions are met. <br />[-g\|group group-name]: Specify rule group.<br />[-client-ip ip-set\|ip/cidr\|mac address]: Match client.<br />[-domain domain]: Match domain name. | group-match -client-ip 1.1.1.1 -domain a.com |
-| conf-file | additional conf file | None | file [-g\|-group group-name] [-p\|-proxy proxy-name]<br /> file: File path or remote URL. <br />[-p\|-proxy]: Specify proxy server to download remote conf-file. | conf-file https://site/rule.conf -p clash <br />Duplicate or circular includes are de-duplicated automatically and never recurse |
+| conf-file | additional conf file | None | path<br />path: **local** configuration file path (HTTP/HTTPS download is not supported; use domain-set -url for remote rule lists) | conf-file /etc/smartdns/more.conf <br />Duplicate or circular includes are de-duplicated automatically and never recurse |
 | proxy-server | proxy server | None | Repeatable. <br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]:  proxy server name. | proxy-server socks5://user:pass@127.0.0.1:1080 -name proxy |
 > Passwords in proxy URLs are masked automatically in logs and debug output.
 
@@ -81,7 +81,7 @@
 | nftset-no-speed | Set IP to nftset when speed check fails | None | nftset-no-speed [#4\|#6]:[family#nftable#nftset] | nftset-no-speed #4:inet#tab#set4 |
 | nftset-debug | nftset debug enable | no | [yes\|no] | nftset-debug yes |
 | domain-rules | set domain rules | None | domain-rules /domain/ [-rules...]<br /> Options refer to speed-check-mode, address, nameserver, nftset, etc. | domain-rules /www.example.com/ -speed-check-mode none |
-| domain-set | collection of domains | None | domain-set [options...]<br />[-n\|-name]: name of set <br />[-t\|-type] [list]: set type <br />[-f\|-file]: file path or remote URL<br />[-p\|-proxy name]: Specify proxy server to download remote list. | domain-set -name set -file https://x.com/list -proxy proxy |
+| domain-set | collection of domains | None | domain-set [options...]<br />[-n\|-name]: name of set <br />[-t\|-type] [list]: set type <br />[-f\|-file]: **local** file path of the set<br />[-u\|-url]: remote list URL (HTTP/HTTPS; use instead of -file)<br />[-i\|-interval]: auto-refresh period in seconds; re-reads the file / re-downloads the remote list when it elapses (no refresh when omitted)<br />[-p\|-proxy name]: Specify proxy server to download remote list. | domain-set -name set -url https://x.com/list -proxy proxy |
 | client-rules | Client rules | None | [ip-set\|ip/subnet\|mac address] [-g\|group group-name] [-rules...] <br />Set client rules and rule groups. | client-rules 192.168.1.1 -g group-tv |
 | bogus-nxdomain | bogus IP address | None | [IP/subnet], Repeatable | bogus-nxdomain 1.2.3.4/16 |
 | ignore-ip | ignore ip address | None | [ip/subnet], Repeatable | ignore-ip 1.2.3.4/16 |
@@ -89,7 +89,7 @@
 | blacklist-ip | ip blacklist | None | [ip/subnet], Repeatable | blacklist-ip 1.2.3.4/16 |
 | ip-alias | IP alias | None | [ip/subnet] ip1[,[ip2]...]，Repeatable | ip-alias 1.2.3.4/16 4.5.6.7 |
 | ip-rules | IP rules | None | [ip/subnet] [-rules...]<br /> Supports -blacklist-ip, -whitelist-ip, etc. | ip-rules 1.2.3.4/16 -whitelist-ip |
-| ip-set | collection of IPs | None | ip-set [options...]<br />[-n\|-name]: name of ip set <br />[-t\|-type]: list <br />[-f\|-file]: file path or remote URL<br />[-p\|-proxy name]: Specify proxy server to download remote list. | ip-set -name set -file /path/to/list -proxy proxy |
+| ip-set | collection of IPs | None | ip-set [options...]<br />[-n\|-name]: name of ip set <br />[-t\|-type]: list <br />[-f\|-file]: **local** file path of the IP set (remote URL is not supported) | ip-set -name set -file /path/to/list |
 | force-AAAA-SOA | force AAAA query return SOA | no | [yes\|no] | force-AAAA-SOA yes |
 | force-no-CNAME | force No CNAME record | no | [yes\|no] | force-no-CNAME yes |
 | prefetch-domain | domain prefetch feature | no | [yes\|no] | prefetch-domain yes |

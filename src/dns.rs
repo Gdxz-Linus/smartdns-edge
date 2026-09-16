@@ -39,6 +39,20 @@ pub struct DnsContext {
 impl DnsContext {
     pub fn new(name: &Name, cfg: Arc<RuntimeConfig>, server_opts: ServerOpts) -> Self {
         let group_name = server_opts.rule_group.as_deref().unwrap_or_default();
+
+        // 🔐 P2（用户定策）：规则组不存在 → 走默认组（下面 find_domain_rule 本来就会回退到
+        // default 组找域规则），但必须**点名告警一次** —— 否则用户拼错组名 / 改名后忘了同步，
+        // 永远不知道自己其实没在用那套规则（只报一次，别在热路径上刷屏）。
+        if !cfg.has_rule_group(group_name) && crate::log::warn_once(&format!("rule-group:{group_name}"))
+        {
+            crate::log::warn!(
+                "配置里没有名为 \"{}\" 的规则组（查询 {} 命中了它）：已改用默认组的规则。\
+                 请检查 group-begin / client-rules 里的组名是否拼错或已改名",
+                group_name,
+                name
+            );
+        }
+
         let domain_rule = cfg.find_domain_rule(name, group_name);
 
         let no_cache = domain_rule.get(|n| n.no_cache).unwrap_or_default();

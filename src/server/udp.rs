@@ -19,6 +19,9 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
         
         log::debug!("UDP IO Reactor started");
 
+        // 🔐 P2：连续收包出错的次数（用于退避 + 日志降频）
+        let mut err_streak: u32 = 0;
+
         loop {
             // 定期清理已完成的发送子任务，防止内存泄漏
             reap_tasks(&mut inner_join_set);
@@ -31,9 +34,26 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
             let (_len, src_addr) = tokio::select! {
                 // 🌟 使用 recv_buf_from 替代 recv_from，直接写入内存池并自动步进指针！
                 res = socket.recv_buf_from(&mut buf) => match res {
-                    Ok(res) => res,
+                    Ok(res) => {
+                        // 收包恢复正常：退避计数归零
+                        err_streak = 0;
+                        res
+                    }
                     Err(e) => {
-                        log::warn!("error receiving message on udp_socket: {}", e);
+                        // 🔐 P2：不再"出错就立刻 continue"——持续性错误（网卡消失、fd 耗尽）
+                        // 会让循环 100% CPU 空转并把日志刷爆。这里退避 + 日志降频。
+                        err_streak = err_streak.saturating_add(1);
+                        if crate::server::should_log_stream_error(err_streak) {
+                            log::warn!(
+                                "error receiving message on udp_socket（连续第 {} 次）: {}",
+                                err_streak,
+                                e
+                            );
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(crate::server::error_backoff_delay(err_streak)) => {}
+                            _ = cancellation_token.cancelled() => break,
+                        }
                         continue;
                     }
                 },

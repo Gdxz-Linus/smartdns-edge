@@ -277,9 +277,7 @@ dependencies = [
 
 [[package]]
 name = "axum-h3"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f734ad750ac04711db93582e340bc2effb3cf0ba3e12621869e81585153b99d"
+version = "0.0.6"
 dependencies = [
  "axum 0.8.4",
  "futures",
@@ -1193,14 +1191,16 @@ dependencies = [
 
 [[package]]
 name = "h3-util"
-version = "0.0.3"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cebf30a639e7dd660bd9df063da86c8678fa50ec331e0280e2fb5d999963d01a"
+checksum = "df853a026dd43ad24c6e008109597492bf1a646c5b305ce112ec9bbf3f1355da"
 dependencies = [
+ "bytes",
  "futures",
  "h3",
  "h3-quinn",
  "hyper",
+ "hyper-util",
  "tokio",
  "tower 0.5.2",
  "tracing",
@@ -3031,6 +3031,7 @@ dependencies = [
  "futures-intrusive",
  "futures-util",
  "glob",
+ "h3-quinn",
  "h3-util",
  "hickory-proto",
  "hickory-resolver",
@@ -3482,6 +3483,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

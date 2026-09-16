@@ -223,7 +223,9 @@ impl Clone for PingError {
             Self::Timeout => Self::Timeout,
             Self::IoError(err) => Self::IoError(err.kind().into()),
             Self::SurgeError => Self::SurgeError,
-            Self::NoAddress => Self::SurgeError,
+            // 🔐 P2：原来是 `Self::NoAddress => Self::SurgeError` —— 复制粘贴笔误，
+            // 克隆一个 "No address" 错误会变成 "surge error"，错误语义丢失。
+            Self::NoAddress => Self::NoAddress,
         }
     }
 }

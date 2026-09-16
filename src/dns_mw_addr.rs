@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use crate::dns::*;
@@ -64,14 +63,19 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
         let res = next.run(ctx, req).await;
 
         match res {
-            Ok(lookup) => Ok({
-                let mut records = Cow::Borrowed(lookup.records());
+            Ok(mut lookup) => {
+                // 🔐 P2 修复：这里是"给客户端看的最终修饰"，必须**原地修改**，
+                // 不能再像原来那样用 new_with_deadline 重建响应体 —— 重建只搬运 Answer 区，
+                // 会把 Authority 区的 SOA（否定缓存的关键）、附加区的胶水记录、rcode 以及 EDNS 全丢掉。
+                // 症状：只要配置了 rr-ttl-reply-max，所有 NXDOMAIN/NODATA 的 SOA 就消失，
+                // 客户端的否定缓存随之失效。
 
+                // 1) max-reply-ip-num：截断 Answer 区的 IP 记录
                 if query_type.is_ip_addr()
                     && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
                         && max_reply_ip_num > 0 {
                             let mut truncate = None;
-                            for (i, r) in records.iter().enumerate() {
+                            for (i, r) in lookup.answers().iter().enumerate() {
                                 if matches!(r.data(), RData::A(_) | RData::AAAA(_)) {
                                     max_reply_ip_num -= 1;
                                     if max_reply_ip_num == 0 {
@@ -81,35 +85,30 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                                 }
                             }
 
-                            match truncate {
-                                Some(truncate) if records.len() > truncate => {
-                                    records.to_mut().truncate(truncate);
+                            if let Some(truncate) = truncate
+                                && lookup.answers().len() > truncate {
+                                    lookup.answers_mut().truncate(truncate);
+                                    lookup.sync_header_counts();
                                 }
-                                _ => (),
-                            }
                         }
 
-                let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
-
-                if let Some(reply_max) = rr_ttl_reply_max {
-                    for record in records.to_mut() {
-                        // 如果冰柜给出的寿命大于视觉欺骗的上限，强行涂改成骗客户端的上限
-                        let current_ttl = record.ttl();
-                        if current_ttl > reply_max {
-                            record.set_ttl(reply_max); 
+                // 2) rr-ttl-reply-max：把"给客户端看的 TTL"统一压到上限以内。
+                //    Answer 与 Authority（SOA）都要压 —— 否定响应的寿命正写在 SOA 里。
+                if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
+                    for record in lookup.answers_mut() {
+                        if record.ttl() > reply_max {
+                            record.set_ttl(reply_max);
+                        }
+                    }
+                    for record in lookup.authorities_mut() {
+                        if record.ttl() > reply_max {
+                            record.set_ttl(reply_max);
                         }
                     }
                 }
 
-                match records {
-                    Cow::Owned(records) => DnsResponse::new_with_deadline(
-                        lookup.query().clone(),
-                        records,
-                        lookup.valid_until(),
-                    ),
-                    Cow::Borrowed(_) => lookup,
-                }
-            }),
+                Ok(lookup)
+            }
             Err(err) => Err(err),
         }
     }

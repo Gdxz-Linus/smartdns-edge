@@ -105,13 +105,19 @@ fn setup_socket<'a, T: Into<SockRef<'a>>>(
     #[cfg(not(windows))]
     sock_ref.set_reuse_address(true)?;
 
+    // 🔐 P2：reuse_port 只给 UDP 用。
+    // 它对 TCP 监听同样生效时，Linux/macOS 上同 UID 的另一个进程可以抢绑同一个端口、
+    // 并由内核把新连接分给它 —— 与这段代码"把防多开底线交还内核"的初衷正好相反。
+    // UDP 保留它（多实例共用 53 端口的既定用法），TCP 交给内核独占。
     #[cfg(not(any(
         target_os = "solaris",
         target_os = "illumos",
         target_os = "cygwin",
         target_os = "windows"
     )))]
-    sock_ref.set_reuse_port(true)?;
+    if sock_typ == Type::DGRAM {
+        sock_ref.set_reuse_port(true)?;
+    }
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     if let Some(device) = bind_device {

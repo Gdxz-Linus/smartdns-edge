@@ -324,10 +324,18 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("mdns-lookup"), ConfigItem::MdnsLookup),
         map(config("nameserver"), ConfigItem::ForwardRule),
         map(config("proxy-server"), ConfigItem::ProxyConfig),
-        map(config("rr-ttl-reply-max"), ConfigItem::RrTtlReplyMax),
-        map(config("rr-ttl-min"), ConfigItem::RrTtlMin),
-        map(config("rr-ttl-max"), ConfigItem::RrTtlMax),
-        map(config("rr-ttl"), ConfigItem::RrTtl),
+        map(config("rr-ttl-reply-max"), |v: u64| {
+            ConfigItem::RrTtlReplyMax(sanitize_ttl("rr-ttl-reply-max", v))
+        }),
+        map(config("rr-ttl-min"), |v: u64| {
+            ConfigItem::RrTtlMin(sanitize_ttl("rr-ttl-min", v))
+        }),
+        map(config("rr-ttl-max"), |v: u64| {
+            ConfigItem::RrTtlMax(sanitize_ttl("rr-ttl-max", v))
+        }),
+        map(config("rr-ttl"), |v: u64| {
+            ConfigItem::RrTtl(sanitize_ttl("rr-ttl", v))
+        }),
         map(config("resolv-file"), ConfigItem::ResolvFile),
     ));
 
@@ -403,6 +411,41 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// 🔐 P2：`parse_config` 的"剩余输入"必须能被上层看见 —— 配置加载就靠它告警。
+    ///
+    /// 关键事实（也是这个 bug 的根因）：语法里 `space0` 那个兜底分支是**零宽**匹配，
+    /// 所以任何一行都至少能被解析成"空行"，`parse_config` **永远不会返回 Err**
+    /// —— 原来 `Err(err) => warn!("unknown conf: ...")` 是死代码，拼错的关键字整行静默消失。
+    #[test]
+    fn test_parse_config_reports_leftover() {
+        // 正常配置项：剩余为空
+        let (rest, item) = parse_config("address /a.test/1.2.3.4").unwrap();
+        assert!(rest.is_empty(), "剩余应为空，实际 {rest:?}");
+        assert!(item.is_some());
+
+        // 行尾注释：注释被语法吃掉，剩余仍为空（所以正常配置不会误报）
+        let (rest, item) = parse_config("address /a.test/1.2.3.4   # 行尾注释").unwrap();
+        assert!(rest.is_empty(), "剩余应为空，实际 {rest:?}");
+        assert!(item.is_some());
+
+        // 行尾粘了别的东西：配置项认出来了，但剩余不为空 → 上层告警"尾部有无法识别的内容"
+        let (rest, item) = parse_config("address /a.test/1.2.3.4 垃圾").unwrap();
+        assert_eq!(rest.trim(), "垃圾");
+        assert!(item.is_some());
+
+        // 关键字拼错：整行谁都不认 → **返回 Ok**（不是 Err！），剩余 = 整行，item = None
+        let (rest, item) = parse_config("addres /a.test/1.2.3.4").unwrap();
+        assert_eq!(rest, "addres /a.test/1.2.3.4");
+        assert!(item.is_none());
+
+        // 注释行 / 空白行：剩余为空（不该告警）
+        let (rest, _) = parse_config("# 注释").unwrap();
+        assert!(rest.is_empty(), "注释行剩余应为空，实际 {rest:?}");
+        let (rest, item) = parse_config("   ").unwrap();
+        assert!(rest.trim().is_empty());
+        assert!(item.is_none());
+    }
 
     #[test]
     fn test_nftset() {
@@ -521,6 +564,7 @@ mod tests {
                 ConfigItem::DomainSetProvider(DomainSetProvider::File(DomainSetFileProvider {
                     name: "outbound".to_string(),
                     file: Path::new("/etc/smartdns/geoip.txt").to_path_buf(),
+                    interval: None,
                     content_type: Default::default(),
                 }))
                 .into()
@@ -534,6 +578,7 @@ mod tests {
                 ConfigItem::DomainSetProvider(DomainSetProvider::File(DomainSetFileProvider {
                     name: "proxy-server".to_string(),
                     file: Path::new("proxy-server-list.txt").to_path_buf(),
+                    interval: None,
                     content_type: Default::default(),
                 }))
                 .into()

@@ -17,6 +17,8 @@ struct HostsCache {
     hosts: Arc<Hosts>,
     signature: HostsFileSignature,
     checked_at: Instant,
+    /// 🔐 P2：这份缓存是不是"读到了非空白内容"。用来识别"文件正在被原子替换时读到的空结果"。
+    has_content: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,22 +70,53 @@ impl DnsHostsMiddleware {
             }
         }
 
-        // 🌟 核心修复：外包实际的 hosts 文件读取
-        let refreshed_hosts = Arc::new(tokio::task::spawn_blocking(move || {
-            match pattern_str {
-                Some(ref pattern) => read_hosts(pattern),
-                None => Hosts::default(),
-            }
-        }).await.unwrap());
+        // 🔐 P2：hosts 文件被"原子替换"（写新文件 + rename）的瞬间，轮询恰好读到的是空文件。
+        // 原实现直接拿它覆盖缓存 → 内网域名突然全部转去公网解析。
+        // 现在的处理（同目录 dnsmasq 的实现也是保守的）：读到空内容而旧缓存是有内容的，
+        // 就稍等 200ms 再读一次；两次都空才认账 —— 这样"用户真的清空了 hosts"依然能生效。
+        let prev_has_content = self
+            .0
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|c| c.has_content);
 
+        let (mut refreshed, mut has_content) = read_hosts_blocking(pattern_str.clone()).await;
+
+        if !has_content && prev_has_content {
+            log::debug!("hosts 文件本次读到空内容，稍后重读一次（可能是文件正在被替换）");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let (hosts2, content2) = read_hosts_blocking(pattern_str.clone()).await;
+            refreshed = hosts2;
+            has_content = content2;
+
+            if !has_content {
+                log::warn!(
+                    "hosts 文件连续两次都读到空内容，按空处理（如果这不是你的本意，请检查 hosts-file 配置）"
+                );
+            }
+        }
+
+        let refreshed_hosts = Arc::new(refreshed);
         let mut cache = self.0.write().await;
         *cache = Some(HostsCache {
             hosts: refreshed_hosts.clone(),
             signature,
             checked_at: now,
+            has_content,
         });
         refreshed_hosts
     }
+}
+
+/// 在阻塞线程里读 hosts（`read_hosts` 里有文件 IO）。
+async fn read_hosts_blocking(pattern: Option<String>) -> (Hosts, bool) {
+    tokio::task::spawn_blocking(move || match pattern {
+        Some(ref pattern) => read_hosts(pattern),
+        None => (Hosts::default(), false),
+    })
+    .await
+    .unwrap()
 }
 
 const HOSTS_FILE_STAT_INTERVAL: Duration = Duration::from_secs(2);
@@ -181,8 +214,10 @@ fn system_hosts_paths() -> Vec<String> {
     Vec::new()
 }
 
-fn read_hosts(pattern: &str) -> Hosts {
+fn read_hosts(pattern: &str) -> (Hosts, bool) {
     let mut hosts = Hosts::default();
+    // 🔐 P2：是否读到过非空白内容（用来识别"原子替换瞬间读到的空文件"）
+    let mut has_content = false;
     match glob::glob(pattern) {
         Ok(paths) => {
             for entry in paths {
@@ -199,15 +234,19 @@ fn read_hosts(pattern: &str) -> Hosts {
                     }
                 };
 
-                let file = match std::fs::OpenOptions::new().read(true).open(path) {
-                    Ok(file) => file,
+                let content = match std::fs::read(&path) {
+                    Ok(content) => content,
                     Err(err) => {
                         log::error!("{}", err);
                         continue;
                     }
                 };
 
-                if let Err(err) = hosts.read_hosts_conf(file) {
+                if content.iter().any(|b| !b.is_ascii_whitespace()) {
+                    has_content = true;
+                }
+
+                if let Err(err) = hosts.read_hosts_conf(&content[..]) {
                     log::error!("{}", err);
                 }
             }
@@ -216,7 +255,7 @@ fn read_hosts(pattern: &str) -> Hosts {
             log::error!("{}", err);
         }
     }
-    hosts
+    (hosts, has_content)
 }
 
 #[cfg(test)]
@@ -233,6 +272,25 @@ mod tests {
     use super::*;
 
     use crate::{dns_conf::RuntimeConfig, dns_mw::*};
+
+    /// 🔐 P2：空 hosts 文件必须能被识别出来 —— 它是"文件正在被原子替换时读到空结果"
+    /// 这套保守处理的判据。
+    #[test]
+    fn test_read_hosts_reports_content() -> anyhow::Result<()> {
+        let dir = TempDirGuard::new("hosts-content")?;
+
+        let empty = dir.path.join("empty.hosts");
+        std::fs::write(&empty, b"\n   \n")?;
+        let (_, has_content) = read_hosts(empty.to_str().unwrap());
+        assert!(!has_content, "只有空白的 hosts 文件应报告 has_content=false");
+
+        let filled = dir.path.join("filled.hosts");
+        std::fs::write(&filled, b"127.0.0.1  p2-test.local\n")?;
+        let (_, has_content) = read_hosts(filled.to_str().unwrap());
+        assert!(has_content, "有内容的 hosts 文件应报告 has_content=true");
+
+        Ok(())
+    }
 
     struct TempDirGuard {
         path: PathBuf,

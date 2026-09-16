@@ -56,7 +56,7 @@
 | group-begin | 规则组开始 | 无 | [group-name]: 组名<br /> [-inherit group-name]:继承配置的组, `none`表示不继承。<br />启用此参数后，其后的配置项将设置到对应的组中，直到 group-end。| group-begin group-name | 
 | group-end | 规则组结束 | 无 | 和group-begin搭配使用 | group-end |
 | group-match | 匹配组规则 | 无 | 当满足条件时使用对应的规则组<br />[-g\|group group-name]: 指定规则组，不指定时使用当前组。<br />[-client-ip ip-set\|ip/cidr\|mac address]: 匹配指定客户端 IP 或 MAC。<br />[-domain domain]: 匹配指定域名。 | group-match -client-ip 1.1.1.1 -domain a.com |
-| conf-file | 附加配置文件 | 无 | path [-g\|group group-name] [-p\|-proxy proxy-name]<br />path: 本地路径或支持 HTTP/HTTPS 在线下载 <br />[-p\|-proxy]: 指定通过代理服务器下载远程配置文件 | conf-file /etc/smartdns/more.conf <br /> conf-file https://site.com/rule.conf -p clash <br />重复包含或循环包含会被自动去重，不会递归崩溃 |
+| conf-file | 附加配置文件 | 无 | path<br />path: **本地**配置文件路径（不支持 HTTP/HTTPS 在线下载；远程规则集请用 domain-set 的 -url） | conf-file /etc/smartdns/more.conf <br />重复包含或循环包含会被自动去重，不会递归崩溃 |
 | proxy-server | 代理服务器 | 无 | 可重复。<br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]: 代理服务器名称。 |proxy-server socks5://user:pass@1.2.3.4:1080 -name proxy|
 > 日志与调试输出中的代理密码会自动打码，不会以明文出现。
 
@@ -81,7 +81,7 @@
 | nftset-no-speed | 测速失败设置结果到 nftset | 无 | nftset-no-speed [#4\|#6]:[family#nftable#nftset] | nftset-no-speed #4:inet#tab#set4|
 | nftset-debug | 设置 nftset 调试功能启用  | no | [yes\|no] | nftset-debug yes |
 | domain-rules | 设置域名规则 | 无 | domain-rules /domain/ [-rules...]<br />可选参数参考 speed-check-mode, address, nameserver, nftset 等。| domain-rules /www.example.com/ -speed-check-mode none |
-| domain-set | 设置域名集合 | 无 | domain-set [options...]<br />[-n\|-name]：域名集合名称 <br />[-t\|-type]：域名集合类型 (list)<br />[-f\|-file]：域名集合文件路径 (支持远程URL)<br />[-p\|-proxy]：指定代理服务器下载远程规则集文件 | domain-set -name set -file https://x.com/list -proxy clash |
+| domain-set | 设置域名集合 | 无 | domain-set [options...]<br />[-n\|-name]：域名集合名称 <br />[-t\|-type]：域名集合类型 (list)<br />[-f\|-file]：**本地**域名集合文件路径<br />[-u\|-url]：远程域名集合地址（HTTP/HTTPS，与 -file 二选一）<br />[-i\|-interval]：自动刷新周期（秒），到期后重新读取文件 / 重新下载远程名单，不配置则不自动刷新<br />[-p\|-proxy]：指定代理服务器下载远程规则集文件 | domain-set -name set -url https://x.com/list -proxy clash |
 | client-rules | 客户端规则 | 无 | [ip-set\|ip/subnet\|mac address] [-g\|group group-name] [-rules...]<br />设置客户端规则和规则组。 | client-rules 192.168.1.1 -g oversea |
 | bogus-nxdomain | 假冒 IP 地址过滤 | 无 | [ip/subnet]，可重复 | bogus-nxdomain 1.2.3.4/16 |
 | ignore-ip | 忽略 IP 地址 | 无 | [ip/subnet]，可重复 | ignore-ip 1.2.3.4/16 |
@@ -89,7 +89,7 @@
 | blacklist-ip | 黑名单 IP 地址 | 无 | [ip/subnet]，可重复 | blacklist-ip 1.2.3.4/16 |
 | ip-alias | IP 地址别名 | 无 | [ip/subnet] ip1[,[ip2]...]，可重复 | ip-alias 1.2.3.4/16 4.5.6.7|
 | ip-rules | IP 地址规则 | 无 | [ip/subnet] [-rules...]<br /> 支持配置 -blacklist-ip, -whitelist-ip, -bogus-nxdomain 等。 | ip-rules 1.2.3.4/16 -whitelist-ip|
-| ip-set | 设置 IP 地址集合 | 无 | ip-set [options...]<br />[-n\|-name]：IP地址集合名称 <br />[-t\|-type]：仅支持list<br />[-f\|-file]：IP地址集合文件路径 (支持远程URL)<br />[-p\|-proxy]：指定代理服务器下载远程规则集文件 | ip-set -name set -file /path/to/list <br /> ip-rules ip-set:set -whitelist-ip|
+| ip-set | 设置 IP 地址集合 | 无 | ip-set [options...]<br />[-n\|-name]：IP地址集合名称 <br />[-t\|-type]：仅支持list<br />[-f\|-file]：**本地** IP 地址集合文件路径（不支持远程URL） | ip-set -name set -file /path/to/list <br /> ip-rules ip-set:set -whitelist-ip|
 | force-AAAA-SOA | 强制 AAAA 地址返回 SOA | no | [yes\|no] | force-AAAA-SOA yes |
 | force-no-CNAME | 强制 不返回 CNAME | no | [yes\|no] | force-no-CNAME yes |
 | prefetch-domain | 域名预先获取功能 | no | [yes\|no] | prefetch-domain yes |

@@ -119,8 +119,10 @@ either = { version = "1.12.0", optional = true }
 
 # webapi
 axum = { version = "0.8.1" }
-axum-h3 = "0.0.3"
-h3-util = { version = "0.0.3", default-features = false, features = ["quinn"]}
+# 🔐 内嵌副本（含"把客户端对端地址注入请求"的本地改动），见 axum-h3/VENDORED.md
+axum-h3 = { path = "axum-h3" }
+h3-util = { version = "0.0.6", default-features = false, features = ["quinn"]}
+h3-quinn = { version = "0.0.10", default-features = false }
 hyper = { version = "1.1.0", default-features = false }
 hyper-util = { version = "0.1.14", features = ["http2"]}
 tower = { version = "0.5.2", default-features = false }
@@ -146,6 +148,10 @@ tokio = { version = "1.46", features = [
   "parking_lot",
   "net",
   "io-util",
+  # 🔐 内嵌 axum-h3 0.0.6 后补：原来 `fs` 是 h3-util 0.0.3 顺带声明的 `features = ["full"]`
+  # 养出来的，新版把它收窄了。我们自己在 api/address.rs 用了 tokio::fs，就该自己声明。
+  "fs",
+  "sync",
 ] }
 tokio-rustls = { version = "0.26.0", default-features = false }
 tokio-util = "0.7.12"

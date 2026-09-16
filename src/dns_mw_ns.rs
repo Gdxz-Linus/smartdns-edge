@@ -111,8 +111,31 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             match name_server {
                 Some(ns) => ns,
                 None => {
-                    error!("no available nameserver found for {}", name);
-                    return Err(ProtoErrorKind::NoConnections.into());
+                    // 🔐 P2（用户定策）：服务器组不存在 → **不直接失败**，退回默认组并点名告警。
+                    // 组名是硬引用（拼错、改名后忘了同步都很常见），而 DNS 是家里的基础设施：
+                    // "能解析"优先于"严格报错"。但绝不能静默 —— 走默认组意味着可能换了一条出口，
+                    // 所以日志点名组名 + 触发它的域名，且只报一次。
+                    if ctx.cfg().has_server_group(group_name.as_str()) {
+                        error!("no available nameserver found for {}", name);
+                        return Err(ProtoErrorKind::NoConnections.into());
+                    }
+
+                    if crate::log::warn_once(&format!("server-group:{group_name}")) {
+                        crate::log::warn!(
+                            "配置里没有名为 \"{}\" 的上游服务器组（查询 {} 命中了它）：已退回默认组解析。\
+                             请检查 server/nameserver 行的 -group、bind 的 -group 与 nameserver /域名/组名 规则里的组名",
+                            group_name,
+                            name
+                        );
+                    }
+
+                    match client.get_server_group("default").await {
+                        Some(ns) => ns,
+                        None => {
+                            error!("no available nameserver found for {}", name);
+                            return Err(ProtoErrorKind::NoConnections.into());
+                        }
+                    }
                 }
             }
         };

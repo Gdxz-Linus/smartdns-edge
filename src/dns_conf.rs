@@ -203,6 +203,9 @@ impl RuntimeConfig {
             rule_groups: Default::default(),
             rule_group_stack: Default::default(),
             dirs: Default::default(),
+            // 默认强制重新取用名单：启动与手动重载都该拿到最新的。
+            // 只有 `-interval` 触发的定时刷新才把它设成 false（见 reload_new_reusing_domain_set_cache）。
+            force_domain_set_refresh: true,
         }
     }
 }
@@ -702,6 +705,29 @@ impl RuntimeConfig {
         self.rule_groups.get(name).unwrap_or(RuleGroup::empty())
     }
 
+    /// 🔐 P2（用户定策）：这个**规则组**名字在配置里真的存在吗？
+    ///
+    /// 用于"组不存在 → 走默认组 + 点名告警"：必须能区分"这个组确实定义了"和"名字根本没见过"
+    /// （拼错、改名后忘了同步、或者内部代码传了别的名字）。
+    pub fn has_rule_group(&self, name: &str) -> bool {
+        name.is_empty()
+            || name == DEFAULT_GROUP
+            || self.rule_groups.contains_key(name)
+            || self.client_rules.iter().any(|r| r.group == name)
+    }
+
+    /// 🔐 P2（用户定策）：这个**服务器组**名字在配置里真的存在吗？
+    ///
+    /// 已知来源：`server`/`nameserver` 行上的 `-group <名>`。默认组与空名恒为"存在"。
+    pub fn has_server_group(&self, name: &str) -> bool {
+        name.is_empty()
+            || name.eq_ignore_ascii_case(DEFAULT_GROUP)
+            || self
+                .servers()
+                .iter()
+                .any(|s| s.group.iter().any(|g| g == name))
+    }
+
     pub fn client_rules(&self) -> &[ClientRule] {
         &self.client_rules
     }
@@ -753,6 +779,21 @@ impl RuntimeConfig {
 
         Ok(Arc::new(builder.build()?))
     }
+
+    /// 🔐 P2：`domain-set -interval` 触发的定时刷新走这条路。
+    ///
+    /// 与 `reload_new`（启动 / 手动重载）的唯一区别：**未到自己 `-interval` 的名单直接用内存缓存**。
+    /// 否则一次定时刷新会把所有名单都重新下载一遍 —— 别的名单配的周期就白配了。
+    pub fn reload_new_reusing_domain_set_cache(&self) -> anyhow::Result<Arc<RuntimeConfig>> {
+        let builder = RuntimeConfigBuilder {
+            conf_dir: self.conf_dir.clone(),
+            conf_file: self.conf_file.clone(),
+            force_domain_set_refresh: false,
+            ..Self::builder()
+        };
+
+        Ok(Arc::new(builder.build()?))
+    }
 }
 
 impl std::ops::Deref for RuntimeConfig {
@@ -773,6 +814,9 @@ pub struct RuntimeConfigBuilder {
     rule_group_stack: Vec<(String, RuleGroup)>,
     loaded_files: HashSet<PathBuf>,
     dirs: HashSet<PathBuf>,
+    /// 🔐 P2：构建时是否**强制重新取用** domain-set 名单（忽略内存缓存）。
+    /// 启动与手动重载 = true；`-interval` 触发的定时刷新 = false。
+    force_domain_set_refresh: bool,
 }
 
 impl RuntimeConfigBuilder {
@@ -849,15 +893,18 @@ impl RuntimeConfigBuilder {
         for (set_name, providers) in &cfg.domain_set_providers {
             let set = domain_sets.entry(set_name.to_string()).or_default();
             for p in providers.iter() {
-                // 🌟 核心修复 2：将从配置文件里提取好的全部代理池 (proxy_servers) 
+                // 🌟 核心修复 2：将从配置文件里提取好的全部代理池 (proxy_servers)
                 // 传给底层下载器！打破次元壁！
-                match p.get_domain_set(&cfg.proxy_servers) {
+                //
+                // 🔐 P2：走"带 `-interval` 语义"的取用 —— 配了周期的名单未到期就用内存缓存，
+                // 不会被别人的刷新顺带重下；取用失败时保留上一次的名单（见 `get_with_cache`）。
+                match p.get_domain_set_cached(&cfg.proxy_servers, self.force_domain_set_refresh) {
                     Ok(s) => {
-                        log::info!("DoaminSet load {} records into {}", s.len(), p.name());
+                        log::info!("DomainSet {} 生效 {} 条规则", s.len(), p.name());
                         set.extend(s);
                     }
                     Err(err) => {
-                        log::error!("DoaminSet load failed {} {}", p.name(), err);
+                        log::error!("DomainSet load failed {} {}", p.name(), err);
                     }
                 }
             }
@@ -1062,8 +1109,29 @@ impl RuntimeConfigBuilder {
             if self.conf_file.is_none() {
                 self.conf_file = Some(path.clone());
             }
-            for line in reader.lines().map_while(Result::ok) {
-                self.config(line.as_str());
+            // 🔐 P2：原实现是 `reader.lines().map_while(Result::ok)` ——
+            // 配置文件里只要有一行不是合法 UTF-8，**这一行之后的全部配置就静默不加载**，
+            // 用户只会看到"我明明配了却不起作用"。
+            // 改成按字节读行 + 有损转换：坏字节只影响它自己那一行，并且明确告警。
+            let mut reader = reader;
+            let mut buf: Vec<u8> = Vec::new();
+            let mut lineno = 0usize;
+            loop {
+                buf.clear();
+                if reader.read_until(b'\n', &mut buf)? == 0 {
+                    break;
+                }
+                lineno += 1;
+
+                if std::str::from_utf8(&buf).is_err() {
+                    warn!(
+                        "配置文件 {:?} 第 {} 行含有非 UTF-8 字节，已按替换字符解析（该行之后照常加载）",
+                        path, lineno
+                    );
+                }
+
+                let line = String::from_utf8_lossy(&buf);
+                self.config_at(line.trim_end_matches(['\r', '\n']), Some(lineno));
             }
         } else {
             warn!("configuration file {:?} does not exist", path);
@@ -1072,7 +1140,41 @@ impl RuntimeConfigBuilder {
         Ok(())
     }
 
+    /// 解析一行配置（对外接口，行为与从前一致）。
     pub fn config(&mut self, line: &str) {
+        self.config_at(line, None);
+    }
+
+    /// 🔐 P2：解析一行配置，并把"这行有没有我们没认出来的内容"明确说出来。
+    ///
+    /// 背景：`parse_config` 的语法里有 `space0`（零宽）兜底分支 —— 任何一行至少都能被
+    /// 解析成"空行"，所以它**永远不会返回 Err**，原来那句
+    /// `Err(err) => warn!("unknown conf: ...")` 根本执行不到：关键字拼错的一整行就这样
+    /// 静默消失（服务照常起来、零提示）。这里改用"剩余输入是否为空"来判定，并把剩余内容报出来。
+    ///
+    /// 注：这里多解析一次（只为拿到剩余输入）。配置加载只发生在启动/配置重载，代价可忽略。
+    fn config_at(&mut self, line: &str, lineno: Option<usize>) {
+        if let Ok((rest, item)) = parser::parse_config(line) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                // 剩下来的就是"我们没认出来的东西"：
+                // item 为 None = 整行谁都不认（例如关键字拼错）；
+                // item 有值 = 配置项认出来了，但后面还粘着多余内容（例如行尾粘了别的东西）。
+                let detail = if item.is_none() {
+                    format!("未识别的配置行（已原样忽略）：{line:?}，请检查关键字拼写")
+                } else {
+                    format!("配置行尾部有无法识别的内容（已忽略）：{rest:?} —— 整行：{line:?}")
+                };
+                match lineno {
+                    Some(no) => warn!("配置文件第 {no} 行：{detail}"),
+                    None => warn!("{detail}"),
+                }
+            }
+        }
+        self.config_unchecked(line);
+    }
+
+    fn config_unchecked(&mut self, line: &str) {
         use crate::config::parser::ConfigItem::*;
         let rule_group = match self.rule_group_stack.last_mut() {
             Some((_, rule_group)) => rule_group,
@@ -1112,6 +1214,15 @@ impl RuntimeConfigBuilder {
                 DualstackIpAllowForceAAAA(v) => self.dualstack_ip_allow_force_aaaa = Some(v),
                 DualstackIpSelection(v) => self.dualstack_ip_selection = Some(v),
                 ServerName(v) => self.server_name = Some(v),
+                // 🔐 P2：`num-workers 0` 会让 tokio 一个工作线程都没有 —— 进程活着、端口也开着，
+                // 但一个查询都不会被解析，而且没有任何报错（用户只会以为"DNS 彻底坏了"）。
+                // 0 显然是笔误，这里忽略它、改用自动值，并把这件事明确说出来。
+                NumWorkers(0) => {
+                    crate::log::warn!(
+                        "配置项 num-workers 0 无意义（会让服务完全不解析），已忽略该值并改用自动计算的工作线程数"
+                    );
+                    self.num_workers = None;
+                }
                 NumWorkers(v) => self.num_workers = Some(v),
                 Domain(v) => self.domain = Some(v),
                 SpeedMode(v) => self.speed_check_mode = v,
@@ -1128,7 +1239,11 @@ impl RuntimeConfigBuilder {
                 RrTtlMin(v) => self.rr_ttl_min = Some(v),
                 RrTtlMax(v) => self.rr_ttl_max = Some(v),
                 RrTtlReplyMax(v) => self.rr_ttl_reply_max = Some(v),
-                Listener(listener) => self.binds.push(listener),
+                Listener(listener) => {
+                    // 🔐 P2：证书相对路径先锚定到配置文件所在目录，再入列表
+                    let listener = self.anchor_tls_cert_paths(listener);
+                    self.binds.push(listener);
+                }
                 LocalTtl(v) => self.local_ttl = Some(v),
                 LogConsole(v) => self.log.console = Some(v),
                 LogNum(v) => self.log.num = Some(v),
@@ -1267,6 +1382,33 @@ impl RuntimeConfigBuilder {
         }
     }
 
+    /// 🔐 P2：把 bind-tls / bind-https / bind-h3 的 `-ssl-certificate` / `-ssl-certificate-key`
+    /// 相对路径锚定到「配置文件所在目录」（与 `bind-cert-file` 走的是同一套 `resolve_filepath`）。
+    ///
+    /// 原实现把这串路径原样存下来，运行时按**进程当前工作目录**解析：以服务方式启动时
+    /// 那通常是 `/`（Windows 服务工作目录则是 System32），于是证书永远找不到，
+    /// 而且报错要等到监听器初始化才出现，离配置解析已经很远，用户很难把两件事联系起来。
+    fn anchor_tls_cert_paths(&mut self, mut bind: BindAddrConfig) -> BindAddrConfig {
+        let ssl = match &mut bind {
+            BindAddrConfig::Tls(cfg) => &mut cfg.ssl_config,
+            BindAddrConfig::Https(cfg) => &mut cfg.ssl_config,
+            BindAddrConfig::H3(cfg) => &mut cfg.ssl_config,
+            _ => return bind,
+        };
+
+        // 绝对路径原样保留；相对路径按配置文件所在目录解析（找不到时 resolve_filepath 会回退原值）
+        for path in [ssl.certificate.as_mut(), ssl.certificate_key.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if path.is_relative() {
+                *path = self.resolve_filepath(&*path);
+            }
+        }
+
+        bind
+    }
+
     #[inline]
     fn resolve_filepath<P: AsRef<Path>>(&self, filepath: P) -> PathBuf {
         let path = resolve_filepath(filepath, self.conf_file.as_ref());
@@ -1353,6 +1495,99 @@ mod tests {
     use crate::config::{BindAddr, HttpsBindAddrConfig, ServerOpts, SslConfig};
 
     use super::*;
+
+    /// 🔐 P2（用户定策）：组不存在 → 走默认组 + 点名告警。
+    /// 判定"组到底存不存在"要能区分"确实定义过"和"名字根本没见过"。
+    #[test]
+    fn test_group_existence_detection() {
+        let cfg = RuntimeConfig::builder()
+            .with("server 223.5.5.5:53 -group office")
+            .with("group-begin lan")
+            .with("client-rules 192.168.1.0/24")
+            .with("nameserver /nas.lan/office")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        // 服务器组：`server ... -group office` 声明过的算存在；默认组/空名恒存在
+        assert!(cfg.has_server_group("office"), "office 是 server 行上声明过的组");
+        assert!(cfg.has_server_group("default"));
+        assert!(cfg.has_server_group(""));
+        assert!(cfg.has_server_group("DEFAULT"), "default 的大小写不敏感");
+        // 拼错的组名必须判为"不存在"（新行为：回退默认组 + 告警）
+        assert!(!cfg.has_server_group("ofice"), "拼错的组名不能算存在");
+
+        // 规则组：group-begin 定义的组存在，没见过的不存在
+        assert!(cfg.has_rule_group("lan"), "group-begin lan 定义的组应存在");
+        assert!(cfg.has_rule_group("default"));
+        assert!(!cfg.has_rule_group("nosuchgroup"));
+    }
+
+    /// 🔐 P2：`num-workers 0` 不能真的变成 0 个工作线程（那等于服务完全不解析、还不报错）。
+    #[test]
+    fn test_num_workers_zero_is_ignored() {
+        let cfg = RuntimeConfig::builder()
+            .with("num-workers 0")
+            .build()
+            .unwrap();
+        assert!(
+            cfg.num_workers() >= 1,
+            "num-workers 0 必须被忽略并回落到自动值，实际 {}",
+            cfg.num_workers()
+        );
+    }
+
+    /// 🔐 P2：配置文件里出现非 UTF-8 字节时，**该行之后**的配置必须照常加载。
+    /// （原实现用 `lines().map_while(Result::ok)`：一个坏字节会把后面全部配置静默丢掉。）
+    #[test]
+    fn test_non_utf8_line_does_not_stop_loading() {
+        let dir = std::env::temp_dir().join(format!("smartdns-nonutf8-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.conf");
+        std::fs::write(&path, b"# \xff\xfe garbled bytes\nlocal-ttl 123\n").unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&path));
+
+        assert_eq!(cfg.local_ttl(), 123, "坏字节那一行之后的配置必须仍然生效");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 P2：bind-https 的证书相对路径必须按「配置文件所在目录」解析。
+    /// （原实现按进程工作目录：服务方式启动时那是 `/` 或 System32，证书永远找不到。）
+    #[test]
+    fn test_tls_cert_relative_path_anchored_to_conf_dir() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cert-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(
+            &conf,
+            "bind-https 0.0.0.0:8443 -ssl-certificate cert.pem -ssl-certificate-key key.pem\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("cert.pem"), "x").unwrap();
+        std::fs::write(dir.join("key.pem"), "x").unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&conf));
+        let ssl = cfg
+            .binds()
+            .iter()
+            .find_map(|b| match b {
+                BindAddrConfig::Https(c) => Some(&c.ssl_config),
+                _ => None,
+            })
+            .expect("应该有 bind-https 配置");
+
+        assert_eq!(
+            ssl.certificate.as_deref(),
+            Some(dir.join("cert.pem").as_path()),
+            "相对证书路径应解析成 <配置文件目录>/cert.pem"
+        );
+        assert_eq!(
+            ssl.certificate_key.as_deref(),
+            Some(dir.join("key.pem").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_config_binds_dedup() {

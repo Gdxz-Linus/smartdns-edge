@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Query;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Bytes,
@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::openapi::{IntoParams, IntoRouter, ToSchema, routes};
-use super::{ServeState, StatefulRouter};
+use super::{ApiError, ServeState, StatefulRouter};
 use crate::{dns::SerialMessage, libdns::Protocol, log};
 
 pub fn routes() -> StatefulRouter {
@@ -36,11 +36,7 @@ async fn serve_dns_get(
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             res
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(r#"{{ "error": "{err}" }}"#),
-        )
-            .into_response(),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -57,11 +53,7 @@ async fn serve_dns(
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             res
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(r#"{{ "error": "{err}" }}"#),
-        )
-            .into_response(),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -70,7 +62,7 @@ async fn process(
     req: Request,
     addr: SocketAddr,
     query_param: Option<QueryParam>,
-) -> anyhow::Result<(&'static str, Bytes)> {
+) -> Result<(&'static str, Bytes), ApiError> {
     const APPLICATION_DNS_MESSAGE: &str = "application/dns-message";
     const APPLICATION_JSON: &str = "application/json";
 
@@ -96,7 +88,11 @@ async fn process(
                 rr::{Name, RecordType},
             };
 
-            let name: Name = query_param.name.parse()?;
+            // 🔐 P2：参数写错要回 400（Bad Request），不能再 `?` 冒泡成 500 ——
+            // 否则客户端的输入错误会伪装成服务器故障，把监控和告警带偏。
+            let name: Name = query_param.name.parse().map_err(|_| {
+                ApiError::BadRequest(format!("invalid `name` parameter: {}", query_param.name))
+            })?;
             let query_type: RecordType = query_param.query_type.parse().unwrap_or(RecordType::A);
 
             let dnssec = query_param.dnssec;

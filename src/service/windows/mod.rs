@@ -23,7 +23,13 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
     let conf_path_abs = current_dir.join("smartdns.conf");
 	
 	// 🌟 新增这一行：提取 exe 的绝对路径，后面配置防火墙要用
-    let exe_path_str = current_exe.to_string_lossy(); 
+    // 🔐 P2：这个路径要插进 PowerShell 的**双引号**字符串里（下面两条防火墙规则），
+    // 其中的 ` 、$ 、" 都会改变命令含义（`$` 会被当变量展开），先转义再拼。
+    let exe_path_str = current_exe
+        .to_string_lossy()
+        .replace('`', "``")
+        .replace('$', "`$")
+        .replace('"', "`\"");
 
     let installer = Installer::builder()
         // 🌟 修复编译报错：加上 .as_bytes()，满足 Rust 的强类型检查
@@ -62,7 +68,9 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                      New-NetFirewallRule -DisplayName \"{NAME}\" -Direction Outbound -Program \"{exe_path_str}\" -Action Allow -ErrorAction SilentlyContinue | Out-Null; \
                      Write-Output \"`n✅ SmartDNS service installed successfully.\";",
                     SERVICE_NAME = SERVICE_NAME,
-                    bin_path_str = bin_path.to_string_lossy(),
+                    // 🔐 P2：PowerShell 单引号字符串里，单引号要写两遍才不会被当成字符串结束 ——
+                    // 原来原样插入，exe 路径含 `'` 时命令被破坏（甚至可被注入）。
+                    bin_path_str = bin_path.to_string_lossy().replace('\'', "''"),
                     NAME = crate::NAME,
                     exe_path_str = exe_path_str
                 ).into(),

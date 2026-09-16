@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use anyhow::anyhow;
 use serde::Deserialize;
 // 🌟 修复：引入读写锁，细化并发粒度
 use tokio::sync::RwLock;
@@ -83,7 +82,8 @@ async fn create(
             .map(|(i, _)| *i);
 
         if idx.is_some() {
-            Err(anyhow!("address already exists"))?;
+            // 🔐 P2：重复域名是「冲突」，回 409，不能再回 500 —— 后者会误触监控告警。
+            return Err(ApiError::Conflict(format!("域名 {} 已存在", rule.domain)));
         } else {
             config.push(ConfigLine::Config {
                 config: ConfigItem::Address(rule),
@@ -100,8 +100,53 @@ async fn create(
     Ok(StatusCode::CREATED)
 }
 
+/// 🔐 P2：原实现是**空函数体** —— 返回 200 却什么都不做，调用方以为改成功了（静默丢写）。
+/// 现在按 domain 定位并整条替换该 address 规则；找不到就回 404。
+/// 注意：域名是这条规则的「键」，要改域名本身请用 DELETE + POST。
 #[utoipa::path(put, path = "/addresses", tag = "Addresses")]
-async fn update() {}
+async fn update(
+    State(state): State<Arc<ServeState>>,
+    Json(input): Json<UpdateAddressRule>,
+) -> Result<StatusCode, ApiError> {
+    let rule = input.rule;
+
+    let cfg = state.app.cfg().await;
+    let Some(managed_dir) = cfg.managed_dir() else {
+        return Err(ApiError::NotFound("managed_dir not found".to_string()));
+    };
+
+    // 🌟 抢占排他写锁：写入期间，其他读写请求全部等待
+    let _guard = CONFIG_FILE_LOCK.write().await;
+
+    let file = managed_dir.join("address.conf");
+    if !file.exists() {
+        return Err(ApiError::NotFound(format!("Domain {} not found", rule.domain)));
+    }
+
+    let text = tokio::fs::read_to_string(&file).await?;
+    let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
+
+    let mut replaced = 0usize;
+    for line in config.iter_mut() {
+        if let ConfigLine::Config {
+            config: ConfigItem::Address(existing),
+            ..
+        } = line
+            && existing.domain == rule.domain
+        {
+            *existing = rule.clone();
+            replaced += 1;
+        }
+    }
+
+    if replaced == 0 {
+        return Err(ApiError::NotFound(format!("Domain {} not found", rule.domain)));
+    }
+
+    safe_write_config(&file, format!("{config}")).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
 
 #[utoipa::path(delete, path = "/addresses", tag = "Addresses")]
 async fn delete(
@@ -168,6 +213,12 @@ async fn safe_write_config(file: &std::path::Path, content: String) -> std::io::
 
 #[derive(Debug, Deserialize, ToSchema)]
 struct CreateAddressRule {
+    rule: AddressRule,
+}
+
+/// PUT 的请求体：`rule.domain` 用来定位要替换的那条规则。
+#[derive(Debug, Deserialize, ToSchema)]
+struct UpdateAddressRule {
     rule: AddressRule,
 }
 

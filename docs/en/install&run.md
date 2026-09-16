@@ -104,3 +104,21 @@ docker run -d --name smartdns --restart always --network host \
   -v /your/path/smartdns.conf:/etc/smartdns/smartdns.conf \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
+
+### Web console inside the container (off by default)
+
+The image ships a web console but exposes no port for it by default. To use it, publish the port and
+make sure a token is set:
+
+```bash
+docker run -d --name smartdns --restart always --network host \
+  -p 8000:8000 \
+  -e SMARTDNS_API_TOKEN=your-token \
+  -v /your/path/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns-edge:latest
+```
+
+Then open `http://<host-ip>:8000`.
+
+⚠️ The console is **plaintext HTTP**: the token travels unencrypted. Use it on a trusted LAN only;
+for remote access use a `bind-https` (TLS) listener or terminate TLS in a reverse proxy.

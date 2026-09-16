@@ -37,6 +37,23 @@ use crate::{
     dns::{DnsRequest, SerialMessage},
 };
 
+/// 🔐 P2：收包 / accept 出错后的退避间隔。
+///
+/// 原实现出错只 `continue`：一旦是持续性错误（网卡消失、fd 耗尽、防火墙一直丢），
+/// 循环会以 100% CPU 空转，并且每一轮都写一条日志把日志文件刷爆。
+/// 这里按连续错误次数做指数退避（5ms → 1s 封顶），成功一次就归零。
+pub(crate) fn error_backoff_delay(streak: u32) -> std::time::Duration {
+    const BASE_MS: u64 = 5;
+    const MAX_MS: u64 = 1000;
+    let shift = streak.saturating_sub(1).min(8);
+    std::time::Duration::from_millis((BASE_MS << shift).min(MAX_MS))
+}
+
+/// 出错日志降频：前 3 次逐条打，之后每 100 次打一条（避免日志被刷爆）。
+pub(crate) fn should_log_stream_error(streak: u32) -> bool {
+    streak <= 3 || streak % 100 == 0
+}
+
 pub fn serve(
     app: &App,
     cfg: &RuntimeConfig,
@@ -399,5 +416,36 @@ fn sanitize_src_address(src: SocketAddr) -> Result<(), String> {
     match src.ip() {
         IpAddr::V4(v4) => verify_v4(v4),
         IpAddr::V6(v6) => verify_v6(v6),
+    }
+}
+
+#[cfg(test)]
+mod stream_error_backoff_tests {
+    use super::*;
+
+    /// 🔐 P2：持续性错误（网卡消失、fd 耗尽）不能让循环 100% CPU 空转。
+    #[test]
+    fn backoff_grows_then_caps() {
+        assert_eq!(error_backoff_delay(0).as_millis(), 5, "0 次也不能 panic");
+        assert_eq!(error_backoff_delay(1).as_millis(), 5);
+        assert_eq!(error_backoff_delay(2).as_millis(), 10);
+        assert_eq!(error_backoff_delay(3).as_millis(), 20);
+        assert_eq!(error_backoff_delay(8).as_millis(), 640);
+        assert_eq!(error_backoff_delay(9).as_millis(), 1000);
+        // 封顶 1 秒，且再涨也不超过（保证错误消失后能很快恢复正常）
+        assert_eq!(error_backoff_delay(10).as_millis(), 1000);
+        assert_eq!(error_backoff_delay(u32::MAX).as_millis(), 1000);
+    }
+
+    /// 日志降频：前 3 次逐条打，之后每 100 次一条。
+    #[test]
+    fn error_log_is_throttled() {
+        assert!(should_log_stream_error(1));
+        assert!(should_log_stream_error(2));
+        assert!(should_log_stream_error(3));
+        assert!(!should_log_stream_error(4));
+        assert!(!should_log_stream_error(99));
+        assert!(should_log_stream_error(100));
+        assert!(!should_log_stream_error(101));
     }
 }

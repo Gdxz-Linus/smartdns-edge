@@ -1,15 +1,70 @@
 // functions/feedback.js - 搭载服务器端 IP 限流器的反馈处理函数
 const GITHUB_REPO = 'Gdxz-Linus/smartdns-edge';
 
+// 🔐 安全修复：只允许本站来源调用本接口。
+// 原来响应头写死 `Access-Control-Allow-Origin: *` —— 于是**任意网站**都能借访客的浏览器
+// 用本函数里的 GITHUB_TOKEN 往仓库建 issue（同仓库的下载接口早就做了来源校验）。
+// 白名单与下载接口保持一致；要加自定义域名，改这里或用环境变量 ALLOWED_ORIGINS（逗号分隔）。
+const DEFAULT_ALLOWED_HOSTS = [
+  'smartdns-edge.pages.dev',
+  'downloads-21j.pages.dev',
+  'localhost',
+  '127.0.0.1',
+];
+
+function allowedHosts(env) {
+  const extra = (env && env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS : '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...DEFAULT_ALLOWED_HOSTS, ...extra];
+}
+
+/** 来源允许吗？没有 Origin 头（同源请求/服务端调用）时不拦。 */
+function isOriginAllowed(request, env) {
+  const origin = request.headers.get('Origin');
+  if (!origin) return { allowed: true, origin: '' };
+  try {
+    const host = new URL(origin).hostname;
+    const ok = allowedHosts(env).some(
+      (h) => host === h || host.endsWith('.' + h)
+    );
+    return { allowed: ok, origin };
+  } catch (e) {
+    return { allowed: false, origin };
+  }
+}
+
+/** 只有允许的来源才回显 Access-Control-Allow-Origin；其余不发该头，浏览器会直接拦下。 */
+function corsHeadersFor(request, env) {
+  const { allowed, origin } = isOriginAllowed(request, env);
+  const headers = {
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    Vary: 'Origin',
+  };
+  if (allowed && origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
+}
+
 export async function onRequestPost(context) {
   const { request, env } = context;
 
-  // 1. 允许跨域（CORS）响应头，让前端网页可以无障碍发起请求
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
+  // 1. CORS 响应头：只对白名单来源回显
+  const corsHeaders = corsHeadersFor(request, env);
+
+  // 1b. 🔐 来源校验：不是本站的直接拒绝 —— 否则等于把仓库 token 借给别人用
+  if (!isOriginAllowed(request, env).allowed) {
+    return new Response(
+      JSON.stringify({ error: '403 Forbidden: 本接口仅允许来自本站页面的请求。' }),
+      {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      }
+    );
+  }
 
   // 2. 🌟 提取来访用户的真实公网 IP 地址（通过 Cloudflare 边缘服务器请求头提取）
   const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -132,13 +187,12 @@ export async function onRequestPost(context) {
 }
 
 // 11. 处理浏览器的 Preflight (OPTIONS) 预检请求，防止跨域拦截
-export async function onRequestOptions() {
+//     🔐 同样只对白名单来源回显 CORS 头（不允的来源拿不到头，浏览器就会拦下真正的请求）
+export async function onRequestOptions(context) {
+  const corsHeaders = corsHeadersFor(context.request, context.env);
+
   return new Response(null, {
     status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    },
+    headers: corsHeaders,
   });
 }

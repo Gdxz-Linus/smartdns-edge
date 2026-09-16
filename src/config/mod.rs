@@ -21,6 +21,23 @@ use byte_unit::Byte;
 use ipnet::{IpNet, Ipv6Net};
 use serde::{self, Deserialize, Serialize};
 
+/// DNS 规范里的 TTL 上限：RFC 2181 §8 —— TTL 是 31 位，最高位必须为 0。
+pub const TTL_MAX: u64 = 0x7FFF_FFFF;
+
+/// 把配置里的 TTL 秒数收进合法范围。
+///
+/// 🔐 P2：原实现把值当 `u64` 收下、下游再 `as u32` 截断 —— 写 `rr-ttl 4294967297`
+/// 会**静默**变成 1 秒（没有任何告警）。这里改成"夹到规范上限 + 告警"：
+/// 既不静默出错，也不会因为一个手误就让服务起不来。
+pub fn sanitize_ttl(name: &str, v: u64) -> u64 {
+    if v > TTL_MAX {
+        crate::log::warn!("配置项 {name} 的值 {v} 超出 DNS 规范上限 {TTL_MAX} 秒，已按上限生效");
+        TTL_MAX
+    } else {
+        v
+    }
+}
+
 mod audit;
 mod bind_addr;
 mod cache;
@@ -435,9 +452,26 @@ macro_rules! impl_from_str {
             impl FromStr for $type {
                 type Err=nom::Err<nom::error::Error<String>>;
 
+                /// 🔐 P2：**必须吃完整个输入**，尾部还有非空白内容就报错。
+                ///
+                /// 旧实现是 `Ok((_, v)) => Ok(v)` —— 把 nom 的"剩余输入"直接扔掉，
+                /// 于是 `"example.com<垃圾>"` 会被**静默截断**成 `example.com` 并当成
+                /// 合法值使用（接口入参走 `serde_str` → 这里），DELETE/PUT 就会操作到
+                /// 一个调用方根本没点名的域名。宁可报错，也不能改写用户写下的名字。
+                ///
+                /// 先 `trim()`：`"example.com "` 这类首尾空白仍应被接受。
                 fn from_str(s: &str) -> Result<Self, Self::Err> {
-                    match NomParser::parse(s) {
-                        Ok((_, v)) => Ok(v),
+                    match NomParser::parse(s.trim()) {
+                        Ok((rest, v)) => {
+                            if rest.trim().is_empty() {
+                                Ok(v)
+                            } else {
+                                Err(nom::Err::Error(nom::error::Error::new(
+                                    rest.to_string(),
+                                    nom::error::ErrorKind::Eof,
+                                )))
+                            }
+                        }
                         Err(err) => Err(err.to_owned()),
                     }
                 }

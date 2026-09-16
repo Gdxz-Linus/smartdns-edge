@@ -58,8 +58,15 @@ jobs:
         # 🌟 直接使用原生 git 命令推送！安全、省心，100% 成功
         git push origin HEAD:${{ github.ref_name }} --follow-tags
 
-  build:
+  # 🔐 P2：发布前门禁 —— 先把测试跑一遍，测试不过就不打包、不发布。
+  # 原流程是 bump 之后直接 build & 发布到 GitHub Releases / ghcr.io，
+  # 中间没有任何测试环节：只要代码能编译就能发版，这正是当初 6 个 P0 能长期潜伏的原因。
+  test:
     needs: [ "bump" ]
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: [ "bump", "test" ]
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.bump.outputs.version }}

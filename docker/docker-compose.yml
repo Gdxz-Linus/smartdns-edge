@@ -1,18 +1,38 @@
+# 🐋 SmartDNS-edge Docker Compose（普通用户版：直接用已发布镜像）
+#
+# 用法（在仓库根目录执行）：
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# ⚠️ 重要：compose 文件里的相对路径是相对「本文件所在目录（docker/）」解析的，
+#    所以下面挂载写的是 ../etc/smartdns/smartdns.conf。
+#    如果你不用仓库里的配置，把它换成你自己的配置文件的绝对路径即可。
 
 services:
   dns:
-    image: smartdns-edge
-    build:
-      context: .
-      dockerfile: docker/Dockerfile  # 指向我们优化的 Dockerfile
+    image: ghcr.io/gdxz-linus/smartdns-edge:latest
+    container_name: smartdns
     ports:
       - "53:53"
       - "53:53/udp"
-      - "8000:8000"                  # 🌟 暴露内置的 WebAPI & 网页管理控制台端口
+      # 🌟 网页控制台（可选，默认关闭）：取消注释后浏览器访问 http://<宿主机IP>:8000
+      # ⚠️ 它是明文 HTTP，口令会在网络上明文传输。请务必：
+      #    1) 在挂载的配置里写一行 api-token <你的口令>（或取消下面 environment 三行的注释）；
+      #    2) 只在可信内网使用；需要跨网络访问时请改用 bind-https（TLS）或反向代理。
+      # - "8000:8000"
     volumes:
-      - ./smartdns.conf:/etc/smartdns/smartdns.conf # 🌟 统一挂载路径到标准目录
+      - ../etc/smartdns/smartdns.conf:/etc/smartdns/smartdns.conf
     restart: always
-    # ⚠️ 若挂载进容器的 smartdns.conf 把管理后台绑到 0.0.0.0 而这里没设置口令，容器会拒绝启动（退出码 2）。
-    # 需要时取消下面三行的注释：
+    # ⚠️ 若挂载进容器的配置把管理后台绑到 0.0.0.0（非本机地址）而这里没设置口令，
+    #    容器会拒绝启动（退出码 2）。需要时取消下面两行的注释：
     # environment:
     #   SMARTDNS_API_TOKEN: change-me
+
+# ---------------------------------------------------------------------------
+# 维护者本地构建（可选）：需要先把 CI 产出的两个压缩包放在仓库根目录：
+#   smartdns-x86_64-generic-linux-gnu.tar.gz
+#   smartdns-aarch64-generic-linux-gnu.tar.gz
+# 然后取消下面 4 行注释，并把上面 image 那一行改为 image: smartdns-edge
+#     build:
+#       context: ..
+#       dockerfile: docker/Dockerfile
+# ---------------------------------------------------------------------------

@@ -20,7 +20,11 @@ pub struct CachePagination {
     #[serde(default = "default_limit")]
     limit: usize,
 }
-fn default_limit() -> usize { 100 } // 默认最多只返回 100 条，死死守住内存底线
+fn default_limit() -> usize { 100 } // 默认最多只返回 100 条，守住内存底线
+
+/// 🔐 P2：单页硬上限。显式传入的 `?limit=` 也必须受它约束 ——
+/// 原实现只在参数缺省时兜底，`?limit=1000000000` 能强制克隆并序列化整个缓存（内存与响应体双爆）。
+const MAX_PAGE_LIMIT: usize = 1000;
 
 // 内部自定义一个 Payload，以支持分页的总条数显示
 #[derive(Deserialize, Serialize)]
@@ -35,9 +39,17 @@ async fn caches(
     State(state): State<Arc<ServeState>>,
     Query(page): Query<CachePagination>,
 ) -> Json<CacheListPayload<CachedQueryRecord>> {
+    let limit = page.limit.min(MAX_PAGE_LIMIT);
+    if limit != page.limit {
+        log::debug!(
+            "caches: 请求的 limit={} 超过单页上限，按 {} 返回",
+            page.limit,
+            MAX_PAGE_LIMIT
+        );
+    }
+
     let (total, data) = if let Some(c) = state.app.cache().await {
-        // 🌟 调用带有分页拦截的底层接口
-        c.cached_records_paginated(page.offset, page.limit).await
+        c.cached_records_paginated(page.offset, limit).await
     } else {
         (0, vec![])
     };

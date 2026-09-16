@@ -36,14 +36,33 @@ pub fn serve(
             .and_then(crate::server::limit::for_listener);
 
         let mut inner_join_set = JoinSet::new();
+        // 🔐 P2：连续 accept 出错的次数（用于退避 + 日志降频）
+        let mut err_streak: u32 = 0;
         loop {
             let (tcp_stream, src_addr) = tokio::select! {
                 tcp_stream = listener.accept() => match tcp_stream {
-                    Ok((t, s)) => (t, s),
+                    Ok((t, s)) => {
+                        // accept 恢复正常：退避计数归零
+                        err_streak = 0;
+                        (t, s)
+                    }
                     Err(e) => {
-                        log::debug!("error receiving TCP tcp_stream error: {}", e);
+                        // 🔐 P2：不再"出错就立刻 continue"——持续性错误（fd 耗尽、网卡消失）
+                        // 会让循环 100% CPU 空转并把日志刷爆。这里退避 + 日志降频。
+                        err_streak = err_streak.saturating_add(1);
+                        if crate::server::should_log_stream_error(err_streak) {
+                            log::warn!(
+                                "error accepting TCP connection（连续第 {} 次）: {}",
+                                err_streak,
+                                e
+                            );
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(crate::server::error_backoff_delay(err_streak)) => {}
+                            _ = cancellation_token.cancelled() => break,
+                        }
                         continue;
-                    },
+                    }
                 },
                 _ = cancellation_token.cancelled() => {
                     // A graceful shutdown was initiated. Break out of the loop.

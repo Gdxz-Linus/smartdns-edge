@@ -44,12 +44,19 @@ impl DnsMiddlewareHandler {
             && let Some(addr) = addr.to_ipv4_mapped() {
                 client_ip = addr.into();
             }
-        let rule_group_name = client_rules
-            .iter()
-            .find(|s| s.match_ip(&client_ip))
-            .map(|s| s.group.as_str());
 
-        server_opts.rule_group = rule_group_name.map(|s| s.to_string());
+        // 🔐 P2（用户定策）：两条护栏，缺一不可 ——
+        //   ① 调用方**已经指定**规则组就尊重它（预取会把"这条缓存属于哪组"带回来）；
+        //      原来这里是无条件覆盖，等于把调用方的意图直接抹掉。
+        //   ② 后台请求（预取、双栈探针、过期刷新）不是"某个人"，不参与按来源 IP 判组
+        //      （它的来源是程序自己，匹配不到任何客户端规则，硬判只会把组抹成默认）。
+        // 只有"调用方没指定 + 不是后台请求"时，才按来源 IP 从客户端规则里推断。
+        if server_opts.rule_group.is_none() && !server_opts.is_background {
+            server_opts.rule_group = client_rules
+                .iter()
+                .find(|s| s.match_ip(&client_ip))
+                .map(|s| s.group.clone());
+        }
 
         let mut ctx = DnsContext::new(req.query().name().borrow(), cfg, server_opts.clone());
         self.host.execute(&mut ctx, req).await

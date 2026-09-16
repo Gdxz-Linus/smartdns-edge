@@ -135,4 +135,29 @@ mod tests {
             ))
         );
     }
+
+    /// 🔐 P2：address 字段同样必须吃完整个输入。
+    /// 旧行为：`"1.2.3.4 后面的字"` 被静默截断成 `1.2.3.4` 写进配置。
+    #[test]
+    fn test_from_str_must_consume_all_input() {
+        use std::str::FromStr;
+        use AddressRuleValue::*;
+
+        // 合法写法照旧接受（含首尾空白、逗号多值）
+        assert_eq!(AddressRuleValue::from_str("#").unwrap(), SOA);
+        assert_eq!(AddressRuleValue::from_str("#4").unwrap(), SOAv4);
+        assert_eq!(AddressRuleValue::from_str("#6").unwrap(), SOAv6);
+        assert_eq!(AddressRuleValue::from_str("-").unwrap(), IGN);
+        assert_eq!(AddressRuleValue::from_str("-4").unwrap(), IGNv4);
+        assert_eq!(AddressRuleValue::from_str("-6").unwrap(), IGNv6);
+        assert_eq!(AddressRuleValue::from_str(" - ").unwrap(), IGN);
+        assert!(AddressRuleValue::from_str("1.2.3.4, 5.6.7.8").is_ok());
+        assert!(AddressRuleValue::from_str("1.2.3.4").is_ok());
+
+        // 尾部还有内容 → 报错，不能截断
+        assert!(AddressRuleValue::from_str("1.2.3.4 后面的字").is_err());
+        assert!(AddressRuleValue::from_str("#6x").is_err());
+        assert!(AddressRuleValue::from_str("- ").is_ok()); // 只跟空白：允许
+        assert!(AddressRuleValue::from_str("-4-6").is_err());
+    }
 }

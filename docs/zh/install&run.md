@@ -111,3 +111,20 @@ docker run -d --name smartdns --restart always --network host \
   -v /你的路径/smartdns.conf:/etc/smartdns/smartdns.conf \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
+
+### 容器里的网页控制台（默认不开）
+
+镜像内置网页控制台，默认不暴露端口。要用就在启动命令里加上端口映射，并确保口令已设置：
+
+```bash
+docker run -d --name smartdns --restart always --network host \
+  -p 8000:8000 \
+  -e SMARTDNS_API_TOKEN=你的口令 \
+  -v /你的路径/smartdns.conf:/etc/smartdns/smartdns.conf \
+  ghcr.io/gdxz-linus/smartdns-edge:latest
+```
+
+然后浏览器打开 `http://容器所在机器的IP:8000`。
+
+⚠️ 这个控制台是**明文 HTTP**：口令在网络上明文传输。请只在可信内网使用；
+需要跨网络访问时，请改用 `bind-https`（TLS）监听，或在前端加反向代理做 TLS 终结。

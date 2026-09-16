@@ -110,7 +110,7 @@ impl OsRelease {
 
     #[inline]
     pub fn is_deepin(&self) -> bool {
-        self.id_contains("Deepin")
+        self.id_contains("deepin")
     }
 
     #[inline]
@@ -134,11 +134,14 @@ impl OsRelease {
     }
 
     fn id_contains(&self, search: &str) -> bool {
-        self.id.contains(search)
+        // 🔐 P2：大小写不敏感 —— 真机上 os-release 的取值都是小写（例如 Deepin 是 `ID=deepin`），
+        // 原来拿 "Deepin" 去 contains，结果恒 false，Deepin 用户会走错分支。
+        let search = search.to_ascii_lowercase();
+        self.id.to_ascii_lowercase().contains(&search)
             || self
                 .id_like
                 .as_ref()
-                .map(|id| id.contains(search))
+                .map(|id| id.to_ascii_lowercase().contains(&search))
                 .unwrap_or_default()
     }
 }
@@ -210,5 +213,19 @@ mod tests {
 
         #[cfg(target_os = "android")]
         assert!(get().unwrap().is_android());
+    }
+
+    /// 🔐 P2：真机上 Deepin 的 os-release 写的是 `ID=deepin`（全小写），
+    /// 以前拿 "Deepin" 去比对，`is_deepin()` 恒为 false（Deepin 用户走错分支）。
+    #[test]
+    fn deepin_is_detected_case_insensitively() {
+        let text = "NAME=\"Deepin\"\nID=deepin\nVERSION_ID=\"20\"\nPRETTY_NAME=\"Deepin 20\"\n";
+        let os: OsRelease = text.parse().expect("应能解析 os-release");
+        assert!(os.is_deepin(), "ID=deepin 必须被识别为 Deepin");
+        assert!(os.is_debian(), "Deepin 属于 debian 系");
+
+        // 大小写混写也要认得（有的发行版写 ID=Deepin）
+        let mixed: OsRelease = "ID=Deepin\n".parse().expect("应能解析 os-release");
+        assert!(mixed.is_deepin(), "ID=Deepin 同样要认得");
     }
 }

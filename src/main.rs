@@ -259,6 +259,8 @@ impl Cli {
                 // 🔐 用和真正启动时完全相同的一套检查：
                 // 配置自检说"通过"，就必须真的能启动——否则用户会被"✅ 通过"骗到，
                 // 等到重启服务时才发现起不来。
+                // 🔐 P2：`smartdns test` 时也把"明文 HTTP 上挂后台"的风险说清楚
+                crate::api::warn_plaintext_api(cfg.binds());
                 if let Err(msg) = crate::api::check_exposure(cfg.binds(), cfg.api_token()) {
                     crate::log::error!("{msg}");
                     eprintln!("[smartdns] {msg}");

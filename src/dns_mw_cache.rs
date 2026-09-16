@@ -2,11 +2,11 @@ use chrono::DateTime;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::DerefMut;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -73,8 +73,8 @@ impl DnsCacheMiddleware {
                 if let Err(e) = res {
                     // 如果子线程读取因为文件损坏而当场崩溃了，我们把它拦截下来，打一条红字警告！
                     crate::log::error!("🔥 FATAL: Cache file corrupted or read panic: {:?}. Ignoring old cache and starting fresh!", e);
-                    // 顺手把那个坏掉的文件删了，防止下次开机又崩溃
-                    let _ = std::fs::remove_file(&cache_file);
+                    // 🔐 P2：坏档**不再直接删除** —— 改名存档（只留最近 1 份），方便用户排查后再清
+                    let _ = archive_cache_file(&cache_file, "load-panic");
                 }
             }
         }
@@ -93,6 +93,10 @@ impl DnsCacheMiddleware {
     }
 	
     pub fn with_cache(cfg: &Arc<RuntimeConfig>, dns_handle: DnsHandle, cache: Arc<DnsCache>) -> Self {
+        // 🔐 P2：热重载时缓存策略必须跟着换 —— 原来直接复用旧 DnsCache，
+        // 改完 serve-expired / cache-persist / cache-size 之后一部分生效一部分不生效。
+        cache.reload_config(cfg);
+
         Self {
             cfg: cfg.clone(),
             cache,
@@ -190,9 +194,14 @@ impl DnsCacheMiddleware {
                             // Cache 只需要忠实地把过期的 CacheKey 重新派发即可。
                             // 如果启用了双栈，底层的 dualstack 和 ns 模块会自动完成裂变和 Single-Flight 折叠。
                             for cache_key in expired {
+                                // 🔐 P2（用户定策）：`cache_key.group` 是 **服务器组** 名（来自
+                                // `server_group_name()`：`-group` 或域规则链里的 `nameserver`），
+                                // 所以必须放进 `group` 字段 —— 原来放进 `rule_group` 属于"名字放错字段"，
+                                // 再加上 search() 会按来源 IP 重算，结果预取走的是**默认上游**，
+                                // 目标组的过期条目永远刷不到、还会在默认键上多写一份。
                                 let opts = ServerOpts {
                                     is_background: true,
-                                    rule_group: Some(cache_key.group.clone()),
+                                    group: Some(cache_key.group.clone()),
                                     ..Default::default()
                                 };
                                 let req_client = client.with_new_opt(opts);
@@ -289,17 +298,23 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
             ecs: ecs_str.clone(),
         };
 
-        let cached_res = if ctx.server_opts.is_background {
-            None
-        } else {
+        // 🌟 过期条目的处置（用户定调）：过期数据只分两种下场，没有第三种。
+        //   ① 允许服务过期数据（serve-expired 开、且该域名没写 no-serve-expired）→ 秒回旧数据 + 后台刷新（见下）；
+        //   ② 明确写了不要（全局 serve-expired no / 域名级 -no-serve-expired）→ 就地丢弃。
+        //   旧行为是把过期条目一直攥在手里，等上游一出错就当成功返回（原 `Err` 分支的 `cached_res` 兜底）：
+        //   于是"写了不要过期数据"的人照样静默拿到旧数据，还带着入库时的原始 TTL（客户端会当新数据再缓存一轮），
+        //   日志也看不出降级。该兜底已按定调移除，不再恢复。
+        if !ctx.server_opts.is_background {
+            // 过期数据能不能喂：域名规则与监听选项**任一**显式关闭即不许喂。
+            // 监听级那份（`bind 127.0.0.1:53 -no-serve-expired`）以前解析了却没人读，
+            // 挂在上面的监听照样会喂旧数据 —— 死开关，这里接上。
             let no_serve_expired = ctx
                 .domain_rule
                 .get(|r| r.no_serve_expired)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                || ctx.server_opts.no_serve_expired();
 
-            let cached_res = self.cache.get(&cache_key, Instant::now()).await;
-
-            match cached_res {
+            match self.cache.get(&cache_key, Instant::now()).await {
                 // 🌟 因为 Key 已经包含了 Group，命中必定是同组，免去判断！
                 Some((res, status)) => {
                     match status {
@@ -311,7 +326,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         CacheStatus::Expired if ctx.cfg().serve_expired() && !no_serve_expired => {
                             if self.cache.mark_prefetching(&cache_key).await {
                                 // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
-                                let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl);
+                                let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl());
                                 let sync_valid_until = Instant::now() + reply_ttl;
                                 
                                 self.cache.set_valid_until_for_prefetch(&cache_key, sync_valid_until).await;
@@ -371,19 +386,21 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             }
 
                             // 极小概率兜底：如果有其他并发已经拿了预取锁，但时间戳还未更新完毕
-                            let reply_ttl_secs = self.cache.expired_reply_ttl as u32;
+                            let reply_ttl_secs = self.cache.expired_reply_ttl() as u32;
                             let mut fallback_res = res;
                             fallback_res.set_new_ttl(reply_ttl_secs);
                             debug!("name: {} {} using caching (Expired) (ECS: {:?})", cache_key.query.name(), cache_key.query.query_type(), cache_key.ecs);
                             ctx.source = LookupFrom::Cache;
                             return Ok(fallback_res); 
                         }
-                        _ => Some(res),
+                        // 明确不要过期数据（全局 serve-expired no / 域名级 no-serve-expired）：
+                        // 就地丢弃 —— 上游失败时也不拿它兜底（用户定调）。
+                        CacheStatus::Expired => {}
                     }
                 }
-                _ => None,
+                None => {}
             }
-        };
+        }
 
         // 🌟 并发折叠（Single Flight），同样按 CacheKey 精准隔离
         let rx = {
@@ -483,9 +500,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                     }
                 }
                 inflight_guard.done = true;
-                if let Some(res) = cached_res {
-                    return Ok(res);
-                }
+                // 上游失败时**不再**拿过期数据当成功返回（用户定调）：
+                // "允许服务过期数据"的配置在命中过期条目时就已经秒回了，根本走不到这里；
+                // 走到这里的只有"明确不要过期数据"的配置 —— 那就如实报错，让故障看得见。
                 Err(err)
             }
         }
@@ -544,10 +561,16 @@ const SHARD_COUNT: usize = 64;
 
 pub struct DnsCache {
     shards: Arc<Vec<Mutex<LruCache<CacheKey, DnsCacheEntry>>>>,
-    serve_expired: bool,
-    expired_ttl: u64,
-    expired_reply_ttl: u64,
-    expired_prefetch_time: u64,
+    // 🔐 P2：这些"缓存策略"字段改成原子量 —— 热重载时可以就地更新。
+    // 原来是普通字段，而热重载走的是 `with_cache`（复用同一个 Arc<DnsCache>），
+    // 于是改完 serve-expired / cache-size 之后"一部分生效一部分不生效"，
+    // 同一次请求会走两套互相矛盾的判断。
+    serve_expired: AtomicBool,
+    expired_ttl: AtomicU64,
+    expired_reply_ttl: AtomicU64,
+    expired_prefetch_time: AtomicU64,
+    /// 当前生效的配置容量（分片在创建时就固定了，用来检测"容量被改过"并如实告警）
+    cache_size: AtomicUsize,
     pub prefetch_notify: Arc<DomainPrefetchingNotify>, 
 }
 
@@ -569,12 +592,57 @@ impl DnsCache {
 
         Self {
             shards: Arc::new(shards),
-            serve_expired,
-            expired_ttl,
-            expired_reply_ttl,
-            expired_prefetch_time,
+            serve_expired: AtomicBool::new(serve_expired),
+            expired_ttl: AtomicU64::new(expired_ttl),
+            expired_reply_ttl: AtomicU64::new(expired_reply_ttl),
+            expired_prefetch_time: AtomicU64::new(expired_prefetch_time),
+            cache_size: AtomicUsize::new(cache_size),
             prefetch_notify: Arc::new(DomainPrefetchingNotify::new()),
         }
+    }
+
+    /// 🔐 P2：热重载时把可变的缓存策略换成新配置（见结构体上的注释）。
+    pub fn reload_config(&self, cfg: &crate::dns_conf::RuntimeConfig) {
+        self.serve_expired
+            .store(cfg.serve_expired(), Ordering::Relaxed);
+        self.expired_ttl
+            .store(cfg.serve_expired_ttl(), Ordering::Relaxed);
+        self.expired_reply_ttl
+            .store(cfg.serve_expired_reply_ttl(), Ordering::Relaxed);
+        self.expired_prefetch_time
+            .store(cfg.serve_expired_prefetch_time(), Ordering::Relaxed);
+
+        let new_size = cfg.cache_size();
+        let old_size = self.cache_size.swap(new_size, Ordering::Relaxed);
+        if old_size != new_size {
+            // 分片容量在创建时就定死了，改容量只能重建缓存（会丢内容）——
+            // 所以这里如实告警，而不是静默装作已经生效。
+            crate::log::warn!(
+                "cache-size 从 {} 改成 {} 需要重启才生效（缓存分片容量在启动时固定，其余缓存策略已即时生效）",
+                old_size,
+                new_size
+            );
+        }
+    }
+
+    #[inline]
+    fn serve_expired(&self) -> bool {
+        self.serve_expired.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn expired_ttl(&self) -> u64 {
+        self.expired_ttl.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn expired_reply_ttl(&self) -> u64 {
+        self.expired_reply_ttl.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn expired_prefetch_time(&self) -> u64 {
+        self.expired_prefetch_time.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -613,7 +681,7 @@ impl DnsCache {
 
     pub async fn purge_dead_records(&self, now: Instant) -> usize {
         let mut count = 0;
-        let grace_period = if self.serve_expired { Duration::from_secs(self.expired_ttl) } else { Duration::ZERO };
+        let grace_period = if self.serve_expired() { Duration::from_secs(self.expired_ttl()) } else { Duration::ZERO };
 
         for shard in self.shards.iter() {
             {
@@ -748,14 +816,14 @@ impl DnsCache {
 
                     let is_frequent = entry.stats.hits >= 2;
 
-                    if self.serve_expired {
+                    if self.serve_expired() {
                         if entry.is_current(now) {
                             most_recent = most_recent.min(entry.ttl(now));
                             continue; 
                         }
-                        if self.expired_prefetch_time > 0 {
+                        if self.expired_prefetch_time() > 0 {
                             let expired_for = now.saturating_duration_since(entry.valid_until).as_secs();
-                            if expired_for < self.expired_prefetch_time { continue; }
+                            if expired_for < self.expired_prefetch_time() { continue; }
                             if !is_frequent { continue; }
                         } else if !is_frequent {
                             continue;
@@ -788,38 +856,76 @@ impl DnsCache {
     }
 
     pub fn persist_cache(&self, path: &Path) {
+        // 🔐 P2：同一时刻只允许一次落盘 —— 周期落盘（后台任务）与退出落盘（app.rs）走的是同一条路，
+        // 以前两者各写各的同一个 `.tmp`、又没有互斥：撞在一起就会写出"半新半旧"的撕裂档，
+        // 下次启动读不开 → 又触发"整份删档"（两个问题会连环）。
+        let _one_at_a_time = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let cache_to_file = || {
-            let tmp_path = path.with_extension("tmp");
-            
+            // 临时名带 PID：多个实例各写各的，不再互相踩（进程内由上面的锁串行）
+            let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+
             let mut file = File::options().create(true).truncate(true).write(true).open(&tmp_path)?;
+
+            // 🔐 P2：先写文件头（魔数 + 格式版本 + 条目数）——
+            // 以后读到不认识的版本，就能明确说"版本不兼容"，而不是含混的"可能损坏"。
+            let mut header = Vec::with_capacity(CACHE_HEADER_LEN);
+            emit_cache_header(&mut header, self.total_len() as u32);
+            std::io::Write::write_all(&mut file, &header)?;
+
             for shard in self.shards.iter() {
                 let mut shard_buffer = Vec::new();
                 {
                     let cache = shard.lock().unwrap_or_else(|e| e.into_inner());
                     DnsCacheEntry::serialize_many(cache.iter().map(|(_, entry)| entry), &mut shard_buffer)?;
-                } 
-                
+                }
+
                 std::io::Write::write_all(&mut file, &shard_buffer)?;
             }
-            
+
             file.sync_all()?;
-            
-            // 🌟 最小改动 4：强制释放文件句柄，彻底解决 Windows 独占导致 rename 失败的 183/32 报错
+
+            // 释放文件句柄（Windows 上独占会导致 rename 失败）
             drop(file);
-            
-            // 在 Windows 系统下，安全覆盖必须先删旧文件
-            #[cfg(windows)]
-            let _ = std::fs::remove_file(path);
-            
-            std::fs::rename(&tmp_path, path)?;
-            
+
+            // 🔐 P2：**不再"先删旧档再改名"** —— Rust 的 rename 在 Windows 上本就是"替换已存在文件"
+            // 的语义，先删只会凭空造出"旧档已删、新档还没就位"的窗口：这一步改名失败，用户就一份
+            // 缓存都没有了。现在失败也**绝不破坏旧档**：退避重试，实在不行就留着新档并点名日志。
+            let mut rename_err = None;
+            for attempt in 0..=PERSIST_RENAME_RETRIES {
+                match std::fs::rename(&tmp_path, path) {
+                    Ok(()) => {
+                        rename_err = None;
+                        break;
+                    }
+                    Err(err) => {
+                        rename_err = Some(err);
+                        if attempt < PERSIST_RENAME_RETRIES {
+                            std::thread::sleep(Duration::from_millis(PERSIST_RENAME_RETRY_MS));
+                        }
+                    }
+                }
+            }
+
+            if let Some(err) = rename_err {
+                crate::log::warn!(
+                    "替换缓存文件失败（旧档已保留、新档仍在 {}）：{}。\
+                     常见原因是杀毒/索引/备份软件正占用该文件，或另一个实例在同时写盘",
+                    tmp_path.display(),
+                    err
+                );
+                return Err(ProtoError::from(err));
+            }
+
             Ok::<_, ProtoError>(())
         };
 
         match cache_to_file() {
-            // 🌟 核心修复 3：将 {:?} 改为 "{}"，并调用 .display() 消除转义字符！
-            // 让输出符合人类正常的阅读习惯，不再出现 \\ 这种反人类转义。
-            Ok(_) => info!("save DNS cache to file \"{}\" successfully.", path.display()),
+            Ok(_) => {
+                info!("save DNS cache to file \"{}\" successfully.", path.display());
+                // 顺手清掉历史遗留的固定名临时档（旧版本用的是 `.tmp`）
+                let _ = std::fs::remove_file(path.with_extension("tmp"));
+            }
             Err(err) => error!("failed to save DNS cache to file {}", err),
         }
     }
@@ -846,57 +952,189 @@ impl DnsCache {
             .and_then(|sys_time| std::time::SystemTime::now().duration_since(sys_time).ok())
             .unwrap_or(Duration::ZERO);
 
-        let read_from_cache_file = || -> Result<Vec<DnsCacheEntry>, ProtoError> {
-            let mut file = File::options().read(true).open(path)?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-
-            // 🌟 核心防御：反序列化本身可能因为文件截断而抛出普通的 Error
-            DnsCacheEntry::deserialize_many(&data)
+        // 🔐 P2：先把整个文件读进来，再"认头 → 尽力挽救"。
+        // 以前是"任何一条读错 → 整份作废 → 删掉整个文件"，且不管什么原因都只报一句 corrupted。
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(err) => {
+                error!("failed to read DNS cache file {}: {}", display_str, err);
+                return;
+            }
         };
 
-        match read_from_cache_file() {
-            Ok(entries) => {
-                let count = entries.len();
-                for mut entry in entries {
-                    // ... 冻结时间扣除逻辑保持原样 ...
-                    if entry.valid_until > now {
-                        let remaining = entry.valid_until - now;
-                        if remaining > offline_duration {
-                            entry.valid_until -= offline_duration;
-                        } else {
-                            // 离线时间太长，已经过期，将其推入死亡状态
-                            entry.valid_until = now - (offline_duration - remaining);
-                        }
-                    } else {
-                        entry.valid_until -= offline_duration; 
-                    }
+        let mut payload: &[u8] = &data;
+        let mut declared: Option<u32> = None;
 
-                    let query = entry.data.query().clone();
-                    let group = entry.data.name_server_group().unwrap_or("default").to_string();
-                    let key = CacheKey { query, group, ecs: entry.ecs.clone() };
-                    
-                    let mut cache = self.get_shard(&key).lock().unwrap_or_else(|e| e.into_inner());
-                    cache.put(key, entry);
-                }
-                info!(
-                    "DNS cache {} records loaded (offset {}s), elapsed {:?}",
-                    count,
-                    offline_duration.as_secs(),
-                    now.elapsed()
+        // 🔐 P2：有文件头才分得清"版本不兼容"和"文件损坏" —— 这正是加头的意义。
+        if let Some((version, entries_in_file)) = parse_cache_header(&data) {
+            if version != CACHE_FORMAT_VERSION {
+                let archived = archive_cache_file(path, &format!("v{version}-incompatible"));
+                error!(
+                    "缓存文件 {} 的格式版本是 v{}，本程序只认 v{}：**未删除**，已改名存档为 {}；本次按冷启动继续运行",
+                    display_str,
+                    version,
+                    CACHE_FORMAT_VERSION,
+                    archived
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(存档失败，原文件保留)".to_string()),
                 );
+                return;
             }
-            Err(err) => {
-                // 如果是常规的文件解析错误，走到这里报错，并顺手把坏档删了
-                error!("🔥 failed to read DNS cache file, file might be corrupted: {}. Ignored.", err);
-                let _ = std::fs::remove_file(path);
-            }
+
+            declared = Some(entries_in_file);
+            payload = &data[CACHE_HEADER_LEN..];
+        } else {
+            info!("缓存文件没有文件头：按旧格式读取（本次兼容；下次落盘会补上头）");
         }
+
+        let (entries, stopped_at) = deserialize_best_effort(payload);
+
+        if let Some(err) = stopped_at.as_ref() {
+            let archived = archive_cache_file(path, "corrupt");
+            error!(
+                "缓存文件 {} 读取中断：{}（文件声明 {} 条，已挽救 {} 条）—— **未删除**，已改名存档为 {}",
+                display_str,
+                err,
+                declared.map(|c| c.to_string()).unwrap_or_else(|| "未知".to_string()),
+                entries.len(),
+                archived
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(存档失败，原文件保留)".to_string()),
+            );
+        }
+
+        let count = entries.len();
+        for mut entry in entries {
+            // ... 冻结时间扣除逻辑保持原样 ...
+            if entry.valid_until > now {
+                let remaining = entry.valid_until - now;
+                if remaining > offline_duration {
+                    entry.valid_until -= offline_duration;
+                } else {
+                    // 离线时间太长，已经过期，将其推入死亡状态
+                    entry.valid_until = now - (offline_duration - remaining);
+                }
+            } else {
+                entry.valid_until -= offline_duration; 
+            }
+
+            let query = entry.data.query().clone();
+            let group = entry.data.name_server_group().unwrap_or("default").to_string();
+            let key = CacheKey { query, group, ecs: entry.ecs.clone() };
+            
+            let mut cache = self.get_shard(&key).lock().unwrap_or_else(|e| e.into_inner());
+            cache.put(key, entry);
+        }
+        info!(
+            "DNS cache {} records loaded (offset {}s), elapsed {:?}",
+            count,
+            offline_duration.as_secs(),
+            now.elapsed()
+        );
     }
 
     pub fn total_len(&self) -> usize {
         self.shards.iter().map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len()).sum()
     }
+}
+
+/// 缓存文件的魔数（8 字节，hexdump 一眼可辨）
+const CACHE_MAGIC: &[u8; 8] = b"SMCACHE\0";
+/// 缓存文件的格式版本。**改动记录格式时必须 +1**（这样旧程序读到新文件能说清"版本不兼容"）
+const CACHE_FORMAT_VERSION: u16 = 1;
+/// 文件头长度：魔数 8 + 版本 2 + 条目数 4
+const CACHE_HEADER_LEN: usize = 14;
+/// 替换缓存文件失败时的重试次数与间隔（200ms × 2）
+const PERSIST_RENAME_RETRIES: usize = 2;
+const PERSIST_RENAME_RETRY_MS: u64 = 200;
+/// 落盘互斥：周期落盘与退出落盘串行，避免两个线程写同一个临时档（撕裂档 → 下次读失败 → 整份删档）
+static PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 写入缓存文件头：魔数 + 格式版本 + 条目数（little-endian）
+fn emit_cache_header(buf: &mut Vec<u8>, entry_count: u32) {
+    buf.extend_from_slice(CACHE_MAGIC);
+    buf.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&entry_count.to_le_bytes());
+}
+
+/// 解析缓存文件头；返回 (格式版本, 文件里声明的条目数)。
+/// 不是本格式（即没有文件头的**旧版**缓存文件）返回 None，由调用方按旧格式兼容读取。
+fn parse_cache_header(data: &[u8]) -> Option<(u16, u32)> {
+    if data.len() < CACHE_HEADER_LEN || &data[..8] != CACHE_MAGIC {
+        return None;
+    }
+
+    let version = u16::from_le_bytes([data[8], data[9]]);
+    let count = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
+    Some((version, count))
+}
+
+/// 🔐 P2：**尽力挽救**式解析 —— 遇到坏条目就停在那里，保留前面已经解析出来的条目。
+///
+/// 以前是"任何一条出错就整份作废"，再由调用方删掉整个文件：几万条里坏一条，全没。
+/// 现在返回 (救回的条目, 停下来的原因)；全部读成功时第二个值为 None。
+fn deserialize_best_effort(data: &[u8]) -> (Vec<DnsCacheEntry>, Option<ProtoError>) {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+
+    while offset < data.len() {
+        let mut decoder = BinDecoder::new(&data[offset..]);
+        match DnsCacheEntry::read(&mut decoder) {
+            Ok(entry) => {
+                let consumed = decoder.index();
+                if consumed == 0 {
+                    // 防御：解析器没前进就必须停下，否则死循环
+                    return (entries, Some(DecodeError::InsufficientBytes.into()));
+                }
+                entries.push(entry);
+                offset += consumed;
+            }
+            Err(err) => return (entries, Some(err)),
+        }
+    }
+
+    (entries, None)
+}
+
+/// 🔐 P2：坏档 / 版本不兼容档**不直接删**，改名存档（只保留最近 1 份），便于用户排查。
+fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let file_name = path.file_name()?.to_string_lossy().to_string();
+    let archived = path.with_file_name(format!("{file_name}.{tag}-{stamp}"));
+
+    if let Err(err) = std::fs::rename(path, &archived) {
+        error!(
+            "缓存文件改名存档失败（{} → {}）：{}。原文件保留不动。",
+            path.display(),
+            archived.display(),
+            err
+        );
+        return None;
+    }
+
+    // 只留最近 1 份存档（含历史遗留的临时档），免得长期占磁盘
+    if let Some(dir) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(dir) {
+            let prefix = format!("{file_name}.");
+            let mut siblings: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p != &archived
+                        && p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with(&prefix))
+                            .unwrap_or(false)
+                })
+                .collect();
+            siblings.sort();
+            for old in &siblings {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+
+    Some(archived)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1141,5 +1379,224 @@ impl Drop for InflightCacheGuard {
                 let _ = tx.send(None); 
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_reload_tests {
+    use super::*;
+
+    /// 🔐 P2：热重载必须把缓存策略真正换掉。
+    /// 原来 `with_cache` 复用同一个 Arc<DnsCache>，于是改完 serve-expired 之后
+    /// "一部分生效一部分不生效"，同一次请求会走两套互相矛盾的判断。
+    #[test]
+    fn reload_config_updates_policy_in_place() {
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        assert!(!cache.serve_expired());
+        assert_eq!(cache.expired_reply_ttl(), 0);
+
+        let cfg = RuntimeConfig::builder()
+            .with("serve-expired yes")
+            .with("serve-expired-ttl 1800")
+            .with("serve-expired-reply-ttl 42")
+            .with("serve-expired-prefetch-time 7")
+            .build()
+            .unwrap();
+
+        cache.reload_config(&cfg);
+
+        assert!(cache.serve_expired(), "serve-expired 应即时生效");
+        assert_eq!(cache.expired_ttl(), 1800);
+        assert_eq!(cache.expired_reply_ttl(), 42, "过期答复的 TTL 应即时生效");
+        assert_eq!(cache.expired_prefetch_time(), 7);
+    }
+
+    /// 容量变更无法就地生效（分片容量启动时固定），但记录的值要跟着配置更新，
+    /// 并走"如实告警"那条分支 —— 而不是静默装作已生效。
+    #[test]
+    fn reload_config_records_new_cache_size() {
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        assert_eq!(cache.cache_size.load(Ordering::Relaxed), 1024);
+
+        let cfg = RuntimeConfig::builder()
+            .with("cache-size 4096")
+            .build()
+            .unwrap();
+        cache.reload_config(&cfg);
+
+        assert_eq!(cache.cache_size.load(Ordering::Relaxed), 4096);
+    }
+
+    /// 造 n 条测试缓存记录（A 记录，TTL 300 秒）
+    fn make_test_entries(n: usize) -> Vec<DnsCacheEntry> {
+        use crate::libdns::proto::{
+            op::{Message, Query},
+            rr::{Name, RData, Record, RecordType},
+        };
+        use std::net::Ipv4Addr;
+
+        (0..n)
+            .map(|i| {
+                let name = Name::from_ascii(format!("t{i}.cache.test.")).unwrap();
+                let mut msg = Message::query();
+                msg.add_query(Query::query(name.clone(), RecordType::A));
+                msg.add_answer(Record::from_rdata(
+                    name,
+                    300,
+                    RData::A(Ipv4Addr::new(10, 0, 0, i as u8 + 1).into()),
+                ));
+                let res: DnsResponse = msg.into();
+                DnsCacheEntry::new(res, Instant::now() + Duration::from_secs(300), None)
+            })
+            .collect()
+    }
+
+    /// 🔐 P2：缓存文件头 —— 写进去必须能原样认出来；旧版"无头"文件必须仍被判为旧格式。
+    #[test]
+    fn cache_header_roundtrip_and_legacy_detection() {
+        let mut buf = Vec::new();
+        emit_cache_header(&mut buf, 12345);
+        assert_eq!(buf.len(), CACHE_HEADER_LEN);
+        assert_eq!(&buf[..8], CACHE_MAGIC, "文件开头必须是魔数");
+
+        let (version, count) = parse_cache_header(&buf).expect("应能认出自己写的头");
+        assert_eq!(version, CACHE_FORMAT_VERSION);
+        assert_eq!(count, 12345);
+
+        // 旧版无头文件：不能误判成"有头"
+        let legacy = b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(parse_cache_header(legacy).is_none(), "无头文件必须被判为旧格式");
+
+        // 太短/空文件也不能崩
+        assert!(parse_cache_header(b"SMCA").is_none());
+        assert!(parse_cache_header(&[]).is_none());
+    }
+
+    /// 🔐 P2：**尽力挽救** —— 尾部被截断时，坏条目前面那些必须救回来（以前是整份作废 + 删档）。
+    #[test]
+    fn best_effort_salvages_prefix_of_truncated_file() {
+        let entries = make_test_entries(3);
+        let mut buf = Vec::new();
+        DnsCacheEntry::serialize_many(entries.iter(), &mut buf).unwrap();
+        assert!(!buf.is_empty());
+
+        let (all, stopped) = deserialize_best_effort(&buf);
+        assert_eq!(all.len(), 3, "完整数据应能读全 3 条");
+        assert!(stopped.is_none(), "完整数据不该报「读到坏条目就停了」");
+
+        // 砍掉最后 5 个字节：必须救回 2 条，并给出停下来的原因
+        let truncated = &buf[..buf.len() - 5];
+        let (salvaged, stopped) = deserialize_best_effort(truncated);
+        assert_eq!(salvaged.len(), 2, "尾部坏掉的第 3 条不该连累前面 2 条");
+        assert!(stopped.is_some(), "必须报告「读到坏条目就停了」");
+    }
+
+    /// 🔐 P2：坏档/不兼容档**改名存档**而不是删除，并且只保留最近 1 份。
+    #[test]
+    fn archive_keeps_latest_snapshot_only() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cache-arch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("smartdns.cache");
+
+        // 先造一份"历史存档"，验证只留最近 1 份
+        std::fs::write(path.with_file_name("smartdns.cache.old-20200101-000000"), b"old").unwrap();
+        std::fs::write(&path, b"current").unwrap();
+
+        let archived = archive_cache_file(&path, "corrupt").expect("应能改名存档");
+        assert!(!path.exists(), "原文件应被改名（不再留在原位置）");
+        assert!(archived.exists(), "存档必须存在 —— 是改名，不是删除");
+        assert_eq!(std::fs::read(&archived).unwrap(), b"current");
+
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(left.len(), 1, "只应保留最近 1 份存档，实际还有 {left:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 P2：落盘必须写出文件头，且"读回来"能拿到同样的条目（完整往返）；
+    /// 反复落盘要能覆盖同一个文件、不留临时档。
+    #[test]
+    fn persist_writes_header_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cache-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("smartdns.cache");
+
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        for entry in make_test_entries(2) {
+            let query = entry.data.query().clone();
+            let key = CacheKey { query, group: "default".to_string(), ecs: None };
+            cache
+                .get_shard(&key)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .put(key, entry);
+        }
+        assert_eq!(cache.total_len(), 2);
+
+        cache.persist_cache(&path);
+
+        let data = std::fs::read(&path).expect("落盘后文件应存在");
+        let (version, count) = parse_cache_header(&data).expect("落盘必须写文件头");
+        assert_eq!(version, CACHE_FORMAT_VERSION);
+        assert_eq!(count, 2, "头里的条目数应等于缓存里的条目数");
+
+        // 读回来必须拿到同样的 2 条，且没有"读坏"的中断
+        let (entries, stopped) = deserialize_best_effort(&data[CACHE_HEADER_LEN..]);
+        assert_eq!(entries.len(), 2);
+        assert!(stopped.is_none());
+
+        // 再落一次：应当直接覆盖同一个文件（不依赖"先删旧档"），且不留临时档
+        cache.persist_cache(&path);
+        let again = std::fs::read(&path).unwrap();
+        assert!(parse_cache_header(&again).is_some(), "第二次落盘后文件仍应是合法格式");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不该留下临时档，实际有 {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 P2：替换失败时**绝不破坏旧档**（旧版本是"先删旧档再改名"，失败就一份都没有了）。
+    /// 这里用一个"非空目录"占住目标路径，让 rename 必然失败。
+    #[test]
+    fn persist_keeps_old_file_when_replace_fails() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cache-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("smartdns.cache");
+
+        // 目标位置放一个非空目录：rename(文件 → 非空目录) 在任何平台都会失败
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        std::fs::write(path.join("occupied").join("keep.txt"), b"old-must-survive").unwrap();
+
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        cache.persist_cache(&path); // 失败路径：只应当打日志，不得 panic、不得删掉旧档
+
+        assert!(path.is_dir(), "替换失败后，原位置的东西（这里是目录）必须还在");
+        assert_eq!(
+            std::fs::read(path.join("occupied").join("keep.txt")).unwrap(),
+            b"old-must-survive",
+            "旧档内容必须完好无损"
+        );
+        // 新档应被保留在临时文件里（下次还能用），而不是被丢掉
+        let tmp: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert_eq!(tmp.len(), 1, "新档应保留在临时文件里，实际 {tmp:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

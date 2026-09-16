@@ -33,8 +33,11 @@ PIDFILE=/var/run/smartdns.pid
 test -x $SMARTDNS || exit 5
 
 case $1 in
-	start)
-		$SMARTDNS "$SMART_DNS_OPTS"
+start)
+	# 🔐 P2：这里**必须**不加引号 —— $SMART_DNS_OPTS 是"多个参数拼成的一个串"，
+	# 加了引号就整串被当成"一个"参数，进程启动必失败（debian 那份脚本也是不加引号的）。
+	# shellcheck disable=SC2086
+	$SMARTDNS $SMART_DNS_OPTS
 		while true; do
 			if [ -e "$PIDFILE" ]; then
 				break;

@@ -180,7 +180,7 @@ Bash
 
 chmod +x ./smartdns
 
-sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
+sudo ./smartdns run -c ./smartdns.conf
 
 **方式二：后台服务运行（推荐，开机自启）**
 
@@ -205,3 +205,7 @@ Bash
 docker run -d --name smartdns --restart always --network host -v /你的本地路径/smartdns.conf:/etc/smartdns/smartdns.conf ghcr.io/gdxz-linus/smartdns-edge:latest
 
 (注：由于 DNS 服务涉及局域网广播与底层网络通信，强烈建议使用 --network host 主机网络模式)
+
+(注：容器镜像里也内置了**网页控制台**，默认**不开**。要用就把容器的 8000 端口映射出来，例如 `-p 8000:8000`，
+并在配置里写一行 `api-token 你的口令`（或用 `-e SMARTDNS_API_TOKEN=你的口令`）；它是明文 HTTP，
+口令会明文传输，所以只在可信内网使用，跨网络请改用 `bind-https` 或反向代理。)

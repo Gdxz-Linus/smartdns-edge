@@ -38,10 +38,23 @@ impl DomainRuleMap {
             Domain::Name(name) => {
                 vec![name.clone()]
             }
-            Domain::Set(s) => domain_sets
-                .get(s)
-                .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                .unwrap_or_default(),
+            Domain::Set(s) => {
+                let names = domain_sets
+                    .get(s)
+                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                // 🔐 P2：原来这里静默 `unwrap_or_default()` —— 引用了不存在/加载失败的名单时，
+                // 相关规则被悄悄丢掉、零告警，用户会以为拦截/分流已经生效。
+                if names.is_empty() {
+                    crate::log::warn!(
+                        "domain-set `{}` 为空或加载失败：引用它的规则已被丢弃（检查名单文件/URL 是否可读）",
+                        s
+                    );
+                }
+
+                names
+            }
         };
 
         let mut name_rule_map = HashMap::<WildcardName, DomainRule>::new();

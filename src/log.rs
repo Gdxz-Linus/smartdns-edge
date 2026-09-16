@@ -1,5 +1,17 @@
 use std::{env, fmt, io, path::Path, sync::OnceLock};
 
+/// 同一把"配置类"告警只报一次。
+///
+/// 🔐 P2（用户定策）：组名不存在属于配置问题，一次就够 —— 但它在解析热路径上，
+/// 不收敛的话每个查询打一行，日志会被刷爆。返回 true 表示这次是第一次（该打）。
+pub fn warn_once(key: &str) -> bool {
+    static WARNED: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+    let warned = WARNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut warned = warned.lock().unwrap_or_else(|e| e.into_inner());
+    warned.insert(key.to_string())
+}
+
 pub use tracing::*;
 pub use tracing::dispatcher::set_default;
 use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
