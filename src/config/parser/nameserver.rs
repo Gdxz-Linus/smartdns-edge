@@ -53,6 +53,8 @@ impl NomParser for NameServerInfo {
                 match k.to_lowercase().as_str() {
                     "e" | "exclude-default-group" => nameserver.exclude_default_group = true,
                     "blacklist-ip" => nameserver.blacklist_ip = true,
+                    // 后备服务器：平时不用，正常那批不灵了才上场
+                    "fallback" => nameserver.fallback = true,
                     "whitelist-ip" => nameserver.whitelist_ip = true,
                     "check-edns" => nameserver.check_edns = true,
                     "b" | "bootstrap-dns" => nameserver.bootstrap_dns = true,
@@ -119,6 +121,20 @@ impl NomParser for NameServerInfo {
                             log::warn!("expect tls-host-verify")
                         }
                     },
+                    // 🔐 第三部分第 2 条（`-spki-pin`）：证书公钥（SPKI）DER 的 SHA-256，base64 编码
+                    "spki-pin" => match v {
+                        Some(pin) => match crate::dns_url::decode_spki_pin(pin) {
+                            Ok(_) => nameserver.server.set_spki_pin(pin),
+                            Err(err) => log::error!(
+                                "Invalid spki-pin value: '{}', ignored! ({})",
+                                pin,
+                                err
+                            ), // 🌟 拒绝静默吞错
+                        },
+                        None => {
+                            log::warn!("expect spki-pin")
+                        }
+                    },
                     _ => {
                         log::warn!("unknown server options: {}, {:?}", k, v);
                     }
@@ -136,6 +152,30 @@ mod tests {
 
     fn name_server_default() -> NameServerInfo {
         DnsUrl::from_str("udp://127.0.0.1:53").unwrap().into()
+    }
+
+    /// 🔐 第三部分第 3 条（上游 `-fallback`）：写得对就记下来，不写就是普通上游
+    #[test]
+    fn test_fallback_flag() {
+        assert_eq!(
+            NameServerInfo::parse("server 8.8.8.8 -fallback"),
+            Ok((
+                "",
+                NameServerInfo {
+                    server: DnsUrl::from_str("udp://8.8.8.8").unwrap(),
+                    fallback: true,
+                    ..name_server_default()
+                }
+            ))
+        );
+
+        assert!(
+            !NameServerInfo::parse("server 8.8.8.8")
+                .unwrap()
+                .1
+                .fallback,
+            "不写 -fallback 就是普通上游（默认 false）"
+        );
     }
 
     #[test]

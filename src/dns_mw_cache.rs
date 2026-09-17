@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::config::AnswerAffectingOpts;
 use crate::config::ServerOpts;
 use crate::dns_conf::RuntimeConfig;
 use crate::libdns::proto::ProtoError;
@@ -30,6 +31,7 @@ use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use std::sync::Mutex;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 // 🌟 核心升维：全局唯一的安全缓存主键
 // 彻底杜绝 EDNS0 ECS 导致的跨地域缓存污染与多分组重写踩踏！
@@ -38,6 +40,10 @@ pub struct CacheKey {
     pub query: Query,
     pub group: String,
     pub ecs: Option<String>,
+    /// 📌 会影响"答案内容"的监听级选项（见 `AnswerAffectingOpts` 的说明）。
+    /// 不进标记的后果实测过：一个监听写 `-no-speed-check`、另一个不写时，两边会互相借用
+    /// 对方算出来的答案，且"谁先查谁说了算"。
+    pub opts: AnswerAffectingOpts,
 }
 
 pub struct DnsCacheMiddleware {
@@ -97,6 +103,23 @@ impl DnsCacheMiddleware {
         // 改完 serve-expired / cache-persist / cache-size 之后一部分生效一部分不生效。
         cache.reload_config(cfg);
 
+        // 🔐 A8（2026-09-17）：持久化这三项（cache-persist / cache-file / cache-checkpoint-time）
+        // 原来改了等于没改 —— 周期落盘任务在启动时一次性建死（路径和节拍当场抄在自己身上），
+        // 重载路径管都不管。现在按新配置停掉/重建；并且运行期"从关到开"时顺带把磁盘上
+        // 已有的缓存读回来（只补内存里没有的条目，绝不覆盖运行期已经拿到的更新答案）。
+        // 🔐 域名预取同样是"启动时才判断一次"的老毛病，这里一并按新配置停/建。
+        Self::sync_prefetch_task(cfg, &cache, dns_handle.clone());
+
+        let started_from_off = Self::sync_persist_task(cfg, &cache);
+        if started_from_off {
+            let cache_file = cfg.cache_file();
+            if cache_file.exists() {
+                let cache_for_load = cache.clone();
+                // 运行期读档不拖住重载本身：丢给阻塞线程池去做
+                tokio::task::spawn_blocking(move || cache_for_load.load_cache_only_missing(&cache_file));
+            }
+        }
+
         Self {
             cfg: cfg.clone(),
             cache,
@@ -108,39 +131,81 @@ impl DnsCacheMiddleware {
         }
     }
 
-    fn spawn_background_tasks(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>, client_handle: DnsHandle) {
-        if cfg.cache_persist() {
-            let cache_file = cfg.cache_file();
-            let cache_weak = Arc::downgrade(cache);
-            let cache_checkpoint_time = cfg.cache_checkpoint_time();
-            tokio::spawn(async move {
-                // 🌟 最小改动 3：删除了这里原有的异步 load_cache，因为它已经在上面同步执行过了
-                
-                let checkpoint_duration = Duration::from_secs(cache_checkpoint_time);
-                let mut interval = tokio::time::interval_at(
-                    tokio::time::Instant::now() + checkpoint_duration,
-                    checkpoint_duration,
-                );
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            if let Some(c) = cache_weak.upgrade() {
-                                let cache_file = cache_file.clone();
-                                // 落盘依然是异步外包给 spawn_blocking，绝不影响主进程解析 DNS
-                                tokio::task::spawn_blocking(move || c.persist_cache(cache_file.as_path()));
-                            } else {
-                                break;
-                            }
-                        }
-                        _ = crate::signal::terminate() => {
-                            break;
-                        }
-                    };
+    /// 🔐 A8：让"周期落盘任务"跟着（新）配置走 —— 该停的停、该按新路径/新节拍重建的重建。
+    ///
+    /// 返回 `true` 表示这次是**从"没有任务"变成"有任务"**（即运行期刚把持久化打开），
+    /// 调用方可以据此顺带把磁盘上已有的缓存读回来。
+    fn sync_persist_task(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>) -> bool {
+        let want: Option<(PathBuf, u64)> = if cfg.cache_persist() {
+            Some((cfg.cache_file(), cfg.cache_checkpoint_time()))
+        } else {
+            None
+        };
+
+        let mut slot = cache
+            .persist_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let current: Option<(PathBuf, u64)> =
+            slot.as_ref().map(|t| (t.file.clone(), t.checkpoint_secs));
+
+        let action = persist_action(
+            current.as_ref().map(|(f, c)| (f.as_path(), *c)),
+            want.as_ref().map(|(f, c)| (f.as_path(), *c)),
+        );
+
+        match action {
+            PersistAction::Keep => false,
+            PersistAction::Stop => {
+                if let Some(old) = slot.take() {
+                    old.cancel.cancel();
                 }
-            });
+                log::info!("缓存持久化：已按新配置关闭，周期落盘任务停止（内存缓存不再往硬盘写）");
+                false
+            }
+            PersistAction::Restart {
+                file,
+                checkpoint_secs,
+            } => {
+                if let Some(old) = slot.take() {
+                    old.cancel.cancel();
+                }
+                let task = spawn_persist_task(cache, file.clone(), checkpoint_secs);
+                match current.as_ref() {
+                    None => log::info!(
+                        "缓存持久化：已打开 —— 立刻开始周期落盘（每 {} 秒一次，写入 {}）",
+                        checkpoint_secs,
+                        file.display()
+                    ),
+                    Some((old_file, old_cadence)) => {
+                        if old_file != &file {
+                            log::info!(
+                                "缓存持久化：落盘路径已从 {} 改为 {}（周期落盘已按新路径重建，旧任务已停）",
+                                old_file.display(),
+                                file.display()
+                            );
+                        }
+                        if *old_cadence != checkpoint_secs {
+                            log::info!(
+                                "缓存持久化：落盘节拍已从 {} 秒改为 {} 秒",
+                                old_cadence,
+                                checkpoint_secs
+                            );
+                        }
+                    }
+                }
+                *slot = Some(task);
+                current.is_none()
+            }
         }
+    }
+
+    fn spawn_background_tasks(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>, client_handle: DnsHandle) {
+        // 🔐 A8（2026-09-17）：周期落盘任务改由 `sync_persist_task` 统一管理 ——
+        // 启动时按配置建一个，热重载时按新配置停掉/重建（原来是在这里一次性建死，
+        // 于是运行期改 cache-persist / cache-file / cache-checkpoint-time 全都半生效）。
+        // 这里剩下的两个后台任务与这三项配置无关：缓存 GC 与域名预取。
+        Self::sync_persist_task(cfg, cache);
 
         let gc_cache_weak = Arc::downgrade(cache);
         tokio::spawn(async move {
@@ -158,70 +223,36 @@ impl DnsCacheMiddleware {
             }
         });
 
-        if cfg.prefetch_domain() {
-            let prefetch_notify = cache.prefetch_notify.clone();
-            let client = client_handle.with_new_opt(ServerOpts {
-                is_background: true,
-                ..Default::default()
-            });
-            let cache_weak = Arc::downgrade(cache);
-            
-            tokio::spawn(async move {
-                let min_interval = Duration::from_secs(
-                    std::env::var("PREFETCH_MIN_INTERVAL").as_deref().unwrap_or("60").parse().unwrap_or(60),
-                );
-                let mut last_check = Instant::now();
+        Self::sync_prefetch_task(cfg, cache, client_handle);
+    }
 
-                loop {
-                    prefetch_notify.notified().await;
-                    
-                    let cache_arc = match cache_weak.upgrade() {
-                        Some(c) => c,
-                        None => break,
-                    };
+    /// 🔐 域名预取任务：运行期把 `prefetch-domain` 打开/关掉也都要**即时生效**。
+    ///
+    /// 原来只在启动时判断一次（`if cfg.prefetch_domain()` 里直接把任务建死），于是运行期
+    /// "关→开"改了不生效：查询路径上那道闸门（`ctx.cfg().prefetch_domain()`）会开始发预取通知，
+    /// 但**没有任务在听**，到期的条目一直没人刷新，直到重启才恢复。
+    /// （反方向"开→关"因为查询路径那道闸门本来就按新配置走，实际上会停 —— 但任务还挂着，
+    ///   这里一并按新配置把任务收掉，让"关了就是真关"。）
+    fn sync_prefetch_task(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>, client: DnsHandle) {
+        let want = cfg.prefetch_domain();
+        let mut slot = cache
+            .prefetch_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
-                    let now = Instant::now();
-                    let most_recent;
-                    if now - last_check > min_interval {
-                        last_check = now;
-                        let expired = {
-                            let (expired, most_recent0) = cache_arc.get_expired(now, Some(5)).await;
-                            most_recent = most_recent0;
-                            expired
-                        };
-
-                        if !expired.is_empty() {
-                            // Cache 只需要忠实地把过期的 CacheKey 重新派发即可。
-                            // 如果启用了双栈，底层的 dualstack 和 ns 模块会自动完成裂变和 Single-Flight 折叠。
-                            for cache_key in expired {
-                                // 🔐 P2（用户定策）：`cache_key.group` 是 **服务器组** 名（来自
-                                // `server_group_name()`：`-group` 或域规则链里的 `nameserver`），
-                                // 所以必须放进 `group` 字段 —— 原来放进 `rule_group` 属于"名字放错字段"，
-                                // 再加上 search() 会按来源 IP 重算，结果预取走的是**默认上游**，
-                                // 目标组的过期条目永远刷不到、还会在默认键上多写一份。
-                                let opts = ServerOpts {
-                                    is_background: true,
-                                    group: Some(cache_key.group.clone()),
-                                    ..Default::default()
-                                };
-                                let req_client = client.with_new_opt(opts);
-                                let cache_clone = cache_arc.clone(); 
-                                
-                                tokio::spawn(async move {
-                                    let _guard = PrefetchGuard { cache: cache_clone, key: cache_key.clone() };
-                                    let mut msg = Message::query();
-                                    msg.add_query(cache_key.query.clone());
-                                    req_client.send(msg).await;
-                                });
-                            }
-                        }
-                    } else {
-                        most_recent = Duration::ZERO;
-                    }
-                    let dura = most_recent.max(min_interval);
-                    prefetch_notify.notify_after(dura).await;
+        match (slot.is_some(), want) {
+            // 现状已符合配置：不动（避免每次重载都把任务停掉重建、白白丢掉 last_check 节流状态）
+            (true, true) | (false, false) => {}
+            (true, false) => {
+                if let Some(cancel) = slot.take() {
+                    cancel.cancel();
                 }
-            });
+                log::info!("域名预取：已按新配置关闭（预取任务停止，到期条目不再自动刷新）");
+            }
+            (false, true) => {
+                *slot = Some(spawn_prefetch_task(cache, client));
+                log::info!("域名预取：已打开，立即生效（到期条目会按配置自动刷新）");
+            }
         }
     }
 
@@ -296,6 +327,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
             query: req.query().original().to_owned(),
             group: ctx.server_group_name().to_string(),
             ecs: ecs_str.clone(),
+            opts: AnswerAffectingOpts::from_server_opts(&ctx.server_opts),
         };
 
         // 🌟 过期条目的处置（用户定调）：过期数据只分两种下场，没有第三种。
@@ -353,6 +385,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                         query: Query::query(cache_key.query.name().clone(), other_type),
                                         group: cache_key.group.clone(),
                                         ecs: cache_key.ecs.clone(),
+                                        opts: cache_key.opts.clone(),
                                     };
                                     
                                     if self.cache.mark_prefetching(&other_key).await {
@@ -460,6 +493,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             query: extra_query,
                             group: ctx.server_group_name().to_string(), // 现在可以畅通无阻地读取 ctx 了
                             ecs: ecs_str.clone(),
+                            opts: AnswerAffectingOpts::from_server_opts(&ctx.server_opts),
                         };
                         if extra_resp.truncated() {
                             debug!(
@@ -559,6 +593,166 @@ impl Deref for DomainPrefetchingNotify {
 const MAX_TTL: u32 = 86400_u32;
 const SHARD_COUNT: usize = 64;
 
+/// 🔐 A8：一个"周期落盘"任务当前的形态 —— 热重载时拿它和新配置比对，决定要不要停掉重建。
+struct PersistTask {
+    /// 停这个任务的取消牌（`cancel()` 之后，任务在下一个循环点退出）
+    cancel: CancellationToken,
+    /// 建它时用的落盘路径
+    file: PathBuf,
+    /// 建它时用的落盘节拍（秒）
+    checkpoint_secs: u64,
+}
+
+/// 🔐 A8：热重载时对"周期落盘任务"该做的动作（纯决策函数，各分支由单测直接覆盖）。
+#[derive(Debug, PartialEq, Eq)]
+enum PersistAction {
+    /// 现状已经符合配置，什么都不用做
+    Keep,
+    /// 配置里关掉了持久化 → 停掉任务
+    Stop,
+    /// 没任务 → 建一个；路径或节拍变了 → 停掉重建
+    Restart {
+        file: PathBuf,
+        checkpoint_secs: u64,
+    },
+}
+
+/// 🔐 A8：比对"现在这个任务"和"配置想要的"，得出该做什么。
+fn persist_action(current: Option<(&Path, u64)>, want: Option<(&Path, u64)>) -> PersistAction {
+    match (current, want) {
+        (None, None) => PersistAction::Keep,
+        (Some(_), None) => PersistAction::Stop,
+        (Some((cf, cc)), Some((wf, wc))) if cf == wf && cc == wc => PersistAction::Keep,
+        (_, Some((wf, wc))) => PersistAction::Restart {
+            file: wf.to_path_buf(),
+            checkpoint_secs: wc,
+        },
+    }
+}
+
+/// 🔐 起一个域名预取任务，返回取消牌（运行期把 prefetch-domain 关掉时用它把任务停掉）。
+///
+/// 与周期落盘任务一样，任务句柄要挂在 `DnsCache` 上 —— 热重载会重建中间件、复用同一个
+/// `Arc<DnsCache>`，挂中间件上就找不回来了。
+fn spawn_prefetch_task(cache: &Arc<DnsCache>, client_handle: DnsHandle) -> CancellationToken {
+    let cancel = CancellationToken::new();
+    let cancel_in_task = cancel.clone();
+    let prefetch_notify = cache.prefetch_notify.clone();
+    let client = client_handle.with_new_opt(ServerOpts {
+        is_background: true,
+        ..Default::default()
+    });
+    let cache_weak = Arc::downgrade(cache);
+
+    tokio::spawn(async move {
+        let min_interval = Duration::from_secs(
+            std::env::var("PREFETCH_MIN_INTERVAL")
+                .as_deref()
+                .unwrap_or("60")
+                .parse()
+                .unwrap_or(60),
+        );
+        let mut last_check = Instant::now();
+
+        loop {
+            tokio::select! {
+                _ = prefetch_notify.notified() => {}
+                // 🔐 运行期把 prefetch-domain 关掉 → 由重载路径把我们停掉
+                _ = cancel_in_task.cancelled() => break,
+                _ = crate::signal::terminate() => break,
+            }
+
+            let cache_arc = match cache_weak.upgrade() {
+                Some(c) => c,
+                None => break,
+            };
+
+            let now = Instant::now();
+            let most_recent;
+            if now - last_check > min_interval {
+                last_check = now;
+                let expired = {
+                    let (expired, most_recent0) = cache_arc.get_expired(now, Some(5)).await;
+                    most_recent = most_recent0;
+                    expired
+                };
+
+                if !expired.is_empty() {
+                    // Cache 只需要忠实地把过期的 CacheKey 重新派发即可。
+                    // 如果启用了双栈，底层的 dualstack 和 ns 模块会自动完成裂变和 Single-Flight 折叠。
+                    for cache_key in expired {
+                        // 🔐 P2（用户定策）：`cache_key.group` 是 **服务器组** 名（来自
+                        // `server_group_name()`：`-group` 或域规则链里的 `nameserver`），
+                        // 所以必须放进 `group` 字段 —— 原来放进 `rule_group` 属于"名字放错字段"，
+                        // 再加上 search() 会按来源 IP 重算，结果预取走的是**默认上游**，
+                        // 目标组的过期条目永远刷不到、还会在默认键上多写一份。
+                        // 🔐 处理选项也要跟着复原：刷新必须按**原来那套口径**去算，
+                        // 否则算出来的答案会写到"默认口径"的标记下面，这条永远刷不到。
+                        let opts = cache_key.opts.into_server_opts(cache_key.group.clone());
+                        let req_client = client.with_new_opt(opts);
+                        let cache_clone = cache_arc.clone();
+
+                        tokio::spawn(async move {
+                            let _guard = PrefetchGuard { cache: cache_clone, key: cache_key.clone() };
+                            let mut msg = Message::query();
+                            msg.add_query(cache_key.query.clone());
+                            req_client.send(msg).await;
+                        });
+                    }
+                }
+            } else {
+                most_recent = Duration::ZERO;
+            }
+            let dura = most_recent.max(min_interval);
+            prefetch_notify.notify_after(dura).await;
+        }
+    });
+
+    cancel
+}
+
+/// 🔐 A8：按给定路径与节拍起一个周期落盘任务，返回它的形态（供热重载时对比 / 停掉）。
+fn spawn_persist_task(cache: &Arc<DnsCache>, file: PathBuf, checkpoint_secs: u64) -> PersistTask {
+    let cancel = CancellationToken::new();
+    let cancel_in_task = cancel.clone();
+    let cache_weak = Arc::downgrade(cache);
+    // 节拍最小 1 秒：`tokio::time::interval` 收到 0 会 panic，配置写成 0 时别把任务炸掉
+    let checkpoint_secs = checkpoint_secs.max(1);
+    let file_in_task = file.clone();
+
+    tokio::spawn(async move {
+        let checkpoint_duration = Duration::from_secs(checkpoint_secs);
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + checkpoint_duration,
+            checkpoint_duration,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Some(c) = cache_weak.upgrade() {
+                        let path = file_in_task.clone();
+                        // 落盘依然是异步外包给 spawn_blocking，绝不影响主进程解析 DNS
+                        tokio::task::spawn_blocking(move || c.persist_cache(path.as_path()));
+                    } else {
+                        break;
+                    }
+                }
+                // 🔐 A8：配置改了（关掉持久化 / 换路径 / 改节拍）→ 由重载路径把我们停掉
+                _ = cancel_in_task.cancelled() => break,
+                _ = crate::signal::terminate() => break,
+            };
+        }
+    });
+
+    PersistTask {
+        cancel,
+        file,
+        checkpoint_secs,
+    }
+}
+
 pub struct DnsCache {
     shards: Arc<Vec<Mutex<LruCache<CacheKey, DnsCacheEntry>>>>,
     // 🔐 P2：这些"缓存策略"字段改成原子量 —— 热重载时可以就地更新。
@@ -571,6 +765,12 @@ pub struct DnsCache {
     expired_prefetch_time: AtomicU64,
     /// 当前生效的配置容量（分片在创建时就固定了，用来检测"容量被改过"并如实告警）
     cache_size: AtomicUsize,
+    /// 🔐 A8：当前这个周期落盘任务长什么样（`None` = 没有任务，即持久化关着）。
+    /// 句柄放在 `DnsCache` 里而不是中间件里 —— 热重载会重建中间件、但复用同一个
+    /// `Arc<DnsCache>`，任务只有挂在这儿才能跨重载被找到并停掉。
+    persist_task: Mutex<Option<PersistTask>>,
+    /// 🔐 当前这个域名预取任务的取消牌（`None` = 没有任务，即预取关着）
+    prefetch_task: Mutex<Option<CancellationToken>>,
     pub prefetch_notify: Arc<DomainPrefetchingNotify>, 
 }
 
@@ -591,6 +791,8 @@ impl DnsCache {
         }
 
         Self {
+            persist_task: Mutex::new(None),   // 🔐 A8：任务由 sync_persist_task 建，这里只是占位
+            prefetch_task: Mutex::new(None),  // 🔐 任务由 sync_prefetch_task 建
             shards: Arc::new(shards),
             serve_expired: AtomicBool::new(serve_expired),
             expired_ttl: AtomicU64::new(expired_ttl),
@@ -772,7 +974,15 @@ impl DnsCache {
             entry.is_in_prefetching = false;
             entry.stats.hits = 1; 
         } else {
-            cache.put(key.clone(), DnsCacheEntry::new(cache_resp.clone(), valid_until, key.ecs.clone()));
+            cache.put(
+                key.clone(),
+                DnsCacheEntry::new(
+                    cache_resp.clone(),
+                    valid_until,
+                    key.ecs.clone(),
+                    key.opts.clone(),
+                ),
+            );
         }
 
         // 🌟 修复报错点：直接返回已构建好的 cache_resp 对象
@@ -930,7 +1140,18 @@ impl DnsCache {
         }
     }
 	
-	pub fn load_cache(&self, path: &Path) {
+    /// 启动时读档：文件里的条目**覆盖**内存（启动时内存本来就是空的，这是正常路径）。
+    pub fn load_cache(&self, path: &Path) {
+        self.load_cache_impl(path, false)
+    }
+
+    /// 🔐 A8：运行期"打开持久化"时读已有缓存 —— **只补内存里还没有的条目**。
+    /// 运行期内存里可能已经有更新鲜的答案，绝不能用磁盘上的旧条目把它换回去。
+    pub fn load_cache_only_missing(&self, path: &Path) {
+        self.load_cache_impl(path, true)
+    }
+
+    fn load_cache_impl(&self, path: &Path, only_missing: bool) {
         // 🌟 视觉净化：尝试将路径转化为绝对路径，如果失败则保持原样
         let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         #[allow(unused_mut)]
@@ -1006,6 +1227,7 @@ impl DnsCache {
         }
 
         let count = entries.len();
+        let mut skipped = 0usize;
         for mut entry in entries {
             // ... 冻结时间扣除逻辑保持原样 ...
             if entry.valid_until > now {
@@ -1022,17 +1244,37 @@ impl DnsCache {
 
             let query = entry.data.query().clone();
             let group = entry.data.name_server_group().unwrap_or("default").to_string();
-            let key = CacheKey { query, group, ecs: entry.ecs.clone() };
+            let key = CacheKey {
+                query,
+                group,
+                ecs: entry.ecs.clone(),
+                opts: entry.opts.clone(),
+            };
             
             let mut cache = self.get_shard(&key).lock().unwrap_or_else(|e| e.into_inner());
+            if only_missing && cache.peek(&key).is_some() {
+                // 🔐 A8：内存里已经有这个条目了（运行期刚查到的更新答案）→ 不覆盖
+                skipped += 1;
+                continue;
+            }
             cache.put(key, entry);
         }
-        info!(
-            "DNS cache {} records loaded (offset {}s), elapsed {:?}",
-            count,
-            offline_duration.as_secs(),
-            now.elapsed()
-        );
+        if only_missing {
+            info!(
+                "DNS cache: {} records loaded from file ({} kept from memory), offset {}s, elapsed {:?}",
+                count - skipped,
+                skipped,
+                offline_duration.as_secs(),
+                now.elapsed()
+            );
+        } else {
+            info!(
+                "DNS cache {} records loaded (offset {}s), elapsed {:?}",
+                count,
+                offline_duration.as_secs(),
+                now.elapsed()
+            );
+        }
     }
 
     pub fn total_len(&self) -> usize {
@@ -1043,7 +1285,12 @@ impl DnsCache {
 /// 缓存文件的魔数（8 字节，hexdump 一眼可辨）
 const CACHE_MAGIC: &[u8; 8] = b"SMCACHE\0";
 /// 缓存文件的格式版本。**改动记录格式时必须 +1**（这样旧程序读到新文件能说清"版本不兼容"）
-const CACHE_FORMAT_VERSION: u16 = 1;
+///
+/// - v1：文件头 + 条目（message / TTL / 上游组 / 命中数 / ECS）
+/// - v2（2026-09-17）：条目新增 tag 7 = "会影响答案的监听级选项"（见 `AnswerAffectingOpts`）。
+///   缓存标记跟着变了，v1 的条目不能再当成本版本的口径使用，所以旧档一律按"版本不兼容"
+///   改名存档、本次按冷启动继续（这条路径本来就有，见 `load_cache`）。
+const CACHE_FORMAT_VERSION: u16 = 2;
 /// 文件头长度：魔数 8 + 版本 2 + 条目数 4
 const CACHE_HEADER_LEN: usize = 14;
 /// 替换缓存文件失败时的重试次数与间隔（200ms × 2）
@@ -1098,6 +1345,25 @@ fn deserialize_best_effort(data: &[u8]) -> (Vec<DnsCacheEntry>, Option<ProtoErro
     (entries, None)
 }
 
+/// 判断一个文件名是不是**我们自己产出**的缓存存档（`{原文件名}.{tag}-YYYYMMDD-HHMMSS`）。
+///
+/// 🔐 B6：清理旧存档时只许删自己造的文件 —— 用户在缓存目录里放的备份
+///（`smartdns.cache.2024.bak`、`smartdns.cache.bak` 之类）不能被顺手删掉。
+fn is_our_archive(file_name: &str, candidate: &str) -> bool {
+    let Some(rest) = candidate.strip_prefix(&format!("{file_name}.")) else {
+        return false;
+    };
+    let tag_ok = rest.starts_with("corrupt-")
+        || rest.starts_with("load-panic-")
+        || (rest.starts_with('v') && rest.contains("-incompatible-"));
+    tag_ok && rest.len() > 15 && {
+        // 末尾是 `YYYYMMDD-HHMMSS`
+        let stamp = &rest[rest.len() - 15..];
+        let b = stamp.as_bytes();
+        b[8] == b'-' && b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit())
+    }
+}
+
 /// 🔐 P2：坏档 / 版本不兼容档**不直接删**，改名存档（只保留最近 1 份），便于用户排查。
 fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
@@ -1114,23 +1380,29 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
         return None;
     }
 
-    // 只留最近 1 份存档（含历史遗留的临时档），免得长期占磁盘
+    // 只留最近 1 份**我们自己产出的**存档，免得长期占磁盘。
+    // 🔐 B6：旧实现按 `{缓存文件名}.*` 前缀一刀切，会把用户放在同一个目录里的备份
+    //（例如 `smartdns.cache.2024.bak`）一起**静默**删掉。现在只认我们自己的命名：
+    // `{缓存文件名}.{corrupt|load-panic|vN-incompatible}-YYYYMMDD-HHMMSS`，
+    // 并且每次清理都在日志里点名删了哪个文件。
     if let Some(dir) = path.parent()
         && let Ok(entries) = std::fs::read_dir(dir) {
-            let prefix = format!("{file_name}.");
             let mut siblings: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| {
                     p != &archived
                         && p.file_name()
-                            .map(|n| n.to_string_lossy().starts_with(&prefix))
+                            .map(|n| is_our_archive(&file_name, &n.to_string_lossy()))
                             .unwrap_or(false)
                 })
                 .collect();
             siblings.sort();
             for old in &siblings {
-                let _ = std::fs::remove_file(old);
+                match std::fs::remove_file(old) {
+                    Ok(()) => info!("清理旧缓存存档：{}", old.display()),
+                    Err(err) => crate::log::warn!("清理旧缓存存档失败 {}：{}", old.display(), err),
+                }
             }
         }
 
@@ -1160,16 +1432,20 @@ struct DnsCacheEntry<T = DnsResponse> {
     is_in_prefetching: bool,
     stats: DnsCacheStats,
     ecs: Option<String>, // 🌟 保存 ECS 以备持久化恢复
+    /// 🌟 保存"会影响答案的监听级选项"以备持久化恢复 —— 重启后重建标记时要用它，
+    /// 不然带 `-no-speed-check` 之类的条目会被当成默认口径的条目，又把答案串起来。
+    opts: AnswerAffectingOpts,
 }
 
 impl<T> DnsCacheEntry<T> {
-    fn new(data: T, valid_until: Instant, ecs: Option<String>) -> Self {
+    fn new(data: T, valid_until: Instant, ecs: Option<String>, opts: AnswerAffectingOpts) -> Self {
         Self {
             data,
             valid_until,
             is_in_prefetching: false,
             stats: DnsCacheStats::new(),
             ecs,
+            opts,
         }
     }
 
@@ -1256,6 +1532,13 @@ impl BinEncodable for DnsCacheEntry<DnsResponse> {
             encoder.emit_u16(0)?;
         }
 
+        // 🌟 序列化"会影响答案的监听级选项"（tag 7，v2 起）。用 JSON 存，便于人眼看缓存文件时看得懂；
+        // 老文件没有这一段，读侧按默认值处理（何况格式版本已经 +1，老档会被当作不兼容存档）。
+        encoder.emit_u8(7)?;
+        let opt_bytes = serde_json::to_vec(&self.opts).unwrap_or_else(|_| b"{}".to_vec());
+        encoder.emit_u16(opt_bytes.len() as u16)?;
+        encoder.emit_vec(&opt_bytes)?;
+
         Ok(())
     }
 }
@@ -1308,12 +1591,31 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
                         }
                 }
 
+        // 🌟 读取"会影响答案的监听级选项"（v2 新增，tag 7）。
+        //
+        // ⚠️ 必须**先偷看再决定吃不吃**：条目在文件里是**背靠背**排列的，没有分隔符，
+        // 上一条读完之后紧跟的就是下一条的起始字节（恒为 tag 1）。如果这里无脑 read_u8()，
+        // 读到的是下一条的 `0x01`，会被误判成"本条目里有未知 tag"→ 整份文件被判坏
+        // （实测：无头旧格式文件会 0 条救回并改名存档）。
+        //
+        // 两种情形要分清：
+        //   ① 后面不是 7（含读到文件尾）→ 本条没有这一段，按默认值，正常；
+        //   ② 确实是 7、但内容读不全 / 不是合法 JSON（条目被截断）→ **必须报错**，
+        //      让上层"读到坏条目就停下、并说明原因"，不能把半截条目当好条目救回来。
+        let mut opts = AnswerAffectingOpts::default();
+        if decoder.peek().map(|t| t.unverified()) == Some(7) {
+            decoder.read_u8()?;
+            let len = decoder.read_u16()?.unverified();
+            let bytes = decoder.read_slice(len as usize)?.unverified();
+            opts = serde_json::from_slice(bytes).map_err(|_| DecodeError::InsufficientBytes)?;
+        }
+
         let mut res: DnsResponse = message.into();
         res = res.with_valid_until(valid_until);
         if let Some(g) = group_name {
             res = res.with_name_server_group(g);
         }
-        let mut entry = DnsCacheEntry::new(res, valid_until, ecs);
+        let mut entry = DnsCacheEntry::new(res, valid_until, ecs, opts);
         entry.stats.hits = hits as usize;
 
         Ok(entry)
@@ -1428,6 +1730,143 @@ mod cache_reload_tests {
     }
 
     /// 造 n 条测试缓存记录（A 记录，TTL 300 秒）
+    /// 🔐 A8：热重载时对"周期落盘任务"该做什么 —— 开 / 关 / 换路径 / 换节拍 四种转换都要对。
+    #[test]
+    fn persist_action_covers_all_transitions() {
+        let p1 = Path::new("smartdns.cache");
+        let p2 = Path::new("another.cache");
+
+        assert_eq!(
+            persist_action(None, None),
+            PersistAction::Keep,
+            "本来没任务、配置也不要 → 什么都不做"
+        );
+        assert_eq!(
+            persist_action(Some((p1, 2)), Some((p1, 2))),
+            PersistAction::Keep,
+            "路径与节拍都没变 → 不许白停白建"
+        );
+        assert_eq!(
+            persist_action(Some((p1, 2)), None),
+            PersistAction::Stop,
+            "配置把持久化关掉了 → 停任务"
+        );
+        assert_eq!(
+            persist_action(None, Some((p1, 2))),
+            PersistAction::Restart {
+                file: p1.to_path_buf(),
+                checkpoint_secs: 2
+            },
+            "本来没任务、配置要开 → 建一个"
+        );
+        assert_eq!(
+            persist_action(Some((p1, 2)), Some((p2, 2))),
+            PersistAction::Restart {
+                file: p2.to_path_buf(),
+                checkpoint_secs: 2
+            },
+            "换了落盘路径 → 按新路径重建"
+        );
+        assert_eq!(
+            persist_action(Some((p1, 2)), Some((p1, 30))),
+            PersistAction::Restart {
+                file: p1.to_path_buf(),
+                checkpoint_secs: 30
+            },
+            "换了落盘节拍 → 按新节拍重建"
+        );
+    }
+
+    /// 造一条指定名字/答案的缓存条目（A 记录）
+    fn test_entry_for(name: &str, ip: std::net::Ipv4Addr) -> DnsCacheEntry {
+        use crate::libdns::proto::{
+            op::{Message, Query},
+            rr::{Name, RData, Record, RecordType},
+        };
+
+        let name = Name::from_ascii(name).unwrap();
+        let mut msg = Message::query();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(name, 300, RData::A(ip.into())));
+        let res: DnsResponse = msg.into();
+        DnsCacheEntry::new(
+            res,
+            Instant::now() + Duration::from_secs(300),
+            None,
+            AnswerAffectingOpts::default(),
+        )
+    }
+
+    /// 取出条目对应的缓存标记（与实际入库时用的是同一套字段）
+    fn test_key_of(entry: &DnsCacheEntry) -> CacheKey {
+        CacheKey {
+            query: entry.data.query().clone(),
+            group: entry.data.name_server_group().unwrap_or("default").to_string(),
+            ecs: entry.ecs.clone(),
+            opts: entry.opts.clone(),
+        }
+    }
+
+    /// 读回缓存里该标记当前的 A 记录答案
+    fn cached_answer_ip(cache: &DnsCache, key: &CacheKey) -> Option<std::net::Ipv4Addr> {
+        use crate::libdns::proto::rr::RData;
+
+        let shard = cache.get_shard(key).lock().unwrap_or_else(|e| e.into_inner());
+        let entry = shard.peek(key)?;
+        entry.data.answers().iter().find_map(|r| match r.data() {
+            RData::A(a) => Some(a.0),
+            _ => None,
+        })
+    }
+
+    /// 🔐 A8：运行期"打开持久化"时读已有缓存档，**只补内存里没有的条目** ——
+    /// 绝不能用磁盘上的旧答案把内存里更新的答案换回去。
+    #[test]
+    fn load_cache_only_missing_keeps_fresher_in_memory_entry() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cache-a8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("smartdns.cache");
+
+        // 磁盘上的旧答案：t0.cache.test. → 10.0.0.1
+        let writer = DnsCache::new(1024, false, 0, 0, 0);
+        let old = make_test_entries(1).remove(0);
+        let key = test_key_of(&old);
+        writer
+            .get_shard(&key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(key.clone(), old);
+        writer.persist_cache(&path);
+        assert!(path.exists(), "先得有一份缓存档");
+
+        // 内存里的新答案：同一个名字 → 10.9.9.9
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        let fresh = test_entry_for("t0.cache.test.", std::net::Ipv4Addr::new(10, 9, 9, 9));
+        cache
+            .get_shard(&key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(key.clone(), fresh);
+
+        cache.load_cache_only_missing(&path);
+        assert_eq!(
+            cached_answer_ip(&cache, &key),
+            Some(std::net::Ipv4Addr::new(10, 9, 9, 9)),
+            "内存里更新鲜的答案不许被磁盘旧档覆盖"
+        );
+
+        // 对照：启动路径的完整读档就是"文件说了算"（既有行为，不改）
+        cache.load_cache(&path);
+        assert_eq!(
+            cached_answer_ip(&cache, &key),
+            Some(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            "完整读档以文件为准（启动路径的既有行为）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn make_test_entries(n: usize) -> Vec<DnsCacheEntry> {
         use crate::libdns::proto::{
             op::{Message, Query},
@@ -1446,7 +1885,12 @@ mod cache_reload_tests {
                     RData::A(Ipv4Addr::new(10, 0, 0, i as u8 + 1).into()),
                 ));
                 let res: DnsResponse = msg.into();
-                DnsCacheEntry::new(res, Instant::now() + Duration::from_secs(300), None)
+                DnsCacheEntry::new(
+                    res,
+                    Instant::now() + Duration::from_secs(300),
+                    None,
+                    AnswerAffectingOpts::default(),
+                )
             })
             .collect()
     }
@@ -1499,8 +1943,14 @@ mod cache_reload_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("smartdns.cache");
 
-        // 先造一份"历史存档"，验证只留最近 1 份
-        std::fs::write(path.with_file_name("smartdns.cache.old-20200101-000000"), b"old").unwrap();
+        // 先造一份"历史存档"（用**我们真实的命名**），验证只留最近 1 份；
+        // 再造一份"用户自己的备份"（不是我们产出的命名）—— 它必须原地不动（B6）。
+        std::fs::write(
+            path.with_file_name("smartdns.cache.corrupt-20200101-000000"),
+            b"old",
+        )
+        .unwrap();
+        std::fs::write(path.with_file_name("smartdns.cache.2024.bak"), b"user-backup").unwrap();
         std::fs::write(&path, b"current").unwrap();
 
         let archived = archive_cache_file(&path, "corrupt").expect("应能改名存档");
@@ -1508,12 +1958,148 @@ mod cache_reload_tests {
         assert!(archived.exists(), "存档必须存在 —— 是改名，不是删除");
         assert_eq!(std::fs::read(&archived).unwrap(), b"current");
 
-        let left: Vec<_> = std::fs::read_dir(&dir)
+        let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(left.len(), 1, "只应保留最近 1 份存档，实际还有 {left:?}");
+        assert_eq!(left.len(), 2, "应只剩【最新存档 + 用户的备份】，实际 {left:?}");
+        assert!(
+            left.iter().any(|n| n == "smartdns.cache.2024.bak"),
+            "用户自己放在同目录的备份不许被删（B6）：{left:?}"
+        );
+        assert!(
+            left.iter().any(|n| n.starts_with("smartdns.cache.corrupt-")),
+            "应保留最新那份存档：{left:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 2026-09-17：缓存标记必须区分"会影响答案的监听级选项"。
+    /// 不区分的话，一个监听写 `-no-speed-check`、另一个不写时，两边会互相借用对方算出来的答案。
+    #[test]
+    fn cache_key_separates_answer_affecting_opts() {
+        use crate::libdns::proto::op::Query;
+        use crate::libdns::proto::rr::{Name, RecordType};
+
+        let query = Query::query(Name::from_ascii("sep.cache.test.").unwrap(), RecordType::A);
+        let base = CacheKey {
+            query: query.clone(),
+            group: "default".to_string(),
+            ecs: None,
+            opts: AnswerAffectingOpts::default(),
+        };
+
+        // 只差一个 `-no-speed-check` → 必须是两个不同的标记
+        let mut no_speed = ServerOpts::default();
+        no_speed.no_speed_check = Some(true);
+        let with_no_speed = CacheKey {
+            opts: AnswerAffectingOpts::from_server_opts(&no_speed),
+            ..base.clone()
+        };
+        assert_ne!(base, with_no_speed, "带 -no-speed-check 的监听不能与默认监听共用同一份缓存");
+
+        // 不影响答案的选项（`-no-api` / 连接数上限）不许把缓存拆开
+        let mut cosmetic = ServerOpts::default();
+        cosmetic.no_api = Some(true);
+        cosmetic.max_connections = Some(123);
+        assert_eq!(
+            base.opts,
+            AnswerAffectingOpts::from_server_opts(&cosmetic),
+            "不影响答案的选项（-no-api / 连接数上限）不该进标记，否则白白降低命中率"
+        );
+
+        // 其余每一项都要能区分开
+        for (name, o) in [
+            ("-no-dualstack-selection", {
+                let mut o = ServerOpts::default();
+                o.no_dualstack_selection = Some(true);
+                o
+            }),
+            ("-force-aaaa-soa", {
+                let mut o = ServerOpts::default();
+                o.force_aaaa_soa = Some(true);
+                o
+            }),
+            ("-force-https-soa", {
+                let mut o = ServerOpts::default();
+                o.force_https_soa = Some(true);
+                o
+            }),
+            ("-no-rule-addr", {
+                let mut o = ServerOpts::default();
+                o.no_rule_addr = Some(true);
+                o
+            }),
+            ("-no-rule-nameserver", {
+                let mut o = ServerOpts::default();
+                o.no_rule_nameserver = Some(true);
+                o
+            }),
+            ("-no-rule-soa", {
+                let mut o = ServerOpts::default();
+                o.no_rule_soa = Some(true);
+                o
+            }),
+        ] {
+            let k = CacheKey { opts: AnswerAffectingOpts::from_server_opts(&o), ..base.clone() };
+            assert_ne!(base, k, "{name} 会改变答案，必须体现在缓存标记里");
+        }
+
+        // rule_group 也要能区分
+        let mut rg = ServerOpts::default();
+        rg.rule_group = Some("guest".to_string());
+        let k = CacheKey { opts: AnswerAffectingOpts::from_server_opts(&rg), ..base.clone() };
+        assert_ne!(base, k, "rule_group 决定用哪套域名规则，必须体现在缓存标记里");
+    }
+
+    /// 🔐 2026-09-17：这组选项要能随条目落盘、再读回来（重启后重建标记时要用）。
+    #[test]
+    fn entry_round_trips_answer_affecting_opts() {
+        let mut entries = make_test_entries(1);
+        let mut opts = AnswerAffectingOpts::default();
+        opts.no_speed_check = true;
+        opts.rule_group = Some("guest".to_string());
+        entries[0].opts = opts.clone();
+
+        let mut buf = Vec::new();
+        DnsCacheEntry::serialize_many(entries.iter(), &mut buf).unwrap();
+        let (back, stopped) = deserialize_best_effort(&buf);
+        assert!(stopped.is_none(), "不该读坏：{stopped:?}");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].opts, opts, "选项必须原样读回");
+    }
+
+    /// 🔐 2026-09-17：格式版本不认识时必须**改名存档**、按冷启动继续，绝不当成正常数据加载。
+    #[test]
+    fn version_mismatch_is_archived_and_not_loaded() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cache-ver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("smartdns.cache");
+
+        // 造一份"未来版本"的缓存文件：头里版本号 +1，后面跟一条合法条目
+        let mut payload = Vec::new();
+        DnsCacheEntry::serialize_many(make_test_entries(1).iter(), &mut payload).unwrap();
+        let mut data = Vec::new();
+        data.extend_from_slice(CACHE_MAGIC);
+        data.extend_from_slice(&(CACHE_FORMAT_VERSION + 1).to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&payload);
+        std::fs::write(&path, &data).unwrap();
+
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        cache.load_cache(&path);
+        assert_eq!(cache.total_len(), 0, "版本不兼容的缓存不许被加载");
+
+        let archived: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("-incompatible"))
+            .collect();
+        assert_eq!(archived.len(), 1, "必须留下一个 -incompatible 的存档，实际 {archived:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1530,7 +2116,12 @@ mod cache_reload_tests {
         let cache = DnsCache::new(1024, false, 0, 0, 0);
         for entry in make_test_entries(2) {
             let query = entry.data.query().clone();
-            let key = CacheKey { query, group: "default".to_string(), ecs: None };
+            let key = CacheKey {
+                query,
+                group: "default".to_string(),
+                ecs: None,
+                opts: AnswerAffectingOpts::default(),
+            };
             cache
                 .get_shard(&key)
                 .lock()
@@ -1598,5 +2189,37 @@ mod cache_reload_tests {
         assert_eq!(tmp.len(), 1, "新档应保留在临时文件里，实际 {tmp:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod archive_naming_tests {
+    use super::is_our_archive;
+
+    /// 🔐 B6：清理旧存档时**只许删自己造的文件**，用户放在同目录的备份一份都不能动。
+    #[test]
+    fn only_our_own_archives_may_be_pruned() {
+        // 我们产出的三种命名（tag 见 archive_cache_file 的调用点）
+        assert!(is_our_archive("smartdns.cache", "smartdns.cache.corrupt-20260916-231530"));
+        assert!(is_our_archive("smartdns.cache", "smartdns.cache.load-panic-20260101-000000"));
+        assert!(is_our_archive(
+            "smartdns.cache",
+            "smartdns.cache.v2-incompatible-20260916-231530"
+        ));
+        // 用户自己的备份 / 名字长得像但不是我们造的：一律不删
+        for user_file in [
+            "smartdns.cache.2024.bak",
+            "smartdns.cache.bak",
+            "smartdns.cache.old",
+            "smartdns.cache.corrupt",
+            "smartdns.cache.corrupt-20260916",
+            "other.cache.corrupt-20260916-231530",
+            "smartdns.cache.tmp-1234",
+        ] {
+            assert!(
+                !is_our_archive("smartdns.cache", user_file),
+                "{user_file} 不该被当成我们的存档"
+            );
+        }
     }
 }

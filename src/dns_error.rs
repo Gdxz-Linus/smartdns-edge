@@ -63,6 +63,20 @@ impl LookupError {
         false
     }
 	
+    /// 🔐 第三部分第 1 条（`acl-enable`）：取出"我们主动给出的明确响应码"。
+    ///
+    /// 例：ACL 拒绝时中间件直接产出 `REFUSED`（"服务器拒绝为你服务"）—— 这与"解析出错"
+    /// （超时/上游故障 → SERVFAIL）是两件事，上层必须**原样回给客户端**，
+    /// 绝不能被一律抹成 SERVFAIL（否则客户端以为是服务器故障、跑去重试别的服务器，
+    /// 而不是认识到"你不被允许查询"）。与 A3 那次修复同一个原则：别把明确的返回码洗掉。
+    #[inline]
+    pub fn explicit_response_code(&self) -> Option<ResponseCode> {
+        match self {
+            Self::ResponseCode(code) => Some(*code),
+            _ => None,
+        }
+    }
+
 	// 🌟 核心修复 3：精准探查彻底空包（无数据也无SOA），替代脆弱的字符串匹配
     pub fn is_no_records_found(&self) -> bool {
         if let Self::Proto(err) = self {
@@ -72,17 +86,36 @@ impl LookupError {
         }
     }
 
+    /// 🔐 A3（2026-09-17）：把这个"被底层强行包装成错误"的 SOA 还原成响应 ——
+    /// **只认两种返回码：NoError（合法的空包/没有该类型记录）与 NXDomain（名字不存在）**。
+    ///
+    /// 为什么必须卡这一条：底层（`hickory-dns/crates/proto/src/error.rs` 的 `ProtoError::from_response`）
+    /// 对 SERVFAIL / REFUSED / FormErr 这类**真正的故障码**也会把响应里的 SOA 一并塞进错误里
+    /// （返回码本身也一起带着）。若这里只看"错误里有没有 SOA"就赦免，故障就会被伪装成
+    /// "这个名字没有该记录"交给客户端 —— 客户端（尤其苹果设备）会把它当有效否定答案
+    /// **按 SOA 的 TTL 缓存住**，上游恢复后仍解析不出来；我们自己也会把它当否定答案存起来。
+    /// 实测（`probe_a3_soa.py`）：上游 SERVFAIL+SOA → 改前客户端收到 NOERROR+SOA 且被缓存，
+    /// 改后回到 SERVFAIL；上游回 NXDOMAIN+SOA 或 NOERROR+SOA（合法空包）→ 一律不变，仍是 NOERROR+SOA。
+    ///
+    /// 与用户定调的关系（README 第 33 条）：定调覆盖的是"上游**明确说**不存在 → NOERROR+SOA"
+    /// 与"我们**没问到**（超时/网络故障）→ SERVFAIL"两句；"上游**明确回了故障码**"这一格
+    /// 定调里没写，这里按"真故障必须保持是故障"把空格补上，不动那两句。
     pub fn as_soa(&self, query: &Query) -> Option<DnsResponse> {
         if let Self::Proto(err) = self {
             // 🌟 核心修复：取出被底层强行当作 Error 包装起来的 SOA 和真实 ResponseCode
             if let ProtoErrorKind::NoRecordsFound(no_records) = err.kind()
-                && let Some(record) = &no_records.soa {
-                    let mut dns_response = DnsResponse::new_with_max_ttl(query.to_owned(), Vec::new());
-                    dns_response.add_authority(record.as_ref().to_owned().into_record_of_rdata());
-                    // 将 NXDomain 等原始状态码原封不动地还给它
-                    dns_response.set_response_code(no_records.response_code);
-                    return Some(dns_response);
-                }
+                && let Some(record) = &no_records.soa
+                && matches!(
+                    no_records.response_code,
+                    ResponseCode::NoError | ResponseCode::NXDomain
+                )
+            {
+                let mut dns_response = DnsResponse::new_with_max_ttl(query.to_owned(), Vec::new());
+                dns_response.add_authority(record.as_ref().to_owned().into_record_of_rdata());
+                // 将 NXDomain 等原始状态码原封不动地还给它
+                dns_response.set_response_code(no_records.response_code);
+                return Some(dns_response);
+            }
         }
         None
     }

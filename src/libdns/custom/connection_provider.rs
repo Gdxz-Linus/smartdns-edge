@@ -784,16 +784,131 @@ impl QuicSocketBinder for TokioRuntimeProvider {
     fn bind_quic(
         &self,
         local_addr: SocketAddr,
-        _server_addr: SocketAddr,
+        server_addr: SocketAddr,
     ) -> Result<Arc<dyn quinn::AsyncUdpSocket>, io::Error> {
         use quinn::Runtime;
-        let socket = next_random_udp(local_addr)?;
-        
-        // 🌟 绝杀：为 QUIC/H3 的底层 UDP 套接字强行打上 SO_MARK 和 Bind Device！
-        // 从此再也没有流量能偷偷溜出 VPN 透明代理或策略路由了。
-        setup_socket(&socket, None, self.so_mark, self.device.clone());
-        
+        let socket = prepare_quic_socket(local_addr, server_addr, self.so_mark, self.device.clone())?;
         quinn::TokioRuntime.wrap_udp_socket(socket)
+    }
+}
+
+/// DoQ / DoH3 的底层 UDP 套接字：随机端口 + 路由选项（SO_MARK / 绑定网卡）+ **connect 到上游**。
+///
+/// 拆成独立函数是为了让单测能直接看 `peer_addr()` —— `bind_quic` 交出去的
+/// `Arc<dyn quinn::AsyncUdpSocket>` 从外面看不到对端。
+///
+/// 🔐 ## P1-9 的同款收口，补到 DoQ / DoH3 这一侧（2026-09-17）
+///
+/// 把底层 UDP 套接字 `connect()` 到上游地址，让**内核**只把该对端的数据报交给我们；
+/// 其他来源（伪造应答、扫描、垃圾流量）在到达用户态之前就被丢掉。
+///
+/// 三条依据：
+/// 1. **与 C 版一致**：C 版的 DoQ 同样是 `connect(fd, &server_info->addr, ...)`
+///    （`src/dns_client/client_quic.c`）；本项目先前只补了普通 UDP 上游那一条（内嵌
+///    `udp_stream.rs` 的 `connect_with_bind()`），DoQ/H3 漏了。
+/// 2. **发送侧不受影响**：MSDN `connect` 写明"连接后，来自非指定地址的数据报会被丢弃"
+///    （datagram 套接字），而发送依旧可用 —— quinn 在 Windows 用 `WSASendMsg`、Linux 用
+///    `sendmsg` 带上目的地，那个目的地恒等于本次 `connect` 的上游（`WSASendTo`/`WSASendMsg`
+///    的文档：已连接的数据报套接字上，报文里的地址只覆盖本次发送）。
+///    单测 `p1_9_quic_source_filter_tests` 覆盖"机制 + 收得到上游 + 挡得住第三方"；
+///    端到端 `run_p2quicsrc.py`（真实二进制 + 真 QUIC）覆盖"改前 netstat 显示 `*:*`、
+///    改后显示上游地址，且经 DoQ 上游的解析照旧成功"。
+/// 3. **一 socket 一对端成立**：每个连接都单独 `next_random_udp` 开新端口，
+///    而且 binder 是在 `new_connection` 里按具体上游地址调用的（见上一层的调用点），
+///    所以"认死"不会妨碍同实例使用多个 DoQ 上游。
+///
+/// ⚠️ connect 失败只告警、继续用未连接的套接字：可用性优先。QUIC 本身有握手校验，
+/// 伪造的答案进不来；这里省下的是"内核提前丢包"的开销，不值得为它牺牲一条能用的上游。
+///
+/// 已知边界：如果上游在握手后通告备用地址、要求客户端迁过去（RFC 9000 的 preferred address），
+/// 连接型套接字会拒绝发往新地址的报文。本项目只做客户端、quinn 也未启用该迁移，暂不构成问题；
+/// QUIC 本身没有多播上游，所以不像 UDP 那条路需要给多播开豁免。
+#[cfg(any(feature = "dns-over-quic", feature = "dns-over-h3"))]
+fn prepare_quic_socket(
+    local_addr: SocketAddr,
+    server_addr: SocketAddr,
+    so_mark: Option<u32>,
+    device: Option<String>,
+) -> io::Result<std::net::UdpSocket> {
+    let socket = next_random_udp(local_addr)?;
+
+    // 🌟 绝杀：为 QUIC/H3 的底层 UDP 套接字强行打上 SO_MARK 和 Bind Device！
+    // 从此再也没有流量能偷偷溜出 VPN 透明代理或策略路由了。
+    setup_socket(&socket, None, so_mark, device);
+
+    if let Err(err) = socket.connect(server_addr) {
+        crate::log::warn!(
+            "failed to connect the QUIC socket to upstream {server_addr}, \
+             source filtering is OFF for this upstream: {err}"
+        );
+    }
+
+    Ok(socket)
+}
+
+#[cfg(all(test, any(feature = "dns-over-quic", feature = "dns-over-h3")))]
+mod p1_9_quic_source_filter_tests {
+    use super::*;
+
+    /// P1-9 的同款收口：DoQ/DoH3 的底层 UDP 套接字必须 connect 到上游 ——
+    /// 内核只放行该上游 IP + 端口发来的报文，同时**发送/接收本身照常可用**
+    /// （quinn 仍要能跟这个对端收发，不能把上游弄成"连上但发不出去"）。
+    #[test]
+    fn test_quic_socket_is_connected_and_filters_sources() {
+        const WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+
+        let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+
+        let socket =
+            prepare_quic_socket("0.0.0.0:0".parse().unwrap(), upstream_addr, None, None)
+                .expect("prepare_quic_socket 应成功");
+
+        // ① 机制：确实连到了上游（未连接的套接字 peer_addr() 会报错）
+        assert_eq!(
+            socket.peer_addr().expect("DoQ/DoH3 套接字必须已 connect"),
+            upstream_addr,
+            "P1-9：DoQ/DoH3 的底层套接字必须 connect 到上游，否则谁来敲门都收"
+        );
+
+        socket.set_nonblocking(true).unwrap();
+        let local = socket.local_addr().unwrap();
+        let mut buf = [0u8; 64];
+
+        // ② 功能：上游发来的包必须收得到
+        upstream.send_to(b"ok", local).unwrap();
+        let mut got = None;
+        for _ in 0..40 {
+            match socket.recv_from(&mut buf) {
+                Ok((n, _)) => {
+                    got = Some(n);
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(WAIT);
+                }
+                Err(e) => panic!("收包异常：{e}"),
+            }
+        }
+        assert_eq!(got, Some(2), "上游发来的报文必须能正常收到");
+
+        // ③ 效果：第三方来源（同机、只是端口不同）的伪造包必须被内核丢弃
+        let attacker = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        attacker.send_to(b"forged", local).unwrap();
+        let mut leaked = false;
+        for _ in 0..30 {
+            match socket.recv_from(&mut buf) {
+                Ok(_) => {
+                    leaked = true;
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(WAIT);
+                }
+                Err(e) => panic!("收包异常：{e}"),
+            }
+        }
+        assert!(!leaked, "来源不符的报文必须被内核丢弃（这就是本项要的效果）");
     }
 }
 

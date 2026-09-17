@@ -93,7 +93,23 @@ async fn process(
             let name: Name = query_param.name.parse().map_err(|_| {
                 ApiError::BadRequest(format!("invalid `name` parameter: {}", query_param.name))
             })?;
-            let query_type: RecordType = query_param.query_type.parse().unwrap_or(RecordType::A);
+            // 🔐 B8：`?type=` 写错以前被**静默**当成 A 查询（与 `name` 写错回 400 的口径不一致），
+            // 用户会拿到一份"看起来正常但答的是另一回事"的结果。
+            //
+            // ⚠️ 必须先转大写：内嵌 hickory 的 `RecordType::from_str` 里有一条
+            // `debug_assert!(输入不含小写字母)` —— 小写输入（`?type=aaaa` 是最常见的写法）
+            // 在 **debug 构建下会直接 panic**（连接被断开、客户端拿不到任何应答），
+            // release 构建下则退化成 400。仓库里其它解析点（`src/resolver.rs`）本来就先 `to_uppercase`。
+            let query_type: RecordType = query_param
+                .query_type
+                .to_ascii_uppercase()
+                .parse()
+                .map_err(|_| {
+                    ApiError::BadRequest(format!(
+                        "invalid `type` parameter: {}",
+                        query_param.query_type
+                    ))
+                })?;
 
             let dnssec = query_param.dnssec;
             let checking_disabled = query_param.checking_disabled;

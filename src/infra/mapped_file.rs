@@ -9,6 +9,18 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// 🔐 P3：把"要写入的目标文件"所在目录准备好（日志、审计档等都用它）。
+///
+/// 以前这一步是 `build.rs` 在源码树里建 `./logs` 顶替的：只读源码树（发行版打包 / 容器 / Nix）
+/// 里连构建都过不去；而且**部署后换个工作目录跑，`./logs` 根本不存在**，日志与审计档就一直写不进去。
+/// 现在由运行期在打开文件之前调用；建不出来就让调用方去报错（不在这里吞掉原因）。
+pub fn ensure_parent_dir(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::create_dir_all(parent),
+        _ => Ok(()),
+    }
+}
+
 use chrono::Local;
 
 const DATE_FMT: &str = "%Y%m%d-%H%M%S%f";

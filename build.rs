@@ -57,7 +57,10 @@ fn create_build_time_vars() -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    std::fs::create_dir_all("./logs")?;
+    // 🔐 P3：这里原来会 `create_dir_all("./logs")` —— 等于"构建时在源码树里建目录"。
+    // 源码树只读（发行版打包、Docker/容器里编译）时连构建都过不去；而且这个目录跟运行期
+    // 真正需要的"日志文件所在目录"根本不是一回事。
+    // 现在改成由运行期负责：`src/log.rs` 打开日志文件前先把它的目录准备好，并如实报告失败。
 
     #[cfg(target_os = "linux")]
     build_nftset()?;

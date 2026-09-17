@@ -141,8 +141,20 @@ impl Cli {
                 // 🌟 核心修复 2：重命名进程锁为 _pid_guard，恢复防多开保护！
                 let _pid_guard = match crate::infra::process_guard::create(&pid_path) {
                     Ok(guard) => Some(guard),
-                    Err(ProcessGuardError::AlreadyRunning(id)) => {
-                        error!("SmartDNS is already running with PID {}! Only one instance is allowed.", id);
+                    // 🔐「顺手修」：PID 读不到时**不再报 "PID 0"**（那是编出来的，见 process_guard.rs）。
+                    Err(ProcessGuardError::AlreadyRunning(Some(id))) => {
+                        error!(
+                            "SmartDNS is already running with PID {}! Only one instance is allowed.",
+                            id
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(ProcessGuardError::AlreadyRunning(None)) => {
+                        error!(
+                            "SmartDNS is already running (but its PID could not be read from {}). \
+                             Only one instance is allowed.",
+                            pid_path.display()
+                        );
                         std::process::exit(1);
                     }
                     Err(err) => {
@@ -170,7 +182,11 @@ impl Cli {
                     cfg.log_file_mode().into(),
                     cfg.log_config().console(),
                 );
-                tracing::dispatcher::set_global_default(log_dispatch).ok();
+                // 🔐 P3：这里原来用 `.ok()` 吞掉失败 —— 一旦日志系统没装上，之后所有
+                // log::info!/warn!/error! 全部石沉大海，而且没人知道。日志宏此刻不可用，只能直写 stderr。
+                if let Err(err) = tracing::dispatcher::set_global_default(log_dispatch) {
+                    eprintln!("⚠️ 日志系统初始化失败（后续日志可能不会输出）：{err}");
+                }
 
                 // 此时日志系统已完美交接，这几十行配置摘要将一字不漏印入硬盘文件！
                 cfg.summary();

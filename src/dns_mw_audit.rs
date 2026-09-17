@@ -68,6 +68,13 @@ impl DnsAuditMiddleware {
         let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(1024);
 
         tokio::spawn(async move {
+            // 🔐 P3：先把审计档的目录准备好 —— 同上，不再依赖"构建时顺手建出来的 ./logs"。
+            if let Err(err) = crate::infra::mapped_file::ensure_parent_dir(&audit_file) {
+                crate::log::error!(
+                    "审计档所在目录建不出来（{}）：{err}；本次审计可能写不进文件",
+                    audit_file.display()
+                );
+            }
             let mut audit_file = MappedFile::open(audit_file, audit_size, Some(audit_num), mode);
             const BUF_SIZE: usize = 10;
             // 改用 Vec 方便利用 std::mem::replace 进行内存腾挪
@@ -343,8 +350,14 @@ mod tests {
             lookup_source: LookupFrom::Server("default".to_string()),
         };
 
-        let file = format!("./logs/test-{}-audit.log", Local::now().timestamp_millis());
-        let file = Path::new(file.as_str());
+        // 🔐 P3-14：这里原来写 `./logs/...` —— 那是**依赖 build.rs 在源码树里建出来的目录**
+        // （构建副作用）。改用系统临时目录，测试才和"构建时建了什么目录"无关。
+        let file = std::env::temp_dir().join(format!(
+            "smartdns-audit-{}-{}.log",
+            std::process::id(),
+            Local::now().timestamp_millis()
+        ));
+        let file = Path::new(file.as_path());
 
         record_audit_to_file(
             &mut MappedFile::open(file, 102400, None, Default::default()),
@@ -405,8 +418,13 @@ mod tests {
             lookup_source: LookupFrom::Server("default2".to_string()),
         };
 
-        let file = format!("./logs/test-{}-audit.csv", Local::now().timestamp_millis());
-        let file = Path::new(file.as_str());
+        // 🔐 P3-14：同上 —— 别依赖构建时建出来的 ./logs，用系统临时目录
+        let file = std::env::temp_dir().join(format!(
+            "smartdns-audit-{}-{}.csv",
+            std::process::id(),
+            Local::now().timestamp_millis()
+        ));
+        let file = Path::new(file.as_path());
 
         record_audit_to_file(
             &mut MappedFile::open(file, 102400, None, Default::default()),

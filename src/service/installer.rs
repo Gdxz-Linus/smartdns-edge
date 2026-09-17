@@ -512,8 +512,14 @@ mod tests {
 
     #[test]
     fn test_install_success() {
-        let file_path = format!("./logs/installer-abc-{:#x}.txt", Local::now().timestamp());
-        let file_path = Path::new(file_path.as_str());
+        // 🔐 P3-14：这里原来写 `./logs/...`，依赖的是"build.rs 在源码树里建了那个目录"
+        // 这个构建副作用。改用系统临时目录，测试就不再和构建时建了什么目录绑在一起。
+        let file_path = std::env::temp_dir().join(format!(
+            "smartdns-installer-abc-{}-{:#x}.txt",
+            std::process::id(),
+            Local::now().timestamp()
+        ));
+        let file_path = Path::new(file_path.as_path());
 
         assert!(!file_path.exists());
 

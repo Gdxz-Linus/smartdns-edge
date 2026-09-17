@@ -42,6 +42,13 @@ pub fn serve(
         server_config
     };
 
+    // 🔐 A6（2026-09-17）：逐监听连接数上限需要监听地址 —— socket 随后会被移交，先在这里取出来。
+    // 与 DoQ / DoT / DoH / HTTP / TCP 那几条监听的做法一致（对应 `bind-h3 ... -max-connections N`）。
+    let listener_limiter = socket
+        .local_addr()
+        .ok()
+        .and_then(crate::server::limit::for_listener);
+
     let config = Default::default();
     let endpoint = Endpoint::new(
         config,
@@ -62,14 +69,14 @@ pub fn serve(
     }).with_state(state.clone());
     let router = H3Router::new(router);
 
-    let acceptor = QuinnPeerAcceptor::new(endpoint);
+    let acceptor = QuinnPeerAcceptor::new(endpoint, listener_limiter);
 
     tokio::spawn(async move {
         if let Err(err) = router
             .serve_with_shutdown(acceptor, cancellation_token.cancelled())
             .await
         {
-            eprintln!("failed to serve connection: {err:#}");
+            crate::log::warn!("HTTP/3 连接处理失败（已忽略该连接）: {err:#}");
         }
     });
 
@@ -83,11 +90,20 @@ pub fn serve(
 /// 所以"接受连接"这一步是唯一能拿到客户端地址的时机。
 struct QuinnPeerAcceptor {
     endpoint: Endpoint,
+    /// 🔐 A6：该监听单独配置的连接上限（`bind-h3 ... -max-connections*` 才有；没配就是 None）。
+    /// 全局限额（按物理内存自动推算）另外单独取。
+    listener_limiter: Option<Arc<crate::server::limit::ConnectionLimiter>>,
 }
 
 impl QuinnPeerAcceptor {
-    fn new(endpoint: Endpoint) -> Self {
-        Self { endpoint }
+    fn new(
+        endpoint: Endpoint,
+        listener_limiter: Option<Arc<crate::server::limit::ConnectionLimiter>>,
+    ) -> Self {
+        Self {
+            endpoint,
+            listener_limiter,
+        }
     }
 }
 
@@ -110,6 +126,40 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
             match incoming.await {
                 Ok(conn) => {
                     let peer = conn.remote_address();
+
+                    // 🔐 A6（2026-09-17）：连接数上限。DoH3 以前是**唯一没有闸门**的监听，
+                    // 攻击者可以无限开 QUIC 连接；现在与其它五条监听同口径：
+                    // ① 全局限额（按物理内存自动推算，家庭小机器自动收紧、企业机器自动放宽）
+                    // ② 该监听单独配置的那一份（`bind-h3 ... -max-connections N`）
+                    // 超出就丢弃这次新连接，**不影响已有连接**（与 DoQ/DoT/DoH 一致）。
+                    // 计数位置也与 DoQ 一致：握手完成之后才占名额，没握完的不算。
+                    let Some(conn_guard) = crate::server::limit::global().acquire(peer.ip()) else {
+                        log::debug!("DoH3 连接数超出上限，拒绝 {peer} 的新连接");
+                        continue;
+                    };
+                    let listener_guard = match self.listener_limiter.as_ref() {
+                        Some(limiter) => match limiter.acquire(peer.ip()) {
+                            Some(guard) => Some(guard),
+                            None => {
+                                log::debug!("DoH3 该监听连接数超限，拒绝 {peer} 的新连接");
+                                continue; // 全局限额随作用域结束自动归还
+                            }
+                        },
+                        None => None,
+                    };
+
+                    // 配额要活到这条连接结束为止：accept() 之后连接就交给 axum-h3 了，
+                    // 我们拿不到 Drop 时机，所以克隆一份 quinn 连接、起个守护任务等它关闭 ——
+                    // 连接一关（对端断开或 endpoint 关闭），两份配额自动归还。
+                    {
+                        let watcher = conn.clone();
+                        tokio::spawn(async move {
+                            let _conn_guard = conn_guard;
+                            let _listener_guard = listener_guard;
+                            let _ = watcher.closed().await;
+                        });
+                    }
+
                     return Ok(Some((h3_quinn::Connection::new(conn), Some(peer))));
                 }
                 Err(err) => {

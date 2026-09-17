@@ -3,98 +3,15 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     str::FromStr,
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
 };
 use url::Url;
 
 use anyhow::Result;
 
-use super::WildcardName;
+use super::{WildcardName, set_cache::SetCache};
 
-/// 名单的内存缓存 —— `-interval` 生效的名单靠它"按各自的周期"取用。
-///
-/// 为什么必须有它：名单在配置构建时被**展开进规则树**，所以"刷新某个名单"必然连带重建
-/// 配置，而重建配置会把**所有**名单都取一遍。有了缓存，没到自己 `-interval` 的名单直接用
-/// 上次的结果，不会被别的名单的刷新顺带重下 —— 各自的周期才真的说了算。
-///
-/// key = `类型|名字|来源`（HTTP 用 URL、文件用路径）；value = (取用时刻, 名单)。
-static DOMAIN_SET_CACHE: OnceLock<Mutex<HashMap<String, (Instant, HashSet<WildcardName>)>>> =
-    OnceLock::new();
-
-fn domain_set_cache() -> &'static Mutex<HashMap<String, (Instant, HashSet<WildcardName>)>> {
-    DOMAIN_SET_CACHE.get_or_init(Default::default)
-}
-
-fn cache_lookup(key: &str) -> Option<(Instant, HashSet<WildcardName>)> {
-    domain_set_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(key).cloned())
-}
-
-fn cache_store(key: &str, value: &HashSet<WildcardName>) {
-    if let Ok(mut cache) = domain_set_cache().lock() {
-        cache.insert(key.to_string(), (Instant::now(), value.clone()));
-    }
-}
-
-/// 带 `-interval` 语义的取名单（HTTP / 文件两个 provider 共用同一套判断）：
-///
-/// 1. **没配 `-interval`（或配 0）** → 每次都要最新的，与改动前完全一致；
-/// 2. **配了** → 未到自己的周期就直接用缓存（不重新下载 / 不重读文件），到期才重新取；
-/// 3. **`force`**（启动、手动重载）→ 忽略缓存，强制重新取 —— 用户手动按重载就该拿到最新的；
-/// 4. **取用失败但手里有上一份** → 用旧的并告警：一次网络抖动不该让规则集体消失。
-fn get_with_cache<F>(
-    kind: &str,
-    name: &str,
-    source: &str,
-    interval: Option<usize>,
-    force: bool,
-    fetch: F,
-) -> Result<HashSet<WildcardName>>
-where
-    F: FnOnce() -> Result<HashSet<WildcardName>>,
-{
-    // 只有明确配了正数的 `-interval` 才走"定时刷新"这条路。
-    let Some(secs) = interval.filter(|secs| *secs > 0) else {
-        return fetch();
-    };
-
-    let key = format!("{kind}|{name}|{source}");
-
-    if !force
-        && let Some((fetched_at, value)) = cache_lookup(&key)
-        && fetched_at.elapsed() < Duration::from_secs(secs as u64)
-    {
-        crate::log::debug!(
-            "DomainSet {name} 未到 -interval {secs} 秒，沿用上次的名单（{} 条）",
-            value.len()
-        );
-        return Ok(value);
-    }
-
-    match fetch() {
-        Ok(value) => {
-            crate::log::info!(
-                "DomainSet {name} 取到 {} 条规则（-interval {secs} 秒）",
-                value.len()
-            );
-            cache_store(&key, &value);
-            Ok(value)
-        }
-        Err(err) => match cache_lookup(&key) {
-            Some((_, value)) => {
-                crate::log::warn!(
-                    "DomainSet {name} 取用失败（{err}），继续用上一次的名单（{} 条）",
-                    value.len()
-                );
-                Ok(value)
-            }
-            None => Err(err),
-        },
-    }
-}
+/// 域名集合的取用缓存（与 IP 集合共用同一套语义，见 `set_cache`）。
+static DOMAIN_SET_CACHE: SetCache<HashSet<WildcardName>> = SetCache::new();
 
 #[enum_dispatch(IDomainSetProvider)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +30,7 @@ pub trait IDomainSetProvider {
         proxies: &HashMap<String, crate::proxy::ProxyConfig>,
     ) -> Result<HashSet<WildcardName>>;
 
-    /// 带 `-interval` 语义的取名单（判断逻辑见 `get_with_cache`）。
+    /// 带 `-interval` 语义的取名单（判断逻辑见 `config::set_cache`）。
     /// `force` = 忽略内存缓存、强制重新取（启动与手动重载用）。
     fn get_domain_set_cached(
         &self,
@@ -168,7 +85,7 @@ impl IDomainSetProvider for DomainSetFileProvider {
         force: bool,
     ) -> Result<HashSet<WildcardName>> {
         let path = self.file.to_string_lossy().into_owned();
-        get_with_cache("file", &self.name, &path, self.interval, force, || {
+        DOMAIN_SET_CACHE.get("DomainSet", &self.name, &path, self.interval, force, || {
             self.get_domain_set(proxies)
         })
     }
@@ -190,7 +107,8 @@ impl IDomainSetProvider for DomainSetHttpProvider {
         let proxy_str = self
             .proxy
             .as_ref()
-            .and_then(|proxy_name| proxies.get(proxy_name))
+            // 名字写错会**明确告警**并改直连，而不是无声直连（见 `proxy::resolve_proxy`）
+            .and_then(|proxy_name| crate::proxy::resolve_proxy(proxies, proxy_name))
             .map(|p| p.to_string());
 
         let res = http_client::get(self.url.to_string(), proxy_str.as_deref())?;
@@ -205,7 +123,7 @@ impl IDomainSetProvider for DomainSetHttpProvider {
         proxies: &HashMap<String, crate::proxy::ProxyConfig>,
         force: bool,
     ) -> Result<HashSet<WildcardName>> {
-        get_with_cache("http", &self.name, self.url.as_str(), self.interval, force, || {
+        DOMAIN_SET_CACHE.get("DomainSet", &self.name, self.url.as_str(), self.interval, force, || {
             self.get_domain_set(proxies)
         })
     }
@@ -231,9 +149,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
     /// 迷你 HTTP 名单服务器：返回 `list` 里的内容，`hits` 记请求次数，
     /// `stop` 置位后一律不应答（模拟"刷新时取用失败"）。

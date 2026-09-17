@@ -91,7 +91,10 @@ impl ServiceManager {
         // 🌟 统一拦截：卸载空服务直接报错返回，绝不执行后续 PowerShell
         if matches!(self.status(), Ok(ServiceStatus::NotInstalled)) {
             if !quiet {
+                // 🔐 B2：用户直接调用 `service uninstall` 时要给非 0 退出码；
+                // quiet=true 是 install() 内部的"先卸再装"，它自己吞掉错误（`let _ =`），保持安静。
                 eprintln!("❌ SmartDNS service is NOT installed.");
+                return Err(not_installed_error());
             }
             return Ok(());
         }
@@ -116,9 +119,11 @@ impl ServiceManager {
                 println!("▶️ Service {} already started", self.definition.name);
             }
             Ok(ServiceStatus::NotInstalled) => {
-                // 🌟 统一拦截：启动空服务，给出提示并指导安装
+                // 🔐 B2：提示之外必须**返回错误** —— 以前这里打印 ❌ 却仍返回 Ok，
+                // `smartdns service start` 的退出码是 0，脚本/CI 会以为启动成功了。
                 eprintln!("❌ SmartDNS service is NOT installed.");
                 eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+                return Err(not_installed_error());
             }
             _ => {
                 self.definition.commands.start.spawn()?;
@@ -130,9 +135,10 @@ impl ServiceManager {
     pub fn stop(&self) -> io::Result<()> {
         match self.status() {
             Ok(ServiceStatus::NotInstalled) => {
-                // 🌟 统一拦截：停止空服务，直接报错，不需要加安装提示
+                // 🔐 B2：同 start —— 提示 + 非 0 退出码
                 eprintln!("❌ SmartDNS service is NOT installed.");
-				eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+                eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
+                return Err(not_installed_error());
             }
             Ok(ServiceStatus::Dead(_)) => {
                 println!("⏹️ Service {} already stopped", self.definition.name);
@@ -154,10 +160,10 @@ impl ServiceManager {
 
     pub fn restart(&self) -> io::Result<()> {
         if matches!(self.status(), Ok(ServiceStatus::NotInstalled)) {
-            // 🌟 统一拦截：重启空服务，给出提示并指导安装
+            // 🔐 B2：同 start/stop
             eprintln!("❌ SmartDNS service is NOT installed.");
             eprintln!("💡 Hint: Please install it via 'smartdns service install' first.");
-            return Ok(());
+            return Err(not_installed_error());
         }
 
         match self.definition.commands.restart.as_ref() {
@@ -575,4 +581,13 @@ mod tests {
             }
         }
     }
+}
+
+/// 🔐 B2：`service start/stop/restart/uninstall` 遇到"服务未安装"时统一用这个错误 ——
+/// 必须能被上层察觉（退出码非 0），而不是只打印一行 ❌ 就返回 Ok（脚本/CI 会被骗）。
+fn not_installed_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "smartdns service is not installed (run `smartdns service install` first)",
+    )
 }

@@ -46,7 +46,9 @@ impl DomainRuleMap {
 
                 // 🔐 P2：原来这里静默 `unwrap_or_default()` —— 引用了不存在/加载失败的名单时，
                 // 相关规则被悄悄丢掉、零告警，用户会以为拦截/分流已经生效。
-                if names.is_empty() {
+                // 🔐 B5：这里在配置构建的热路径上（启动、手动重载、`-interval` 周期刷新都会走到），
+                // 用 warn_once 收口 —— 否则一条空名单会随每次周期刷新反复刷屏，把真告警淹掉。
+                if names.is_empty() && crate::log::warn_once(&format!("empty-domain-set:{s}")) {
                     crate::log::warn!(
                         "domain-set `{}` 为空或加载失败：引用它的规则已被丢弃（检查名单文件/URL 是否可读）",
                         s

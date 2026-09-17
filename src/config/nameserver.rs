@@ -71,6 +71,12 @@ pub struct NameServerInfo {
     #[serde(default = "Default::default")]
     pub check_edns: bool,
 
+    /// 🔐 后备服务器（上游选项 `-fallback`）：**第一轮不参与**，
+    /// 只有同组里正常那批给不出可用答案时，才把它拉进来再问一遍。
+    /// 语义对齐 C 版 `src/dns_client/dns_client.c:405`（skip fallback server for first query）。
+    #[serde(default = "Default::default")]
+    pub fallback: bool,
+
     /// exclude this server from default group.
     /// ```
     /// example:
@@ -164,6 +170,7 @@ impl From<DnsUrl> for NameServerInfo {
             exclude_default_group: Default::default(),
             blacklist_ip: Default::default(),
             whitelist_ip: Default::default(),
+            fallback: Default::default(),
             bootstrap_dns: Default::default(),
             check_edns: Default::default(),
             proxy: Default::default(),

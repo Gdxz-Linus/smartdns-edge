@@ -10,6 +10,7 @@ mod bool;
 mod bytes;
 mod client_rule;
 mod cname;
+mod conf_file;
 mod config_for_domain;
 mod domain;
 mod domain_rule;
@@ -86,6 +87,8 @@ pub enum ConfigItem {
     Address(AddressRule),
     ApiToken(String),
     AuditEnable(bool),
+    /// `acl-enable yes|no`：访问控制总开关（配合 client-rules 当白名单用）
+    AclEnable(bool),
     AuditFile(PathBuf),
     AuditFileMode(FileMode),
     AuditNum(usize),
@@ -108,7 +111,7 @@ pub enum ConfigItem {
     GroupEnd,
     GroupMatch(GroupMatch),
     HttpsRecord(ConfigForDomain<HttpsRecordRule>),
-    ConfFile(PathBuf),
+    ConfFile(ConfFileItem),
     DnsmasqLeaseFile(PathBuf),
     Dns64(Ipv6Net),
     Domain(Name),
@@ -312,7 +315,9 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     let group3 = alt((
         map(config("https-record"), ConfigItem::HttpsRecord),
         map(config("ignore-ip"), ConfigItem::IgnoreIp),
-        map(config("local-ttl"), ConfigItem::LocalTtl),
+        map(config("local-ttl"), |v: u64| {
+            ConfigItem::LocalTtl(sanitize_ttl("local-ttl", v))
+        }),
         map(config("log-console"), ConfigItem::LogConsole),
         map(config("log-file-mode"), ConfigItem::LogFileMode),
         map(config("log-file"), ConfigItem::LogFile),
@@ -346,12 +351,15 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("response-mode"), ConfigItem::ResponseMode),
         map(config("server-name"), ConfigItem::ServerName),
         map(config("speed-check-mode"), ConfigItem::SpeedMode),
-        map(
-            config("serve-expired-reply-ttl"),
-            ConfigItem::ServeExpiredReplyTtl,
-        ),
-        map(config("serve-expired-ttl"), ConfigItem::ServeExpiredTtl),
-		map(config("serve-expired-prefetch-time"), ConfigItem::ServeExpiredPrefetchTime),
+        map(config("serve-expired-reply-ttl"), |v: u64| {
+            ConfigItem::ServeExpiredReplyTtl(sanitize_ttl("serve-expired-reply-ttl", v))
+        }),
+        map(config("serve-expired-ttl"), |v: u64| {
+            ConfigItem::ServeExpiredTtl(sanitize_ttl("serve-expired-ttl", v))
+        }),
+		map(config("serve-expired-prefetch-time"), |v: u64| {
+            ConfigItem::ServeExpiredPrefetchTime(sanitize_ttl("serve-expired-prefetch-time", v))
+        }),
         map(config("serve-expired"), ConfigItem::ServeExpired),
         map(config("srv-record"), ConfigItem::SrvRecord),
         map(config("resolv-hostname"), ConfigItem::ResolvHostname),
@@ -361,6 +369,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("max-connections-per-ip"), ConfigItem::MaxConnectionsPerIp),
         map(config("nftset"), ConfigItem::NftSet),
         map(config("user"), ConfigItem::User),
+        // `acl-enable`：访问控制总开关（放在 group4 —— 它离 21 项上限还有余量）
+        map(config("acl-enable"), ConfigItem::AclEnable),
         // ⚠️ 注意：每个 groupN 最多只能有 21 个入口——这是 nom 对 alt/Choice 元组
         // 元素数量的硬上限（group2 已达 21 个）。以后新增配置指令时，请放到元素较少的组。
         map(config("group-match"), ConfigItem::GroupMatch),
@@ -403,6 +413,18 @@ pub fn parse_config(input: &str) -> IResult<&str, Option<ConfigItem>> {
     };
 
     Ok((input, item))
+}
+
+/// 🔐 `-interval` 现在**真的生效**了（配置会按它定期重建，把新名单展开进规则树）。
+/// 间隔太短会让配置被频繁重载，这里提醒一句。`kind` 是配置项名（`domain-set` / `ip-set`）。
+///
+/// 放这里是因为域名集合与 IP 集合共用同一套判断与提醒。
+pub(crate) fn warn_if_interval_too_short(kind: &str, name: &str, interval: Option<usize>) {
+    if let Some(secs) = interval.filter(|secs| *secs > 0 && *secs < 10) {
+        crate::log::warn!(
+            "{kind} {name}: -interval {secs} 秒太短，会频繁重载配置（建议 ≥ 10 秒）"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -610,9 +632,50 @@ mod tests {
             parse_config("ip-set -name name -file /path/to/file.txt").unwrap(),
             (
                 "",
-                ConfigItem::IpSetProvider(IpSetProvider {
+                ConfigItem::IpSetProvider(IpSetProvider::File(IpSetFileProvider {
                     name: "name".to_string(),
                     file: Path::new("/path/to/file.txt").to_path_buf(),
+                    interval: None,
+                }))
+                .into()
+            )
+        );
+        // 远程来源
+        assert_eq!(
+            parse_config("ip-set -name set -url https://example.com/list -interval 3600").unwrap(),
+            (
+                "",
+                ConfigItem::IpSetProvider(IpSetProvider::Http(IpSetHttpProvider {
+                    name: "set".to_string(),
+                    url: url::Url::parse("https://example.com/list").unwrap(),
+                    interval: Some(3600),
+                    proxy: None,
+                }))
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_conf_file() {
+        assert_eq!(
+            parse_config("conf-file /etc/smartdns/more.conf").unwrap(),
+            (
+                "",
+                ConfigItem::ConfFile(ConfFileItem {
+                    path: Path::new("/etc/smartdns/more.conf").to_path_buf(),
+                    group: None,
+                })
+                .into()
+            )
+        );
+        assert_eq!(
+            parse_config("conf-file /etc/smartdns/conf.d/*.conf -g office").unwrap(),
+            (
+                "",
+                ConfigItem::ConfFile(ConfFileItem {
+                    path: Path::new("/etc/smartdns/conf.d/*.conf").to_path_buf(),
+                    group: Some("office".to_string()),
                 })
                 .into()
             )

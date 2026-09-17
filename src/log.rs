@@ -48,19 +48,39 @@ pub fn make_dispatch<P: AsRef<Path>>(
         (None, None) => Level::ERROR,
     };
 
+    // 🔐 P3：打开日志文件之前，先把它的目录准备好。
+    // 以前这步是在 `build.rs` 里建 `./logs`（源码树只读时连构建都过不去），跟源码树无关的
+    // 真实需求其实是"把配置里那个日志文件的目录建出来"。
+    let _ = crate::infra::mapped_file::ensure_parent_dir(path.as_ref());
+
     let file = MappedFile::open(path.as_ref(), size, Some(num as usize), mode);
 
-    let writable = enabled
-        && file
-            .inner // 🌟 适配新字段
+    // 🔐 P3：文件日志到底开没开、为什么没开，必须说出来。
+    // 原来失败被静默吞掉（`unwrap_or_else(|_| false)`），再叠加 main.rs 里
+    // `set_global_default(...).ok()`，结果就是"服务活着、没有任何日志、也没人告诉为什么" ——
+    // 排障时最要命。这里用 eprintln!（此刻 tracing 还没装好，日志宏发不出去），
+    // 且只在用户确实配了文件日志（enabled）时才抱怨。
+    let file_open_err: Option<String> = if enabled {
+        match file
+            .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .touch()
-            .map(|_| true)
-            .unwrap_or_else(|_err| {
-                // ... (警告：如果你在这里发现 warn 宏可能导致死锁，不用担心，因为我们只是通过 try_send 发送到队列)
-                false
-            });
+        {
+            Ok(_) => None,
+            Err(err) => Some(err.to_string()),
+        }
+    } else {
+        None
+    };
+    let writable = enabled && file_open_err.is_none();
+
+    if let Some(err) = &file_open_err {
+        eprintln!(
+            "⚠️ 日志文件打不开（{}）：{err}；本次只输出到控制台。请检查该路径所在目录是否存在、是否可写。",
+            path.as_ref().display()
+        );
+    }
 
     let console_level = if to_console {
         level

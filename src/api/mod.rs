@@ -36,12 +36,49 @@ pub struct ServeState {
     pub dns_handle: DnsHandle,
 }
 
+/// 🔐 P3：管理后台/接口的安全响应头 —— 以前一个都没有。
+///
+/// - `X-Content-Type-Options: nosniff`：禁止浏览器把我们的 JSON 猜成 HTML/脚本去执行；
+/// - `X-Frame-Options: DENY` + CSP 里的 `frame-ancestors 'none'`：**禁止后台被任何页面嵌进 iframe**
+///   （否则攻击者可以拿一个透明 iframe 盖在正常页面上，骗管理员点到后台按钮 —— 点击劫持）；
+/// - `Referrer-Policy: no-referrer`：后台地址不要随外链泄漏出去；
+/// - CSP：默认什么外部资源都不许加载，只放行内联脚本/样式与 Swagger 文档页用的 CDN
+///   （文档页 `/api/docs` 是自带网页、需要这两项；其余接口都是 JSON，放行它们不会带来额外风险，
+///    而 `object-src 'none'`、`base-uri 'none'` 仍然挡着插件与 `<base>` 劫持）。
+const SECURITY_CSP: &str = "default-src 'none';      script-src 'self' 'unsafe-inline' https://unpkg.com;      style-src 'self' 'unsafe-inline' https://unpkg.com;      img-src 'self' data:; connect-src 'self';      frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
+
+/// 给路由套上上面那组安全响应头（后台与 `-no-api` 的纯 DoH 监听都用它）。
+fn with_security_headers<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(
+        ServiceBuilder::new()
+            .layer(SetResponseHeaderLayer::overriding(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                header::X_FRAME_OPTIONS,
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static(SECURITY_CSP),
+            )),
+    )
+}
+
 /// 只提供 DoH（`/dns-query`）、不挂管理后台的路由。
 /// 给 bind 加了 `-no-api` 的监听使用：对外提供加密 DNS，但不暴露 `/api` 接口。
 pub fn dns_only_routes() -> axum::Router<Arc<ServeState>> {
     let (router, _openapi) = Router::new().merge(serve_dns::routes()).split_for_parts();
 
-    router.layer(
+    with_security_headers(router).layer(
         ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
             header::SERVER,
             HeaderValue::from_static(crate::NAME),
@@ -89,7 +126,8 @@ pub fn routes() -> axum::Router<Arc<ServeState>> {
         }
     };
 
-    router.layer(
+    // 🔐 P3：安全响应头（CSP / X-Frame-Options / X-Content-Type-Options / Referrer-Policy）
+    with_security_headers(router).layer(
         ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
             header::SERVER,
             HeaderValue::from_static(crate::NAME),
@@ -130,7 +168,9 @@ enum ApiError {
 // Tell axum how to convert `AppError` into a response.
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        match self {
+        // 🔐 B9：所有变体统一成 JSON（`{"error": "..."}`）—— 以前只有 Internal 回纯文本、
+        // 其余回裸字符串，前端/脚本没法用同一个结构解析错误。状态码语义保持不变。
+        let (status, message) = match self {
             ApiError::Internal(error) => {
                 // 详情写给服务端日志，响应里也保留（本机管理后台，排障需要）；
                 // 关键是不能把它当成"客户端错误"的状态码糊弄过去。
@@ -139,12 +179,12 @@ impl IntoResponse for ApiError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Something went wrong: {error}"),
                 )
-                    .into_response()
             }
-            ApiError::BadRequest(err) => (StatusCode::BAD_REQUEST, err).into_response(),
-            ApiError::Conflict(err) => (StatusCode::CONFLICT, err).into_response(),
-            ApiError::NotFound(err) => (StatusCode::NOT_FOUND, err).into_response(),
-        }
+            ApiError::BadRequest(err) => (StatusCode::BAD_REQUEST, err),
+            ApiError::Conflict(err) => (StatusCode::CONFLICT, err),
+            ApiError::NotFound(err) => (StatusCode::NOT_FOUND, err),
+        };
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
 }
 
@@ -319,11 +359,14 @@ pub fn check_exposure(
     let exposed: Vec<String> = binds
         .iter()
         .filter(|b| match b {
-            crate::config::BindAddrConfig::Http(_) => true,
+            // 🔐 A2：`-no-api` 的监听**根本不挂管理后台**（见 server/mod.rs 的 `http::serve(..., !no_api())`），
+            // 所以它不算"暴露了后台"，不能被这道启动拦截拒绝 —— 否则"只对外做 DoH、不要后台"这种
+            // 配置会起不来，而本函数下面的提示语恰好还在推荐这种做法（自相矛盾）。
+            crate::config::BindAddrConfig::Http(c) => !c.opts.no_api(),
             #[cfg(feature = "dns-over-https")]
-            crate::config::BindAddrConfig::Https(_) => true,
+            crate::config::BindAddrConfig::Https(c) => !c.opts.no_api(),
             #[cfg(feature = "dns-over-h3")]
-            crate::config::BindAddrConfig::H3(_) => true,
+            crate::config::BindAddrConfig::H3(c) => !c.opts.no_api(),
             _ => false,
         })
         .map(|b| b.sock_addr())
@@ -387,8 +430,17 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
         }
     }
 
-    // 拦截非法访问，并打印警告日志记录来源 IP
-    crate::log::warn!("Unauthorized API access attempt to: {}", req.uri().path());
+    // 拦截非法访问：每次都要记下来源 IP（B7：单次尝试也要能追溯到是谁，不能只在"错够 10 次"时才记）
+    match client_ip {
+        Some(ip) => crate::log::warn!(
+            "Unauthorized API access attempt from {ip} to: {}",
+            req.uri().path()
+        ),
+        None => crate::log::warn!(
+            "Unauthorized API access attempt（来源地址未知，可能是本机代理或 Unix socket）to: {}",
+            req.uri().path()
+        ),
+    }
     Err(StatusCode::UNAUTHORIZED)
 }
 

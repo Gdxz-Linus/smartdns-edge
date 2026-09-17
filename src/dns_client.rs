@@ -101,7 +101,8 @@ impl DnsClientBuilder {
                 let proxy = server_config
                     .proxy
                     .as_deref()
-                    .map(|n| proxies.get(n))
+                    // 名字写错会**明确告警**并改直连，而不是无声直连（见 `proxy::resolve_proxy`）
+                    .map(|n| crate::proxy::resolve_proxy(proxies.as_ref(), n))
                     .unwrap_or_default()
                     .cloned();
                 match NameServer::new(
@@ -406,27 +407,21 @@ mod name_server_group {
         fn options(&self) -> &Arc<ResolverOpts> {
             &self.resolver_opts
         }
-    }
 
-    #[async_trait::async_trait]
-    impl GenericResolver for NameServerGroup {
-        fn options(&self) -> &ResolverOpts {
-            &self.resolver_opts
-        }
-
-        async fn lookup<N: IntoName + Send, O: Into<LookupOptions> + Send + Clone>(
-            &self,
-            name: N,
+        /// 🔐 第三部分第 3 条（上游 `-fallback`）用的"一整批同时问"：
+        /// 谁先给出"正常答案"或"明确的不存在"、或者谁先回来算谁的。
+        /// 参数是 `Vec<Arc<NameServer>>`，调用方负责把"正常那批"和"后备那批"分好。
+        async fn race_servers<O: Into<LookupOptions> + Send + Clone>(
+            servers: &[Arc<NameServer>],
+            name: Name,
             options: O,
         ) -> Result<DnsResponse, LookupError> {
             use futures_util::future::select_all;
-            let name = name.into_name()?;
-            let mut tasks = self
-                .servers
+            let mut tasks = servers
                 .iter()
                 .map(|ns| GenericResolver::lookup(ns.as_ref(), name.clone(), options.clone()))
                 .collect::<Vec<_>>();
-				
+
 			// 🌟 核心防御保护：拦截空任务列表，防止 select_all 触发 Panic 崩盘
             if tasks.is_empty() {
                 return Err(crate::libdns::proto::ProtoErrorKind::NoConnections.into());
@@ -466,6 +461,72 @@ mod name_server_group {
                 tasks = rest;
             }
         }
+
+    }
+
+    #[async_trait::async_trait]
+    impl GenericResolver for NameServerGroup {
+        fn options(&self) -> &ResolverOpts {
+            &self.resolver_opts
+        }
+
+        async fn lookup<N: IntoName + Send, O: Into<LookupOptions> + Send + Clone>(
+            &self,
+            name: N,
+            options: O,
+        ) -> Result<DnsResponse, LookupError> {
+            let name = name.into_name()?;
+
+            // 🔐 第三部分第 3 条（上游 `-fallback`）：标了后备的服务器**第一轮不参与** ——
+            // 只有正常那批给不出可用答案时，才把它拉进来再竞一次。
+            // 语义对齐 C 版 `src/dns_client/dns_client.c:405`：skip fallback server for first query。
+            let (primary, fallback): (Vec<Arc<NameServer>>, Vec<Arc<NameServer>>) = self
+                .servers
+                .iter()
+                .cloned()
+                .partition(|ns| !ns.is_fallback());
+
+            // 组里全是后备服务器（或只有一条且被标了后备）：那就照旧一起用，别把查询搞成失败
+            let (primary, fallback) = if primary.is_empty() {
+                (fallback, Vec::new())
+            } else {
+                (primary, fallback)
+            };
+
+            let first = Self::race_servers(&primary, name.clone(), options.clone()).await;
+
+            // 第一轮已经拿到可用答案，或者压根没有后备可问 → 就用它
+            if fallback.is_empty() || !needs_fallback(&first) {
+                return first;
+            }
+
+            // 第二轮：把后备服务器拉进来再竞一次
+            let second = Self::race_servers(&fallback, name, options).await;
+
+            // 第二轮也没给出更好的结果 → 保留第一轮的（可能是截断包，或更具体的原因）
+            if needs_fallback(&second) {
+                first
+            } else {
+                second
+            }
+        }
+    }
+}
+
+/// 🔐 第三部分第 3 条（上游 `-fallback`）：这次竞速的结果算不算"拿到可用答案"？
+///
+/// 判据与竞速循环自己的一致：**正常答案（NOERROR 且没被截断）** 或 **明确的"这个名字不存在"（NXDOMAIN）**
+/// 才算"有答案"；超时、上游故障、只剩截断包，都算"没答案"—— 这时候才轮到后备服务器上场。
+pub(crate) fn needs_fallback(res: &Result<DnsResponse, LookupError>) -> bool {
+    use crate::libdns::proto::op::ResponseCode;
+
+    match res {
+        Err(_) => true,
+        Ok(resp) => {
+            let rcode = resp.response_code();
+            !(rcode == ResponseCode::NXDomain
+                || (rcode == ResponseCode::NoError && !resp.truncated()))
+        }
     }
 }
 
@@ -492,6 +553,9 @@ mod name_server {
         ///    上游单方面关掉，本次查询会立刻退回截断答案（与修复前一致），下一次查询 hickory 会
         ///    自行重连，不影响后续升级。
         tcp_fallback: Option<(DnsUrl, Connection)>,
+        /// 🔐 这条上游是不是"后备服务器"（配置里的 `-fallback`）。
+        /// 后备服务器**第一轮不参与**竞速，只有同组正常那批给不出可用答案时才上场。
+        is_fallback: bool,
     }
 
     impl NameServer {
@@ -513,16 +577,33 @@ mod name_server {
                     anyhow::bail!("Parameter tls_client_config is required for Encrypted upstream");
                 };
 
-                let config = if !url.ssl_verify() {
-                    tls_client_config.verify_off
-                } else if url.sni_off() {
-                    tls_client_config.sni_off
-                } else {
-                    tls_client_config.normal
+                // 🔐 第三部分第 2 条（`-spki-pin`）：配了 pin 的上游，在原有校验（或用 `-k`
+                // 关掉链校验）之上**再**核对证书公钥 —— 与 C 版 `client_tls.c` 的语义一致：
+                // pin 是额外的确认条件，绝不是"跳过校验"的借口；两者叠加就是"纯 pin"模式。
+                let config = match url.spki_pin() {
+                    Some(pin) => {
+                        tls_client_config.with_spki_pin(pin, url.ssl_verify(), url.sni_off())?
+                    }
+                    None => {
+                        if !url.ssl_verify() {
+                            tls_client_config.verify_off
+                        } else if url.sni_off() {
+                            tls_client_config.sni_off
+                        } else {
+                            tls_client_config.normal
+                        }
+                    }
                 };
 
                 Some(config)
             } else {
+                // 🌟 别让"配了却不起作用"重演：明文上游上写 -spki-pin 等于没配，说清楚
+                if url.spki_pin().is_some() {
+                    crate::log::warn!(
+                        "{}：`-spki-pin` 只对加密上游（tls / https / quic / h3）有效，这条是明文上游，已忽略",
+                        url
+                    );
+                }
                 None
             };
 
@@ -575,6 +656,7 @@ mod name_server {
                 options: options.into(),
                 connection,
                 tcp_fallback,
+                is_fallback: config.fallback,
             })
         }
 
@@ -586,6 +668,12 @@ mod name_server {
         #[inline]
         pub fn options(&self) -> &NameServerOpts {
             &self.options
+        }
+
+        /// 🔐 这条上游是不是配了 `-fallback`（后备服务器）
+        #[inline]
+        pub fn is_fallback(&self) -> bool {
+            self.is_fallback
         }
     }
 
@@ -642,20 +730,75 @@ mod name_server {
             // RFC 1035 §4.2.1：UDP 收到 TC=1 表示"答案太大，UDP 装不下"，标准做法是改用 TCP
             // 向**同一个上游**重问一次。缺了这一步，就只能把残缺答案当正常答案返回：半截地址
             // 会被写进缓存、参与测速，并在整个 TTL 内发给所有客户端（P1-5）。
+            //
+            // 🔐 ## 2026-09-17：整条 TCP 腿加"上限"，并在"死得太快"时允许重来一次
+            //
+            // 实测（`run_p2tcpretry.py`，真实二进制 + 可控假上游）两个问题：
+            // ① **连接在应答途中被上游重置**（一问一关的代理、RST）→ 这一次查询直接退回半截答案；
+            // ② **上游压根不接受 TCP 连接**（连接被拒）→ 要**卡 4.07 秒**才退回半截答案
+            //    （清单里原以为"立刻退回"，实测不是）。
+            //
+            // 所以这里做两件事：
+            //   a. 整条 TCP 腿套一个明确上限 `TCP_FALLBACK_DEADLINE`：无论上游是黑洞还是半死不活，
+            //      最坏只多花这一点时间，随后如实把带 TC 的应答交给客户端（由客户端按规范改走 TCP 来问我们）。
+            //   b. 如果第一次失败得**很快**（说明是"这条连接已经死了"，不是"网络黑洞在耗时间"），
+            //      就重来一次 —— hickory 上一次失败已把该连接标记为 Failed，下一次 send 会自己重连，
+            //      于是"被掐掉的那一次"也能拿到完整答案。重来同样受上面的上限约束，不会退化成死等。
+            //
+            // 上限取值 800ms 的理由：TCP 重问的代价是"连接（1 个往返）+ 查询（1 个往返）"，
+            // 800ms 足够覆盖到单程 400ms 的上游；而 TC=1 本来就少见（只出现在大答案上），
+            // 拿这点时间换"不把半截答案交出去"是划算的。上限只影响 TCP 这条腿，UDP 主路不变。
             if res.truncated()
                 && let (Some((url, tcp)), Some(tcp_req)) = (self.tcp_fallback.as_ref(), tcp_req)
             {
-                match tcp.send(tcp_req).first_answer().await {
-                    Ok(full) => {
-                        debug!("{url}: udp response is truncated, retried over tcp and got a complete answer");
+                // 第一次尝试的预算
+                const TCP_FALLBACK_DEADLINE: std::time::Duration =
+                    std::time::Duration::from_millis(800);
+                // 重来一次的预算（更小）：保证"最坏也只是多花这么点"，绝不会演变成死等。
+                const TCP_FALLBACK_RETRY_DEADLINE: std::time::Duration =
+                    std::time::Duration::from_millis(300);
+
+                let first =
+                    tokio::time::timeout(TCP_FALLBACK_DEADLINE, tcp.send(tcp_req.clone()).first_answer())
+                        .await;
+
+                // 先记下第一次为什么失败（只为日志），再把结果用掉
+                let first_why = match &first {
+                    Ok(Ok(_)) => String::new(), // 成功了就走不到重来那一段
+                    Ok(Err(err)) => format!("error: {err}"),
+                    Err(_) => format!("timeout after {TCP_FALLBACK_DEADLINE:?}"),
+                };
+
+                if let Ok(Ok(full)) = first {
+                    debug!("{url}: udp response is truncated, retried over tcp and got a complete answer");
+                    return Ok(From::<Message>::from(full.into()));
+                }
+
+                // 第一次没成 → **无条件重来一次**（换一条新连接：hickory 上一次失败已把该连接标记为
+                // Failed，下一次 send 会自己重连）。
+                //
+                // 为什么不做"看错误种类 / 看失败快慢"的区分（2026-09-17 定）：
+                // 实测同一种"上游把连接重置"的故障，会随时序表现为两种样子 ——
+                // 有时是立刻报错、有时却是"读一直挂到我们的上限"，用启发式判据必然漏掉一种
+                // （见 `run_p2tcpretry.py` 的复现记录：加上"只认快失败"之后，3 次里有 1 次又退回半截答案）。
+                // 改成无条件重来 + 重来那条腿只给 300ms，最坏也只是在"对端彻底沉默"时多花 0.3 秒，
+                // 却能把"被掐掉的那一次"稳稳救回来。
+                match tokio::time::timeout(
+                    TCP_FALLBACK_RETRY_DEADLINE,
+                    tcp.send(tcp_req).first_answer(),
+                )
+                .await
+                {
+                    Ok(Ok(full)) => {
+                        debug!("{url}: udp response is truncated, tcp retry succeeded after first attempt failed ({first_why}), got a complete answer");
                         return Ok(From::<Message>::from(full.into()));
                     }
-                    Err(err) => {
-                        // TCP 用不了（网络封 53/tcp、上游不支持、池化连接刚被上游关掉等）：
-                        // 立刻退回截断答案，行为与修复前一致；TC 位会继续透传给客户端，
-                        // 由客户端按规范改用 TCP 来问我们。
-                        debug!("{url}: udp response is truncated, retry over tcp failed ({err}), returning the truncated answer");
-                    }
+                    Ok(Err(err2)) => debug!(
+                        "{url}: udp response is truncated, tcp retry failed too (first: {first_why}; retry: {err2}), returning the truncated answer"
+                    ),
+                    Err(_) => debug!(
+                        "{url}: udp response is truncated, tcp retry exceeded {TCP_FALLBACK_RETRY_DEADLINE:?} (first: {first_why}), returning the truncated answer"
+                    ),
                 }
             }
 
@@ -668,6 +811,21 @@ mod name_server {
     }
 
     /// 🌟 核心修复 1：将 1232 提升到 4096，包容不守规矩的上游和巨型 DNSSEC 数据包.
+    ///
+    /// ⚠️ **4096 这个值已定案，不要再往下调**（2026-09-17 查证，三条依据）：
+    /// 1. **与 C 版一致**：C 版发给上游的 OPT 载荷也是 4096
+    ///    （`src/dns_client/packet.c:78` 用 `DNS_IN_PACKSIZE`，定义 `src/include/smartdns/dns.h:30` = `512 * 8`）。
+    /// 2. **与内嵌 hickory 的收包上限一致，不虚标**：hickory 的 UDP 读缓冲是
+    ///    `MAX_RECEIVE_BUFFER_SIZE.min(声明的 max_payload)`，而 `MAX_RECEIVE_BUFFER_SIZE = 4096`
+    ///    （`hickory-dns/crates/proto/src/udp/mod.rs:27`、`udp/udp_client_stream.rs:167`）。
+    ///    所以 4096 就是"我们实际能收下的最大包"，声明 4096 = 说到做到。
+    /// 3. **声明小反而会招故障**：DNS Flag Day 2020 建议把默认值降到 1232 是为了避免 IP 分片，
+    ///    但那是站在"权威服务器只发合规大小的包"这个前提上。真有上游不理 EDNS、照发 2~4 KB 的包时，
+    ///    我们声明 1232 只会让内核只读 1232 字节 —— 多出来的部分在 Linux 被**静默截断**（变成残包）、
+    ///    在 Windows 被**整包丢弃**（WSAEMSGSIZE），正是本项目最想避免的"查不出来"的故障。
+    ///    真要处理超长答案，正确做法是走 TC → TCP 重问（已实现，见本文件 `tcp_fallback`）。
+    /// 客户端方向是另一条独立的路：对客户端声明的尺寸做 [512, 4096] 收口，超了就贴 TC=1
+    /// （`src/app.rs:954`），不受这里的值影响。
     const MAX_PAYLOAD_LEN: u16 = 4096;
 
     fn build_message(
@@ -759,12 +917,16 @@ mod bootstrap {
                     // 强迫用户直面网络配置问题，或引导其使用命令行参数显式指定。
                     
                     // 使用 ANSI 转义码在控制台打印高亮的红、黄、绿色文本
+                    // 🔐 B4：这里**不会退出**（P1-6 起已改成降级继续运行），所以不能再喊 FATAL ——
+                    // 用户看到"致命错误"却发现服务照常跑，会以为出了更严重的问题。
                     eprintln!(
-                        "\n\x1b[31;1m[FATAL ERROR]\x1b[0m Failed to read system DNS from network adapter: {}",
+                        "\n\x1b[33;1m[警告]\x1b[0m 读不到系统网卡上的 DNS 配置：{}",
                         err
                     );
                     eprintln!(
-                        "Please check your network settings, or explicitly specify a DNS server using \x1b[33m'-s <IP>'\x1b[0m (e.g., \x1b[32m-s 119.29.29.29\x1b[0m).\n"
+                        "\x1b[33;1m已降级继续运行\x1b[0m：用 IP 形式的上游（server / -s）不受影响；\
+                         需要解析主机名的上游（DoH/DoT/DoQ）会失败，请显式指定 \
+                         \x1b[32m-s 119.29.29.29\x1b[0m 或配置 `bootstrap-dns <ip>`。\n"
                     );
                     
                     // 同时也记录到标准日志中，以防是作为后台服务运行时的静默崩溃

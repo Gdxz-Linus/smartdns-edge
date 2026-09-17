@@ -97,7 +97,12 @@ fn setup_socket<'a, T: Into<SockRef<'a>>>(
 
     // https://github.com/pymumu/smartdns/blob/e26ecf6a52851f88e2937448019f74b753c0e6dc/src/dns_server/server_socket.c#L111
     if sock_typ == Type::STREAM {
-        // enable TCP_FASTOPEN
+        // 关掉 Nagle：DNS 的查询/回答都是小报文，Nagle 会把它们攒着等 ACK，白白加一段延迟。
+        //
+        // ⚠️ 这里**只设了 TCP_NODELAY，没有设 TCP_FASTOPEN**。原先这行注释写的是
+        // "enable TCP_FASTOPEN"，是从 C 版 `dns_server/server_socket.c` 抄过来的 —— 那边注释下面
+        // 紧跟两条 setsockopt（TCP_FASTOPEN + TCP_NODELAY），我们只搬了注释、没搬 TFO 那一行。
+        // 要上 TFO 得单独评估（监听侧需要 backlog 参数，Windows/macOS 机制也不同），别顺手改回来。
         sock_ref.set_tcp_nodelay(true)?;
     }
 

@@ -56,6 +56,13 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 lookup.add_authority(auth);
             }
 
+            // 🔐 B3：本地 address 规则 / 强制 SOA 的应答走的是这条**早返回**分支，
+            // 以前完全不经过 `rr-ttl-reply-max` —— 于是 `rr-ttl-min 600` + `rr-ttl-reply-max 60`
+            // 时，这类应答照样带 600 秒返回给客户端，与"允许返回给客户端的最大 TTL"对不上。
+            if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
+                clamp_reply_ttl(&mut lookup, reply_max);
+            }
+
             ctx.source = LookupFrom::Static;
             return Ok(lookup);
         }
@@ -92,24 +99,39 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                                 }
                         }
 
-                // 2) rr-ttl-reply-max：把"给客户端看的 TTL"统一压到上限以内。
-                //    Answer 与 Authority（SOA）都要压 —— 否定响应的寿命正写在 SOA 里。
+                // 2) rr-ttl-reply-max：把"给客户端看的 TTL"统一压到上限以内（B3：三个区都压）。
                 if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
-                    for record in lookup.answers_mut() {
-                        if record.ttl() > reply_max {
-                            record.set_ttl(reply_max);
-                        }
-                    }
-                    for record in lookup.authorities_mut() {
-                        if record.ttl() > reply_max {
-                            record.set_ttl(reply_max);
-                        }
-                    }
+                    clamp_reply_ttl(&mut lookup, reply_max);
                 }
 
                 Ok(lookup)
             }
             Err(err) => Err(err),
+        }
+    }
+}
+
+/// 把"给客户端看的 TTL"统一压到 `rr-ttl-reply-max` 以内。
+///
+/// 🔐 B3 的两个要点：
+/// ① **三个区都压**（Answer / Authority(SOA) / Additional(胶水)）—— 这个配置的承诺是
+///    "允许返回给客户端的最大 TTL 值"，而客户端会把三个区都缓存下来；只压前两个区时，
+///    胶水记录的 TTL 仍会超过用户设定的上限。
+/// ② 本地 address 规则命中的**早返回**分支以前完全不经过这里（见上面的调用点）。
+fn clamp_reply_ttl(lookup: &mut DnsResponse, reply_max: u32) {
+    for record in lookup.answers_mut() {
+        if record.ttl() > reply_max {
+            record.set_ttl(reply_max);
+        }
+    }
+    for record in lookup.authorities_mut() {
+        if record.ttl() > reply_max {
+            record.set_ttl(reply_max);
+        }
+    }
+    for record in lookup.additionals_mut() {
+        if record.ttl() > reply_max {
+            record.set_ttl(reply_max);
         }
     }
 }

@@ -45,6 +45,25 @@ impl DnsMiddlewareHandler {
                 client_ip = addr.into();
             }
 
+        // 🔐 第三部分第 1 条（文档说了、代码没有）：`acl-enable` / `bind ... -acl`。
+        //
+        // 语义对齐 C 版 `src/dns_server/client_rule.c:22-32`：**开启后，没匹配到任何
+        // `client-rules` 的客户端一律 REFUSED（且不缓存）**；匹配到的照常服务（仍按规则分组）。
+        // 默认关闭时这里什么都不做 —— 默认行为零变化。
+        //
+        // 后台请求（预取、双栈探针、过期刷新）不是"某个客户端"，不参与 ACL 判定：
+        // 否则一开 ACL，预取会被自己拒掉（来源是程序自己，永远匹配不到客户端规则）。
+        let matched_rule = client_rules.iter().find(|s| s.match_ip(&client_ip));
+        if !server_opts.is_background
+            && (cfg.acl_enable() || server_opts.acl())
+            && matched_rule.is_none()
+        {
+            crate::log::debug!(
+                "ACL 已开启：客户端 {client_ip} 没有匹配到任何 client-rules → 拒绝（REFUSED）"
+            );
+            return Err(crate::libdns::proto::op::ResponseCode::Refused.into());
+        }
+
         // 🔐 P2（用户定策）：两条护栏，缺一不可 ——
         //   ① 调用方**已经指定**规则组就尊重它（预取会把"这条缓存属于哪组"带回来）；
         //      原来这里是无条件覆盖，等于把调用方的意图直接抹掉。
@@ -52,10 +71,7 @@ impl DnsMiddlewareHandler {
         //      （它的来源是程序自己，匹配不到任何客户端规则，硬判只会把组抹成默认）。
         // 只有"调用方没指定 + 不是后台请求"时，才按来源 IP 从客户端规则里推断。
         if server_opts.rule_group.is_none() && !server_opts.is_background {
-            server_opts.rule_group = client_rules
-                .iter()
-                .find(|s| s.match_ip(&client_ip))
-                .map(|s| s.group.clone());
+            server_opts.rule_group = matched_rule.map(|s| s.group.clone());
         }
 
         let mut ctx = DnsContext::new(req.query().name().borrow(), cfg, server_opts.clone());
@@ -259,6 +275,114 @@ mod tests {
                 .await
                 .map(|lookup| lookup.record_iter().map(|s| s.data()).cloned().collect())
         }
+    }
+
+    /// 造一条"带指定来源地址"的请求（用来测按来源 IP 的判定）
+    fn req_from(name: &str, src: &str) -> DnsRequest {
+        use crate::libdns::proto::op::Message;
+
+        let mut msg = Message::query();
+        msg.add_query(Query::query(
+            crate::libdns::proto::rr::Name::from_ascii(name).unwrap(),
+            RecordType::A,
+        ));
+        DnsRequest::new(msg, src.parse().unwrap(), crate::libdns::Protocol::Udp)
+    }
+
+    /// 🔐 第三部分第 1 条（`acl-enable` / `bind ... -acl`）：
+    /// 默认关闭时一切照旧；开启后**只有没匹配到 client-rules 的客户端**被 REFUSED（不是 SERVFAIL）；
+    /// 匹配到的照常服务；后台请求（预取/探针）不受影响；监听级 `-acl` 与全局开关是"或"的关系。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acl_enable_refuses_only_unmatched_clients() {
+        use crate::libdns::proto::op::ResponseCode;
+        use crate::config::ServerOpts;
+
+        let name = "acltest.example.com";
+        let matching_rule = "client-rules 127.0.0.0/8";
+        let other_rule = "client-rules 192.168.0.0/16";
+
+        // ① 默认（不开 ACL）+ 规则不匹配 → 照常解析（默认行为零变化）
+        let cfg = RuntimeConfig::builder().with(other_rule).build().unwrap();
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+        let res = mw
+            .search(&req_from(name, "127.0.0.1:55001"), &ServerOpts::default())
+            .await;
+        assert!(res.is_ok(), "不开 ACL 时，匹配不上规则也必须照常解析：{res:?}");
+
+        // ② 全局打开 + 规则不匹配 → REFUSED（且是"明确状态码"，不是 SERVFAIL）
+        let cfg = RuntimeConfig::builder()
+            .with("acl-enable yes")
+            .with(other_rule)
+            .build()
+            .unwrap();
+        assert!(cfg.acl_enable(), "acl-enable yes 必须解析成 true");
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+        let err = mw
+            .search(&req_from(name, "127.0.0.1:55002"), &ServerOpts::default())
+            .await
+            .expect_err("开了 ACL、又不匹配规则，必须拒绝");
+        assert_eq!(
+            err.explicit_response_code(),
+            Some(ResponseCode::Refused),
+            "必须是 REFUSED（不许抹成 SERVFAIL）：{err:?}"
+        );
+
+        // ③ 全局打开 + 规则匹配 → 照常拿到答案（白名单里的客户端不受影响）
+        let cfg = RuntimeConfig::builder()
+            .with("acl-enable yes")
+            .with(matching_rule)
+            .build()
+            .unwrap();
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+        let res = mw
+            .search(&req_from(name, "127.0.0.1:55003"), &ServerOpts::default())
+            .await;
+        assert!(res.is_ok(), "匹配到规则的客户端必须照常服务：{res:?}");
+
+        // ④ 只有监听级 `-acl`（全局没开）+ 不匹配 → 也要拒绝（"或"的关系，对齐 C 版的 bind 标志）
+        let cfg = RuntimeConfig::builder().with(other_rule).build().unwrap();
+        assert!(!cfg.acl_enable());
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+        let err = mw
+            .search(
+                &req_from(name, "127.0.0.1:55004"),
+                &ServerOpts {
+                    acl: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("监听级 -acl 打开时，不匹配的客户端也要拒绝");
+        assert_eq!(err.explicit_response_code(), Some(ResponseCode::Refused));
+
+        // ⑤ 后台请求（预取/双栈探针）不是"某个客户端" → 不受 ACL 影响，
+        //    否则一开 ACL 预取会被自己拒掉
+        let cfg = RuntimeConfig::builder()
+            .with("acl-enable yes")
+            .with(other_rule)
+            .build()
+            .unwrap();
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+        let res = mw
+            .search(
+                &req_from(name, "127.0.0.1:55005"),
+                &ServerOpts {
+                    is_background: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(res.is_ok(), "后台请求不许被 ACL 拒掉（否则预取会自己废掉）：{res:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

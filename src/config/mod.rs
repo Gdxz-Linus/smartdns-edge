@@ -38,10 +38,12 @@ pub fn sanitize_ttl(name: &str, v: u64) -> u64 {
     }
 }
 
+mod acl;
 mod audit;
 mod bind_addr;
 mod cache;
 mod client_rule;
+mod conf_file;
 mod domain;
 mod domain_rule;
 mod domain_set;
@@ -53,12 +55,15 @@ pub mod parser;
 mod response_mode;
 mod rule_group;
 mod server_opts;
+mod set_cache;
 mod speed_mode;
 
+pub use acl::*;
 pub use audit::*;
 pub use bind_addr::*;
 pub use cache::*;
 pub use client_rule::*;
+pub use conf_file::*;
 pub use domain::*;
 pub use domain_rule::*;
 pub use domain_set::*;
@@ -254,6 +259,9 @@ pub struct Config {
 
     pub audit: AuditConfig,
 
+    /// 访问控制（`acl-enable`）：开启后没匹配到任何 `client-rules` 的客户端一律 REFUSED。
+    pub acl: AclConfig,
+
     /// Support reading dnsmasq dhcp file to resolve local hostname
     pub dnsmasq_lease_file: Option<PathBuf>,
 
@@ -275,6 +283,10 @@ pub struct Config {
 
     /// ip set
     pub ip_sets: HashMap<String, Vec<IpNet>>,
+
+    /// 🔐 IP 集合的来源清单（`-url` / `-file` / `-interval` 等），与 `domain_set_providers` 对称。
+    /// 集合内容在解析时就已经展开进 `ip_sets`，这里留一份供定时刷新判断周期用。
+    pub ip_set_providers: HashMap<String, Vec<IpSetProvider>>,
 
     pub ip_alias: Vec<IpAlias>,
 

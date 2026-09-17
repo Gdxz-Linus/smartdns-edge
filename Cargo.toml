@@ -3,6 +3,14 @@ name = "smartdns"
 version = "1.0.1"
 authors = ["Gdxz <gdxz-Linus@outlook.com>"]
 edition = "2024"
+# 这一行声明的是"**最低要求**"，不是"用哪个版本编译" —— 它与编出来的程序毫无关系
+# （程序里不读它），只决定"用比它旧的工具链构建时，cargo 会不会在开工前直接拒绝"。
+#
+# 本项目实际的构建路径是：CI 用最新 stable（`.github/actions/setup` 默认 `stable`）、
+# 官方文档不提供从源码编译、Docker 镜像用预编译产物。也就是说这个数字对现有用户路径没有影响。
+# 保留 1.94 的实际含义只有一条：**将来**若有人拿发行版自带的旧 rustc 从源码编译、或第三方
+# 软件源要打包，会在第一步被挡（代码真实下限约 1.88：edition 2024 需 ≥1.85、let 链需 ≥1.88）。
+# 真碰上了改这一行即可。
 rust-version = "1.94.0"
 
 keywords = ["DNS", "BIND", "dig", "SmartDNS", "Dnsmasq"]
@@ -189,6 +197,10 @@ webpki-roots = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"]  }
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"
+# 🔐 上游 `-spki-pin` 用：算证书公钥（SPKI）的 SHA-256、解码用户写的 base64 pin
+# （都取自本仓库已有的依赖版本，离线也能构建）
+ring = "0.17"
+base64 = "0.13"
 
 lru = { version = "0.14", default-features = false }
 # time = "0.3"
@@ -238,10 +250,8 @@ windows-service = "0.8.0"
 
 
 [build-dependencies]
-reqwest = { version = "0.12", default-features = false, features = [
-  "blocking",
-  "rustls-tls",
-] }
+# 🌟「顺手修」：这里原来挂着 reqwest（blocking + rustls-tls），但 build.rs 里一行都没用到它 ——
+# 每次编译都要为构建脚本多拉一整套 HTTP/TLS 依赖。运行时需要 reqwest 的话，它仍在 [dependencies] 里。
 chrono = "0.4.38"
 anyhow = "1.0"
 

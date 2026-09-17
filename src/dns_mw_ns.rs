@@ -353,8 +353,45 @@ impl From<&LookupIpOptions> for LookupOptions {
     }
 }
 
+/// 🔐 第三部分第 3 条（上游 `-fallback`）：按组查 IP 时也分两轮 ——
+/// **第一轮只问正常那批服务器**，只有它们给不出可用答案（超时/故障/只剩截断包）时，
+/// 才把后备服务器拉进来再问一遍。与 C 版 `dns_client.c:405` 的语义一致，
+/// 也与"整组竞速"那条路径（`dns_client.rs` 里的 `NameServerGroup::lookup`）保持同一套规矩。
 async fn lookup_ip(
     server: &NameServerGroup,
+    name: Name,
+    options: &LookupIpOptions,
+) -> Result<DnsResponse, LookupError> {
+    let (primary, fallback): (Vec<_>, Vec<_>) = server
+        .iter()
+        .cloned()
+        .partition(|ns| !ns.is_fallback());
+
+    // 组里全是后备服务器：那就照旧一起用，别把查询搞成失败
+    if primary.is_empty() {
+        let all = fallback;
+        return lookup_ip_with(&all, name, options).await;
+    }
+
+    let first = lookup_ip_with(&primary, name.clone(), options).await;
+
+    if fallback.is_empty() || !crate::dns_client::needs_fallback(&first) {
+        return first;
+    }
+
+    // 第二轮：后备服务器上场
+    let second = lookup_ip_with(&fallback, name, options).await;
+
+    if crate::dns_client::needs_fallback(&second) {
+        first
+    } else {
+        second
+    }
+}
+
+/// 把一批服务器同时问出去，按既定的响应策略挑结果（原来的 `lookup_ip` 主体）
+async fn lookup_ip_with(
+    servers: &[std::sync::Arc<NameServer>],
     name: Name,
     options: &LookupIpOptions,
 ) -> Result<DnsResponse, LookupError> {
@@ -363,7 +400,7 @@ async fn lookup_ip(
 
     assert!(options.record_type.is_ip_addr());
 
-    let mut query_tasks = server
+    let mut query_tasks = servers
         .iter()
         .map(|ns| per_nameserver_lookup_ip(ns, name.clone(), options).boxed())
         .collect::<Vec<_>>();

@@ -131,6 +131,52 @@
   `critical-section`，需要平台实现 `critical_section_1_0_acquire/release` 符号
   （嵌入式目标由对应的 impl crate 提供）。这是 no_std 的固有要求，不是本缺陷，**本项目不使用 no_std**。
 
+### 4.6 拷进来时就带着的改动（**不是我们改的**，内容已无法追溯）
+
+这份副本**不是干净的上游快照**（第 2 节已证明）。除了我们改的那几处之外，还有一批文件在**拷贝进来的时候就已经被人改过**了 —— 我们没有它们的原始版本可比对，也没法说清"改了哪些、为什么改"。所以这一节只做一件事：**把范围写清楚**，免得以后有人误以为"这个目录就等于上游原版"。
+
+**这个清单是怎么来的（谁都能自己跑一遍）**：
+
+```bash
+cd D:/smartdns-edge
+
+# ① 我们自己动手改过的文件：从拷贝提交 3b2c655 到现在的差异
+git diff --stat 3b2c655 HEAD -- hickory-dns
+#   结果只有这几个，全部在第 4 节有记录：
+#     hickory-dns/Cargo.toml                        → 4.1
+#     hickory-dns/VENDORED.md                       → 本文件
+#     crates/proto/src/tcp/tcp_stream.rs            → 4.2
+#     crates/proto/src/quic/quic_stream.rs          → 4.3
+#     crates/proto/src/udp/udp_stream.rs            → 4.4
+#     crates/proto/src/xfer/dns_response.rs         → 4.5
+
+# ② 另一条线索：内嵌目录里出现中文注释的文件
+#    （上游 hickory-dns 是英文项目，冒出中文只可能是本地人改过）
+grep -rlP '[\x{4e00}-\x{9fff}]' hickory-dns/crates/
+```
+
+把 ② 里属于 ① 的挑出去，剩下的就是**拷入时就带着改动、我们从未动过**的文件 —— **8 个，全部在 resolver**：
+
+| 文件 | 中文注释行数 | 抽样看到的内容 |
+|---|---|---|
+| `crates/resolver/src/cache.rs` | 3 | `use crate::lookup::Lookup; // 🌟 引入 Lookup` |
+| `crates/resolver/src/caching_client.rs` | 3 | `// 🌟 核心优化：直接从缓存中获取 Lookup，0 拼装开销！` |
+| `crates/resolver/src/hosts.rs` | 5 | `// 🌟 优化 1：一次性将整个文件内容读入单个大 String 中…` |
+| `crates/resolver/src/lookup.rs` | 1 | `pub(crate) records: Arc<[Record]>, // 🌟 开放给同 crate 的缓存模块…` |
+| `crates/resolver/src/lookup_ip.rs` | 4 | `// 🌟 优化：改用无堆分配的 Either 双路选择器` |
+| `crates/resolver/src/resolver.rs` | 8 | `use futures_util::future::Either; // 🌟 新增导入` |
+| `crates/resolver/src/name_server/name_server.rs` | 4 | `// 🌟 性能优化：接收外部统一传入的时间戳，消灭高频系统调用` |
+| `crates/resolver/src/name_server/name_server_pool.rs` | 8 | `// 🌟 辅助枚举：用于控制处理后的流程走向，极简优雅` |
+
+> 另外有两个文件（`crates/proto/src/dnssec/roots/20326.rsa`、`38696.rsa`）也会被上面那条 `grep` 命中，
+> 它们是二进制内容被正则碰巧匹配上的**误报**，已核对排除，不计入这份清单。
+
+**边界声明（这一段很重要）**：
+
+- 这 8 个文件里的改动**不在第 4 节的账本内**，原始版本不可追溯（原因见第 2 节）。
+- 所以：**不要把它们当成"上游原版"**，也不要拿它们跟任何上游提交做比对 —— 比出来的差异，既不能算在我们头上，也不能证明干净。
+- 将来如果真要从上游挑补丁进来（第 5 节），**这 8 个文件必须一个一个人工核对，不能整目录覆盖粘贴**。
+
 ## 五、（应急用，默认不做）如果哪天要从上游取一个修复
 
 默认**没有**同步日程、也没有待办。只有在"外部明确通告 hickory-dns 有安全问题、且影响我们用到的路径"时，
@@ -163,3 +209,5 @@
   按第 1 节的原则，本项目**不通过自动渠道**跟踪它（这是原则的既定代价，不是待办）。
 - **第 4 节的清单是唯一的"账本"**：这个目录不再有"上游"可对照，所以一旦第 4 节与代码不一致，
   就等于失去了唯一能说明"里面有什么"的记录 —— **这是本目录维护上唯一真正的红线**。
+- **补充（2026-09-17）：第 4.6 节是"边界声明"**：那 8 个 `resolver` 文件的改动是**拷贝进来时就带着**的、
+  内容不可追溯，它们**不在账本内**。别把它们当上游原版，也别拿它们去跟上游比对（理由与复核命令都在 4.6 节）。

@@ -204,8 +204,8 @@ impl RuntimeConfig {
             rule_group_stack: Default::default(),
             dirs: Default::default(),
             // 默认强制重新取用名单：启动与手动重载都该拿到最新的。
-            // 只有 `-interval` 触发的定时刷新才把它设成 false（见 reload_new_reusing_domain_set_cache）。
-            force_domain_set_refresh: true,
+            // 只有 `-interval` 触发的定时刷新才把它设成 false（见 reload_new_reusing_set_cache）。
+            force_set_refresh: true,
         }
     }
 }
@@ -631,7 +631,15 @@ impl RuntimeConfig {
         &self.audit
     }
 
+    /// 访问控制总开关（`acl-enable`）。默认关闭 —— 不开就是"谁都能查"，与改动前行为一致。
+    ///
+    /// 语义见 `src/config/acl.rs` 与 `src/dns_mw.rs` 里的落地：开启后**没匹配到任何
+    /// `client-rules` 的客户端一律 REFUSED**（不缓存）；监听级 `bind ... -acl` 是"或"的关系。
     #[inline]
+    pub fn acl_enable(&self) -> bool {
+        self.acl.enable.unwrap_or(false)
+    }
+
     pub fn audit_enable(&self) -> bool {
         self.audit.enable.unwrap_or_default()
     }
@@ -784,11 +792,11 @@ impl RuntimeConfig {
     ///
     /// 与 `reload_new`（启动 / 手动重载）的唯一区别：**未到自己 `-interval` 的名单直接用内存缓存**。
     /// 否则一次定时刷新会把所有名单都重新下载一遍 —— 别的名单配的周期就白配了。
-    pub fn reload_new_reusing_domain_set_cache(&self) -> anyhow::Result<Arc<RuntimeConfig>> {
+    pub fn reload_new_reusing_set_cache(&self) -> anyhow::Result<Arc<RuntimeConfig>> {
         let builder = RuntimeConfigBuilder {
             conf_dir: self.conf_dir.clone(),
             conf_file: self.conf_file.clone(),
-            force_domain_set_refresh: false,
+            force_set_refresh: false,
             ..Self::builder()
         };
 
@@ -816,7 +824,7 @@ pub struct RuntimeConfigBuilder {
     dirs: HashSet<PathBuf>,
     /// 🔐 P2：构建时是否**强制重新取用** domain-set 名单（忽略内存缓存）。
     /// 启动与手动重载 = true；`-interval` 触发的定时刷新 = false。
-    force_domain_set_refresh: bool,
+    force_set_refresh: bool,
 }
 
 impl RuntimeConfigBuilder {
@@ -898,7 +906,7 @@ impl RuntimeConfigBuilder {
                 //
                 // 🔐 P2：走"带 `-interval` 语义"的取用 —— 配了周期的名单未到期就用内存缓存，
                 // 不会被别人的刷新顺带重下；取用失败时保留上一次的名单（见 `get_with_cache`）。
-                match p.get_domain_set_cached(&cfg.proxy_servers, self.force_domain_set_refresh) {
+                match p.get_domain_set_cached(&cfg.proxy_servers, self.force_set_refresh) {
                     Ok(s) => {
                         log::info!("DomainSet {} 生效 {} 条规则", s.len(), p.name());
                         set.extend(s);
@@ -1160,10 +1168,16 @@ impl RuntimeConfigBuilder {
                 // 剩下来的就是"我们没认出来的东西"：
                 // item 为 None = 整行谁都不认（例如关键字拼错）；
                 // item 有值 = 配置项认出来了，但后面还粘着多余内容（例如行尾粘了别的东西）。
+                // 🔐 A1：这两条告警曾是"把整行原文写进日志"的口子 —— 用户写
+                // `proxy-server socks5://user:pass@…` 时只要行尾多一个字，代理密码（乃至
+                // `api-token` 的口令、`bind-cert-key-pass` 的私钥口令）就会明文落盘。
+                // 日志的目的是帮他找到拼写错误，不需要看到口令，所以统一先脱敏。
+                let shown_line = redact_config_line(line);
+                let shown_rest = redact_config_line(rest);
                 let detail = if item.is_none() {
-                    format!("未识别的配置行（已原样忽略）：{line:?}，请检查关键字拼写")
+                    format!("未识别的配置行（已原样忽略）：{shown_line:?}，请检查关键字拼写")
                 } else {
-                    format!("配置行尾部有无法识别的内容（已忽略）：{rest:?} —— 整行：{line:?}")
+                    format!("配置行尾部有无法识别的内容（已忽略）：{shown_rest:?} —— 整行：{shown_line:?}")
                 };
                 match lineno {
                     Some(no) => warn!("配置文件第 {no} 行：{detail}"),
@@ -1188,6 +1202,7 @@ impl RuntimeConfigBuilder {
         match parser::parse_config(line) {
             Ok((_, Some(config_item))) => match config_item {
                 AuditEnable(v) => self.audit.enable = Some(v),
+                AclEnable(v) => self.acl.enable = Some(v),
                 AuditFile(v) => self.audit.file = Some(self.resolve_filepath(v)),
                 AuditFileMode(v) => self.audit.file_mode = Some(v),
                 AuditNum(v) => self.audit.num = Some(v),
@@ -1268,15 +1283,44 @@ impl RuntimeConfigBuilder {
                     // 只要 include 的文件存在但打不开（权限不足、路径指向目录、被占用等），
                     // 就会 panic 直接中止整个进程，用户只能看到一句 "load_file failed" 和栈回溯。
                     // 改为打印"哪个文件、什么原因"并跳过该文件、继续加载其余配置。
-                    if let Err(err) = self.load_file(v.clone()) {
-                        log::error!(
-                            "failed to load extra configuration file {:?}: {err}; this file is skipped",
-                            v
+                    //
+                    // 🔐 新增：路径支持通配符（`conf-file /etc/smartdns/conf.d/*.conf`），
+                    // 并可写 `-g|-group <组名>` 把这一段被包含进来的配置整体挂到该规则组。
+                    let files = self.expand_conf_files(&v.path);
+                    if files.is_empty() {
+                        warn!(
+                            "conf-file {:?} 没有匹配到任何文件（通配符没命中或路径不存在）",
+                            v.path
                         );
                     }
 
-                    if let Some(dir) = v.parent() {
-                        self.dirs.insert(dir.to_path_buf());
+                    for file in files {
+                        // 用与 group-begin / group-end 完全相同的机制：压栈 → 加载 → 出栈合并。
+                        // 必须在 load_file **之前**压栈：文件里那些没写组名的规则要落到这个组里。
+                        if let Some(group) = v.group.as_ref() {
+                            self.rule_group_stack
+                                .push((group.clone(), RuleGroup::default()));
+                        }
+
+                        if let Err(err) = self.load_file(file.clone()) {
+                            log::error!(
+                                "failed to load extra configuration file {:?}: {err}; this file is skipped",
+                                file
+                            );
+                        }
+
+                        if v.group.is_some()
+                            && let Some((name, rule_group)) = self.rule_group_stack.pop()
+                        {
+                            self.rule_groups
+                                .entry(name)
+                                .or_default()
+                                .merge(rule_group);
+                        }
+
+                        if let Some(dir) = file.parent() {
+                            self.dirs.insert(dir.to_path_buf());
+                        }
                     }
                 }
                 DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(self.resolve_filepath(v)),
@@ -1306,16 +1350,24 @@ impl RuntimeConfigBuilder {
                 }
                 HostsFile(file) => self.hosts_file = Some(file),
                 IpSetProvider(p) => {
-                    let path = resolve_filepath(&p.file, self.conf_file.as_ref());
-                    match std::fs::read_to_string(path) {
-                        Ok(text) => {
-                            let net = self.ip_sets.entry(p.name.clone()).or_default();
-                            let len = net.len();
-                            net.extend(parse_ip_set_file(&text));
-                            log::info!("IpSet load {} records into {}", net.len() - len, p.name);
+                    // 🔐 与 `domain-set` 同款：相对路径按"当前配置文件所在目录"解析；
+                    // 来源记录进 `ip_set_providers`（定时刷新按 `-interval` 判断周期），
+                    // 内容在这里展开进 `ip_sets` —— 规则树构建时就要用到，不能等到运行时。
+                    let p = p.with_resolved_file(|path| self.resolve_filepath(path));
+                    self.ip_set_providers
+                        .entry(p.name().to_string())
+                        .or_default()
+                        .push(p.clone());
+
+                    match p.get_ip_set_cached(&self.proxy_servers, self.force_set_refresh) {
+                        Ok(net) => {
+                            let ips = self.ip_sets.entry(p.name().to_string()).or_default();
+                            let len = ips.len();
+                            ips.extend(net);
+                            log::info!("IpSet load {} records into {}", ips.len() - len, p.name());
                         }
                         Err(err) => {
-                            log::error!("IpSet load failed {} {}", p.name, err);
+                            log::error!("IpSet load failed {} {}", p.name(), err);
                         }
                     }
                 }
@@ -1410,6 +1462,12 @@ impl RuntimeConfigBuilder {
     }
 
     #[inline]
+    /// 把 `conf-file` 的路径展开成实际要加载的文件列表（支持通配符，见 [`expand_conf_pattern`]）。
+    fn expand_conf_files(&self, path: &Path) -> Vec<PathBuf> {
+        expand_conf_pattern(path, self.conf_file.as_ref())
+    }
+
+    #[inline]
     fn resolve_filepath<P: AsRef<Path>>(&self, filepath: P) -> PathBuf {
         let path = resolve_filepath(filepath, self.conf_file.as_ref());
 
@@ -1428,6 +1486,35 @@ impl RuntimeConfigBuilder {
         }
         path
     }
+}
+
+/// 🔐 `conf-file` 的取文件方式：普通路径只返回它自己；带通配符（`*` `?` `[`）时展开成
+/// 实际命中的**文件**列表（目录不算）。
+///
+/// 排序是刻意的：同一份配置在不同机器上必须按同样顺序加载，否则"后写的覆盖先写的"
+/// 这类顺序敏感的配置会出现"在我这儿好用、在你那儿不生效"。
+/// 相对通配符同样相对"当前配置文件所在目录"（与 [`resolve_filepath`] 的规则一致）。
+fn expand_conf_pattern(pattern: &Path, base_file: Option<&PathBuf>) -> Vec<PathBuf> {
+    if !pattern.to_string_lossy().contains(['*', '?', '[']) {
+        return vec![pattern.to_path_buf()];
+    }
+
+    let pattern = if pattern.is_absolute() {
+        pattern.to_path_buf()
+    } else {
+        match base_file.and_then(|file| file.parent()) {
+            Some(dir) => dir.join(pattern),
+            None => pattern.to_path_buf(),
+        }
+    };
+
+    let mut files: Vec<PathBuf> = glob::glob(&pattern.to_string_lossy())
+        .map(|paths| paths.filter_map(|path| path.ok()).collect())
+        .unwrap_or_default();
+    files.retain(|path| path.is_file());
+    files.sort();
+
+    files
 }
 
 fn resolve_filepath<P: AsRef<Path>>(filepath: P, base_file: Option<&PathBuf>) -> PathBuf {
@@ -2564,4 +2651,169 @@ mod tests {
 
         assert!(cfg.client_rules().is_empty());
     }
+
+    /// `conf-file` 的通配符展开：只收**文件**、按名字排序、无通配符时原样返回一个路径。
+    #[test]
+    fn test_expand_conf_pattern() {
+        let dir = std::env::temp_dir().join(format!("conf-pattern-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+        // 干扰项：名字像配置文件的**目录**，必须被跳过
+        std::fs::create_dir_all(dir.join("conf.d").join("zz.conf")).unwrap();
+        for name in ["20-b.conf", "10-a.conf", "05-先.conf", "note.txt"] {
+            std::fs::write(dir.join("conf.d").join(name), "#\n").unwrap();
+        }
+
+        let names = |files: Vec<std::path::PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+
+        // 绝对路径通配符
+        let pattern = dir.join("conf.d").join("*.conf");
+        assert_eq!(
+            names(expand_conf_pattern(&pattern, None)),
+            ["05-先.conf", "10-a.conf", "20-b.conf"],
+            "只取*.conf 文件、目录跳过，并且按名字排序（加载顺序要稳定）"
+        );
+
+        // 相对通配符 → 相对"当前配置文件所在目录"
+        let base = dir.join("smartdns.conf");
+        assert_eq!(
+            names(expand_conf_pattern(std::path::Path::new("conf.d/*.conf"), Some(&base))),
+            ["05-先.conf", "10-a.conf", "20-b.conf"]
+        );
+
+        // 没有通配符：原样返回（存在性判断交给 load_file）
+        let plain = dir.join("conf.d").join("10-a.conf");
+        assert_eq!(expand_conf_pattern(&plain, None), vec![plain.clone()]);
+
+        // 通配符一个都没命中：返回空列表（调用方据此告警）
+        let none = dir.join("conf.d").join("*.nomatch");
+        assert!(expand_conf_pattern(&none, None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+
+/// 哪些配置关键字的值属于敏感信息（口令/密码）—— 这类行**绝不能**原样进日志。
+const SENSITIVE_CONFIG_KEYS: &[&str] = &["proxy-server", "api-token", "bind-cert-key-pass"];
+
+/// 把一行"没认出来"的配置**脱敏**后再用于日志。
+///
+/// 为什么需要它：这条告警的目的是帮用户找到拼写错误，但整行原文里可能带口令 ——
+/// `proxy-server socks5://user:pass@1.2.3.4:1080`（代理密码）、`api-token <口令>`、
+/// `bind-cert-key-pass <私钥口令>`；而"行尾多写一个字""关键字拼错"恰好是最容易触发它的情形。
+///
+/// 规则：
+/// 1. 首关键字属于敏感项 → 只报关键字，值整段隐藏；
+/// 2. 其余行 → 原样返回，但把 URL 里的 `user:pass@` 打码（防"配置项认出来了、行尾粘了个带口令的代理 URL"）。
+pub(crate) fn redact_config_line(line: &str) -> String {
+    if let Some(kw) = line.trim_start().split_whitespace().next() {
+        let kw_lower = kw.to_ascii_lowercase();
+        if SENSITIVE_CONFIG_KEYS.contains(&kw_lower.as_str()) {
+            return format!("{kw} <已隐藏：该行含口令/密码>");
+        }
+    }
+    redact_url_userinfo(line)
+}
+
+/// 把 `scheme://user:pass@host` 打码成 `scheme://***@host`。
+/// 不含 `://` 或 `@` 的行原样返回（保持日志里能看清拼写错误）。
+fn redact_url_userinfo(line: &str) -> String {
+    if !line.contains("://") || !line.contains('@') {
+        return line.to_string();
+    }
+    line.split_whitespace()
+        .map(|token| match (token.find("://"), token.rfind('@')) {
+            (Some(scheme_end), Some(at)) if at > scheme_end + 3 => {
+                let mut masked = String::with_capacity(token.len());
+                masked.push_str(&token[..scheme_end + 3]);
+                masked.push_str("***");
+                masked.push_str(&token[at..]);
+                masked
+            }
+            _ => token.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod config_line_redact_tests {
+    use super::redact_config_line;
+
+    /// 🔐 A1：含口令的配置行**不许**原样进日志。
+    #[test]
+    fn sensitive_config_lines_never_leak_secrets() {
+        // 代理密码：整行被隐藏
+        let masked = redact_config_line("proxy-server socks5://alice:s3cr3t@1.2.3.4:1080 多写的字");
+        assert!(!masked.contains("s3cr3t"), "代理密码不得出现在日志里：{masked}");
+        assert!(masked.contains("proxy-server"), "仍要报出是哪个关键字：{masked}");
+
+        // 管理口令与私钥口令
+        let masked = redact_config_line("api-token MyS3cretToken 多写的字");
+        assert!(!masked.contains("MyS3cretToken"), "管理口令不得出现在日志里：{masked}");
+        let masked = redact_config_line("bind-cert-key-pass MyKeyPass 多写的字");
+        assert!(!masked.contains("MyKeyPass"), "私钥口令不得出现在日志里：{masked}");
+
+        // 关键字本身写错（整行谁都不认）也要脱敏
+        let masked = redact_config_line("  PROXY-SERVER socks5://u:p@h:1080 拼错了");
+        assert!(!masked.contains(":p@"), "大小写不同的关键字也要挡住：{masked}");
+
+        // 非敏感行：保留原文，用户才看得出拼写错在哪
+        let plain = "addres /typo.test/1.2.3.4";
+        assert_eq!(redact_config_line(plain), plain);
+
+        // 行尾粘了带口令的 URL：只打码 user:pass，其余照旧
+        let masked = redact_config_line("address /x.test/1.2.3.4 socks5://bob:hunter2@h:1080");
+        assert!(!masked.contains("hunter2"), "URL 里的口令必须打码：{masked}");
+        assert!(masked.contains("address /x.test/1.2.3.4"), "无关部分照旧显示：{masked}");
+        assert!(masked.contains("socks5://***@h:1080"), "打码形态要能看出是个代理 URL：{masked}");
+    }
+}
+
+#[cfg(test)]
+mod ttl_clamp_tests {
+    use crate::config::TTL_MAX;
+    use crate::dns_conf::RuntimeConfig;
+
+    /// 🔐 A7：TTL 类配置一律夹到 DNS 规范上限。`local-ttl` 与 `serve-expired-*` 以前漏了这一步，
+    /// 写 `4294967297` 会被下游 `as u32` **静默**截成 1 秒（本地记录/过期答复的有效期瞬间崩掉）。
+    #[test]
+    fn ttl_configs_are_clamped_to_spec_max() {
+        let cfg = RuntimeConfig::builder()
+            .with("local-ttl 4294967297")
+            .with("serve-expired-ttl 4294967297")
+            .with("serve-expired-reply-ttl 4294967297")
+            .with("serve-expired-prefetch-time 4294967297")
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.local_ttl(), TTL_MAX, "local-ttl 必须夹到上限");
+        assert_eq!(cfg.serve_expired_ttl(), TTL_MAX, "serve-expired-ttl 必须夹到上限");
+        assert_eq!(
+            cfg.serve_expired_reply_ttl(),
+            TTL_MAX,
+            "serve-expired-reply-ttl 必须夹到上限"
+        );
+        assert_eq!(
+            cfg.serve_expired_prefetch_time(),
+            TTL_MAX,
+            "serve-expired-prefetch-time 必须夹到上限"
+        );
+
+        // 护栏：正常值不许被动过
+        let cfg = RuntimeConfig::builder()
+            .with("local-ttl 600")
+            .with("serve-expired-reply-ttl 7")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.local_ttl(), 600);
+        assert_eq!(cfg.serve_expired_reply_ttl(), 7);
+    }
+}
+
+

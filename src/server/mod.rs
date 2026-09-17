@@ -16,7 +16,7 @@ mod udp;
 use crate::{
     config::SslConfig,
     dns_conf::RuntimeConfig,
-    libdns::proto::op::{Message, ResponseCode},
+    libdns::proto::op::{Header, Message, ResponseCode},
 };
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -109,15 +109,24 @@ pub fn serve(
             #[cfg(not(target_os = "linux"))]
             let workers = 1;
 
-            // 根据配置的 Worker 线程数，利用 SO_REUSEPORT 让内核帮我们分发 UDP 包
+            // 根据配置的 Worker 线程数，利用 SO_REUSEPORT 让内核帮我们分发 UDP 包。
+            //
+            // 🔐 A9（2026-09-17）：分两步走 —— 先把所有 worker 的 socket 都绑好，再统一开始收包。
+            // 原来是一边绑一边 spawn，第 2 个 worker 绑失败时会 `?` 直接返回：前面已经绑好、
+            // 已经在收包的那些 socket 谁都不管了 —— 它们继续占着端口（调用方拿不到句柄，
+            // 重试永远绑不上），也不在 `listeners` 里（配置变更/关机都关不掉它们），变成幽灵监听。
+            // 先绑后服务的话，中途失败时前面那些 socket 随 Vec 一起释放，端口立刻还回去，重试才有意义。
+            let mut sockets = Vec::with_capacity(workers);
             for i in 0..workers {
                 let bind_type = if i == 0 { "UDP" } else { "UDP (REUSEPORT)" };
-                let socket = bind_to(
+                sockets.push(bind_to(
                     setup_udp_socket,
                     bind_addr_config.sock_addr(),
                     bind_addr_config.device(),
                     bind_type,
-                )?;
+                )?);
+            }
+            for socket in sockets {
                 // 将克隆好的统一 Token 传进去，确保关机时所有线程都能正确结束
                 udp::serve(socket, dns_handle.clone(), token.clone());
             }
@@ -324,6 +333,15 @@ impl DnsHandle {
         let protocol = message.protocol();
         let (tx, rx) = oneshot::channel();
 
+        // 🔐 A4：报文马上会被移动进队列，所以**先**把"万一请求被丢弃，也要回一个能对上号的应答"
+        // 所需的素材（原始 ID + 问题段）抽出来。UDP 不需要（外层是沉默丢弃，不做应答），
+        // 也正好让最常见的 UDP 路径不为此多付一次解析。
+        let refusal_material = if protocol == crate::libdns::Protocol::Udp {
+            None
+        } else {
+            crate::app::response_material(&message)
+        };
+
         // 🌟 修复 4：使用 try_send。如果队列满了，触发 Load Shedding (系统降载)
         if let Err(err) = self.sender.try_send((message, self.opts.clone(), tx)) {
             let message = match err {
@@ -353,9 +371,26 @@ impl DnsHandle {
                 if protocol == crate::libdns::Protocol::Udp {
                     SerialMessage::binary(vec![], addr, protocol)
                 } else {
-                    let mut response_message = Message::query().to_response();
-                    response_message.set_response_code(ResponseCode::Refused);
-                    SerialMessage::raw(response_message, addr, protocol)
+                    match refusal_material {
+                        // 🔐 A4：回带**原始 ID 与问题段** —— 客户端（dig / 内嵌 hickory 等按 ID 配对的实现）
+                        // 才认得出这是给它的应答；以前那条 ID 随机的 Refused 会被直接丢掉，用户看到的仍是超时。
+                        Some((header, queries, _, _)) => {
+                            let mut response_header = Header::response_from_request(&header);
+                            response_header.set_response_code(ResponseCode::Refused);
+                            let mut response_message = Message::query().to_response();
+                            response_message.set_header(response_header);
+                            for query in queries {
+                                response_message.add_query(query);
+                            }
+                            SerialMessage::raw(response_message, addr, protocol)
+                        }
+                        // 连报文头都解析不出来：只能回一条不带 ID 的（客户端会忽略它，但至少不悬挂）
+                        None => {
+                            let mut response_message = Message::query().to_response();
+                            response_message.set_response_code(ResponseCode::Refused);
+                            SerialMessage::raw(response_message, addr, protocol)
+                        }
+                    }
                 }
             }
         }
@@ -449,3 +484,47 @@ mod stream_error_backoff_tests {
         assert!(!should_log_stream_error(101));
     }
 }
+
+/// 收包错误是不是"这条报文本身超过了我们的接收缓冲"（单包可恢复，不代表 socket 出了故障）。
+///
+/// 为什么要单独识别：这类错误每次**消费掉一条报文**，收包循环不会空转 —— 拿它走"持续性故障"
+/// 的指数退避，等于让一条 16 KB 的攻击包换来最多 1 秒的处理停顿（A5）。
+pub(crate) fn is_oversized_datagram(e: &std::io::Error) -> bool {
+    // Windows: WSAEMSGSIZE(10040)；Linux: EMSGSIZE(90)；macOS/BSD: EMSGSIZE(40)
+    const WSAEMSGSIZE: i32 = 10040;
+
+    match e.raw_os_error() {
+        Some(code) if code == WSAEMSGSIZE => true,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        Some(code) if code == 90 => true,
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        Some(code) if code == 40 => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod oversized_datagram_tests {
+    use super::is_oversized_datagram;
+
+    /// 🔐 A5：只有"报文过大"这一类错误走"不退避"的通道，其它错误仍按持续性故障处理。
+    #[test]
+    fn only_message_too_long_is_classified() {
+        assert!(
+            is_oversized_datagram(&std::io::Error::from_raw_os_error(10040)),
+            "WSAEMSGSIZE(10040) 必须被识别为报文过大"
+        );
+        assert!(!is_oversized_datagram(&std::io::Error::from_raw_os_error(0)));
+        assert!(!is_oversized_datagram(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "test"
+        )));
+    }
+}
+

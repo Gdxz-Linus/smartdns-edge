@@ -65,15 +65,15 @@ impl App {
         self.reload_inner(true).await
     }
 
-    /// 🔐 P2：`domain-set -interval` 触发的定时刷新。
+    /// 🔐 `-interval` 触发的定时刷新（`domain-set` 与 `ip-set` 共用）。
     ///
     /// 与手动重载（`reload`）唯一的不同：**未到自己 `-interval` 的名单直接用内存缓存**，
     /// 不会被顺带重新下载（否则别的名单配的周期就白配了）。
-    async fn reload_reusing_domain_set_cache(&self) -> anyhow::Result<()> {
+    async fn reload_reusing_set_cache(&self) -> anyhow::Result<()> {
         self.reload_inner(false).await
     }
 
-    async fn reload_inner(&self, force_domain_set_refresh: bool) -> anyhow::Result<()> {
+    async fn reload_inner(&self, force_set_refresh: bool) -> anyhow::Result<()> {
         log::info!("reloading configuration...");
         let cfg = self.cfg().await;
 
@@ -81,10 +81,10 @@ impl App {
         // 全部扔给 Tokio 的专用阻塞线程池！在下载规则的这几十秒内，
         // 现有的 DNS 解析业务绝不会受到任何卡顿影响，继续用老规则飞速奔跑！
         let new_cfg = tokio::task::spawn_blocking(move || {
-            if force_domain_set_refresh {
+            if force_set_refresh {
                 cfg.reload_new()
             } else {
-                cfg.reload_new_reusing_domain_set_cache()
+                cfg.reload_new_reusing_set_cache()
             }
         })
         .await
@@ -98,34 +98,44 @@ impl App {
         Ok(())
     }
 
-    /// 下一次 `-interval` 刷新要等多少秒 —— 取所有配了 `-interval` 的名单里**最小**的那个。
+    /// 下一次 `-interval` 刷新要等多少秒 —— 取所有配了 `-interval` 的名单
+    /// （域名集合 + IP 集合）里**最小**的那个。
     ///
-    /// 为什么取最小：名单的缓存各自按自己的周期判断"到没到期"（见 `get_with_cache`），
+    /// 为什么取最小：名单的缓存各自按自己的周期判断"到没到期"（见 `set_cache`），
     /// 所以只要按最小周期来敲，每个名单都能在自己到期后的一个周期内被刷新，谁也不会被超频重下。
     /// 返回 `None` = 没有任何名单配了 `-interval`（或都配成 0）。
-    async fn next_domain_set_refresh_delay(&self) -> Option<u64> {
+    async fn next_set_refresh_delay(&self) -> Option<u64> {
         use crate::config::DomainSetProvider;
 
         let cfg = self.cfg().await;
-        cfg.domain_set_providers
+        let domain_set_intervals =
+            cfg.domain_set_providers
+                .values()
+                .flatten()
+                .filter_map(|provider| match provider {
+                    DomainSetProvider::File(p) => p.interval,
+                    DomainSetProvider::Http(p) => p.interval,
+                });
+        let ip_set_intervals = cfg
+            .ip_set_providers
             .values()
             .flatten()
-            .filter_map(|provider| match provider {
-                DomainSetProvider::File(p) => p.interval,
-                DomainSetProvider::Http(p) => p.interval,
-            })
+            .filter_map(|provider| provider.interval());
+
+        domain_set_intervals
+            .chain(ip_set_intervals)
             .filter(|secs| *secs > 0)
             .map(|secs| secs as u64)
             .min()
     }
 
-    /// 🔐 P2：`domain-set -interval` 的定期刷新任务。
+    /// 🔐 `-interval` 的定期刷新任务（`domain-set` 与 `ip-set` 共用）。
     ///
     /// 名单是在配置构建时被**展开进规则树**的，所以"刷新名单"必然连带重建配置 ——
     /// 到点后就重载一次配置（与手动 `/api/config/reload` 同一条路），新名单随之生效。
     /// 两处不同：① 未到自己周期的名单用内存缓存（不会被顺带重下）；
     /// ② 取用失败时保留上一次的名单，不会因为一次网络抖动把规则清空。
-    fn spawn_domain_set_refresh_task(&self) {
+    fn spawn_set_refresh_task(&self) {
         let app = self.clone();
         tokio::spawn(async move {
             // 没有配 `-interval` 时不做任何事，但也不退出任务：配置重载后可能就配上了，
@@ -133,7 +143,7 @@ impl App {
             const IDLE_CHECK: Duration = Duration::from_secs(60);
 
             loop {
-                let wait = match app.next_domain_set_refresh_delay().await {
+                let wait = match app.next_set_refresh_delay().await {
                     Some(secs) => Duration::from_secs(secs),
                     None => IDLE_CHECK,
                 };
@@ -144,13 +154,13 @@ impl App {
                 }
 
                 // 醒来后再确认一次：确实有配 `-interval` 的名单才值得重载配置。
-                let Some(secs) = app.next_domain_set_refresh_delay().await else {
+                let Some(secs) = app.next_set_refresh_delay().await else {
                     continue;
                 };
 
-                log::info!("domain-set 定时刷新：按 -interval（最小 {secs} 秒）重新加载配置");
-                if let Err(err) = app.reload_reusing_domain_set_cache().await {
-                    log::error!("domain-set 定时刷新失败：{err}");
+                log::info!("名单定时刷新：按 -interval（最小 {secs} 秒）重新加载配置");
+                if let Err(err) = app.reload_reusing_set_cache().await {
+                    log::error!("名单定时刷新失败：{err}");
                 }
             }
         });
@@ -174,13 +184,14 @@ impl App {
         self.update_middleware_handler().await;
         self.update_listeners().await;
         // 🔐 P2：`domain-set -interval` 的定期刷新（没配 interval 的话它什么都不做）
-        self.spawn_domain_set_refresh_task();
+        self.spawn_set_refresh_task();
         crate::banner();
         log::info!("awaiting connections...");
         log::info!("server starting up");
     }
 
     async fn update_listeners(&self) {
+        use crate::config::IBindConfig as _;   // 🔐 A9：要用 sock_addr() 打日志
         use crate::server;
 
         let cfg = self.cfg().await;
@@ -235,6 +246,22 @@ impl App {
 
                 match serve_handle {
                     Ok(server) => {
+                        // 🔐 A9（2026-09-17）：绑成功之后，必须把重试队列里那条旧账一并清掉。
+                        // 之前只有"重试路径自己绑成功"时才 remove，正常这条成功路径不清 ——
+                        // 于是：端口被占期间赶上一次配置重载、这次绑成了，队列里的旧账还留着，
+                        // 心跳到点会**再绑一遍同一个地址**：
+                        //   · Linux（UDP 开了 SO_REUSEPORT 允许重复绑定）：新句柄会把正在正常
+                        //     工作的那个替换掉（旧句柄被 shutdown），还打一句"✅ 监听已恢复"的误导日志；
+                        //   · Windows（本机实测：第二次绑定直接 10048）：每 2/4/8…秒刷一条
+                        //     "could not bind" 错误，状态页永远显示"有监听在重试"，排障时把人带偏。
+                        // 实测现场见 `probe_a9_reload.py`。
+                        if self.bind_retry.write().await.remove(&bind_addr).is_some() {
+                            log::info!(
+                                "监听 {} 已绑成功，顺手清掉重试队列里的旧账",
+                                bind_addr.sock_addr()
+                            );
+                        }
+
                         if let Some(prev_server) = self
                             .listeners
                             .write()
@@ -573,9 +600,17 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(cfg.num_workers())
-        // 🌟 核心扩容：暴力拉升外包保安上限到 2048！
-        // 彻底解决 Windows 底层 ICMP (IcmpSendEcho) 阻塞导致的线程池耗尽问题。
-        .max_blocking_threads(2048) 
+        // 阻塞线程池上限（Tokio 默认 512）。
+        //
+        // 为什么放宽：本项目有一批**同步**活是交给阻塞池的 —— 缓存落盘、审计写文件、读本机 MAC
+        // （要跑 `arp` 命令）、DNSMasq 文件轮询、配置重载等，都走 `spawn_blocking`。批量域名同时落盘、
+        // 或审计写文件与落盘撞在一起时，512 会被占满，之后新任务只能排队，表现为"解析突然一起变慢"。
+        //
+        // 代价与边界：线程是**按需创建**的、不是常驻（空闲线程默认约 10 秒回收），平时不会多开；
+        // 极端情况最多同时存在 2048 个 OS 线程（每个默认预留 2 MiB 栈，64 位下只是虚拟地址空间）。
+        // 另：ICMP 探测走的是 `surge_ping` 的异步实现，**不占**这个池 —— 原先此处写"Windows 底层
+        // ICMP (IcmpSendEcho) 阻塞导致线程池耗尽"，与本仓库代码不符，已更正。
+        .max_blocking_threads(2048)
         .enable_all()
         .thread_name("smartdns-runtime")
         // 🚨 删除了原有的 on_thread_start 和 on_thread_stop
@@ -748,24 +783,57 @@ async fn process(
     }
 }
 
+/// 从请求报文里抽出"回一个能对上号的应答"所需的素材：原始报文头 + 问题段 + 地址 + 协议。
+///
+/// ⚠️ 必须在报文被消费**之前**调用：请求处理与 `DnsHandle::send` 都会把报文移动走，
+/// 事后再想回带 ID / 问题段就晚了（A4：解析失败或请求被丢弃时，曾回过一条 ID 对不上号的 Refused）。
+pub(crate) fn response_material(
+    message: &SerialMessage,
+) -> Option<(
+    crate::libdns::proto::op::Header,
+    Vec<crate::libdns::proto::op::Query>,
+    std::net::SocketAddr,
+    crate::libdns::Protocol,
+)> {
+    use crate::libdns::proto::op::Message;
+
+    match message {
+        SerialMessage::Raw(raw, addr, protocol) => Some((
+            raw.header().clone(),
+            raw.queries().to_vec(),
+            *addr,
+            *protocol,
+        )),
+        SerialMessage::Bytes(bytes, addr, protocol) => {
+            // ① 能完整解析：连问题段一起带走（客户端对号最稳）
+            if let Ok(parsed) = Message::from_vec(bytes.as_ref()) {
+                return Some((
+                    parsed.header().clone(),
+                    parsed.queries().to_vec(),
+                    *addr,
+                    *protocol,
+                ));
+            }
+            // ② 报文体解析不了（被截断/畸形 —— 正是最常见的"请求被丢弃"情形）时，只读前 12 字节
+            //    的报文头：ID 就在里面，有了它客户端至少能把这个 Refused 认成"给我那条请求的答复"。
+            if bytes.len() >= 12 {
+                use crate::libdns::proto::op::Header;
+                use crate::libdns::proto::serialize::binary::{BinDecodable, BinDecoder};
+                let mut decoder = BinDecoder::new(bytes.as_ref());
+                if let Ok(header) = Header::read(&mut decoder) {
+                    return Some((header, Vec::new(), *addr, *protocol));
+                }
+            }
+            None
+        }
+    }
+}
+
 /// 从原始报文里预抽构造 SERVFAIL 所需的素材；连报文都解析不了就返回 None（只能放弃应答）。
 fn servfail_stub(message: &SerialMessage) -> Option<SerialMessage> {
     use crate::libdns::proto::op::{Header, Message, ResponseCode};
 
-    let (header, queries, addr, protocol) = match message {
-        SerialMessage::Raw(raw, addr, protocol) => {
-            (raw.header().clone(), raw.queries().to_vec(), *addr, *protocol)
-        }
-        SerialMessage::Bytes(bytes, addr, protocol) => {
-            let parsed = Message::from_vec(bytes.as_ref()).ok()?;
-            (
-                parsed.header().clone(),
-                parsed.queries().to_vec(),
-                *addr,
-                *protocol,
-            )
-        }
-    };
+    let (header, queries, addr, protocol) = response_material(message)?;
 
     let mut response_header = Header::response_from_request(&header);
     response_header.set_response_code(ResponseCode::ServFail);
@@ -850,9 +918,22 @@ async fn process_inner(
                                         // 客户端会当作有效的否定答案缓存下来，于是安静。这里严格区分两件事：
                                         //   · 上游**明确说**不存在（NXDOMAIN，带不带 SOA 都算）→ NOERROR + SOA；
                                         //   · 我们**没问到**（超时/网络故障）→ 维持 SERVFAIL，让客户端重试。
-                                        match e.as_soa(original) {
-                                            Some(soa) => soa,
-                                            None if e.is_nx_domain() => {
+                                        match (e.explicit_response_code(), e.as_soa(original)) {
+                                            (_, Some(soa)) => soa,
+                                            // 🔐 第三部分第 1 条（`acl-enable`）：明确的响应码原样回。
+                                            // ACL 拒绝时我们主动产出 REFUSED —— 它不是"故障"，不能抹成 SERVFAIL。
+                                            (Some(code), None) => {
+                                                log::debug!(
+                                                    "{}Response: 按明确的状态码回复客户端: {code:?}, Duration: {:?}",
+                                                    background,
+                                                    start.elapsed()
+                                                );
+                                                response_header.set_response_code(code);
+                                                let mut res = DnsResponse::empty();
+                                                res.add_query(original.to_owned());
+                                                res
+                                            }
+                                            (None, None) if e.is_nx_domain() => {
                                                 log::debug!(
                                                     "{}Response: NXDomain without SOA, reply as NOERROR+SOA, Duration: {:?}",
                                                     background,
@@ -883,7 +964,7 @@ async fn process_inner(
                                                 ));
                                                 res
                                             }
-                                            None => {
+                                            (None, None) => {
                                                 log::debug!(
                                                     "{}Response: error resolving: {}, Duration: {:?}",
                                                     background,
@@ -997,7 +1078,20 @@ async fn process_inner(
             response_message.set_header(response_header);
             Some(SerialMessage::raw(response_message, addr, protocol))
         }
-        _ => Some(SerialMessage::raw(Message::query(), addr, protocol)),
+        // 🔐 兜底：走到这里说明连"问题段"都解析不出来（例如被截断的残包、只有报文头的畸形包）。
+        // 以前这里回的是一个 `Message::query()`——那不是应答，是一个**查询**（QR=0、全零计数、
+        // ID 由 hickory 随机生成），客户端按 ID 对不上号（表现为超时），而且等于白送一个包出去
+        // （反射放大最忌讳这个）。现在改为**不作答**：UDP 侧沉默丢弃，TCP 侧由上层给 Refused，
+        // 并留下可查的日志。
+        _ => {
+            crate::log::debug!(
+                "dropping unparsable DNS request from {proto}://{addr}#{port}（无法构造应答）",
+                proto = protocol,
+                addr = addr.ip(),
+                port = addr.port(),
+            );
+            None
+        }
     }
 }
 
@@ -1198,8 +1292,11 @@ impl crate::middleware::Middleware<crate::dns::DnsContext, crate::dns::DnsReques
                     };
                     
                     if let Some(m) = mac_opt {
-                        // 忽略大小写比对 MAC 地址
-                        m.eq_ignore_ascii_case(&mac_rule.to_string())
+                        // 🔐 A10（2026-09-17）：交给 `crate::config::mac_matches` 统一比较 ——
+                        // 它会把冒号/横杠/无分隔符几种写法都归一后再比（以前这里只忽略大小写，
+                        // 于是照 Windows `arp -a` 写成横杠的规则永远不生效）。这一处以前与
+                        // `ClientRule::match_mac` 各写一遍，现在只留一个出处，避免以后再漂移。
+                        crate::config::mac_matches(mac_rule, &m)
                     } else {
                         false
                     }

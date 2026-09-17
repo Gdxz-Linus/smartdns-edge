@@ -145,6 +145,30 @@ pub struct ProxyConfig {
     pub password: Option<String>,
 }
 
+/// 按名字取代理配置；名字没在 `proxy-server ... -name <名>` 里定义时**明确告警**并返回 `None`。
+///
+/// 为什么必须说出来：写错代理名（或忘了写 `proxy-server` 那行）时，原行为是**静默改直连** ——
+/// 用户以为流量走了代理，实际没走；在"必须经代理才能出去"的网络里，症状就是
+/// "名单/上游连不上，但日志里看不出为什么"。告警用 `warn_once` 去重，不刷屏。
+///
+/// 拿到 `None` 的调用方**仍然直连**（行为不变，只是不再无声）。
+pub fn resolve_proxy<'a>(
+    proxies: &'a std::collections::HashMap<String, ProxyConfig>,
+    name: &str,
+) -> Option<&'a ProxyConfig> {
+    match proxies.get(name) {
+        Some(proxy) => Some(proxy),
+        None => {
+            if crate::log::warn_once(&format!("unknown-proxy:{name}")) {
+                crate::log::warn!(
+                    "代理名 {name} 未在 `proxy-server ... -name {name}` 里定义，本次改为直连（请检查拼写）"
+                );
+            }
+            None
+        }
+    }
+}
+
 /// 🌟 安全修复：手写 Debug，口令属于敏感信息，不得出现在任何日志/错误输出中。
 impl std::fmt::Debug for ProxyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -246,6 +270,23 @@ mod tests {
     use url::Url;
 
     use super::*;
+
+    #[test]
+    fn test_resolve_proxy_by_name() {
+        use std::collections::HashMap;
+
+        let mut proxies: HashMap<String, ProxyConfig> = HashMap::new();
+        proxies.insert(
+            "ok".to_string(),
+            ProxyConfig::from_str("socks5://1.2.3.4:1080").unwrap(),
+        );
+
+        // 名字对得上：拿到配置
+        assert!(resolve_proxy(&proxies, "ok").is_some());
+        // 名字对不上：返回 None（调用方直连）+ 告警；重复调用不会 panic（warn_once 去重）
+        assert!(resolve_proxy(&proxies, "typo").is_none());
+        assert!(resolve_proxy(&proxies, "typo").is_none());
+    }
 
     #[test]
     fn test_parse_socks5() {

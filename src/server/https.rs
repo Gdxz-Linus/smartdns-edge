@@ -155,7 +155,7 @@ pub fn serve(
                     .serve_connection_with_upgrades(socket, hyper_service)
                     .await
                 {
-                    eprintln!("failed to serve connection: {err:#}");
+                    crate::log::warn!("HTTPS 连接处理失败（已忽略该连接）: {err:#}");
                 }
             });
 

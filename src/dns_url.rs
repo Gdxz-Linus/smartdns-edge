@@ -565,6 +565,19 @@ impl std::fmt::Display for HttpsPrefer {
     }
 }
 
+/// 🔐 第三部分第 2 条（上游 `-spki-pin`）：把用户写的 pin 解成 32 字节。
+///
+/// 和 C 版 `src/dns_client/client_tls.c:184` 的 `dns_client_spki_decode` 一个规矩：
+/// base64 解码后**必须正好 32 字节**（SHA-256 的长度），否则这条 pin 不成立 ——
+/// 宁可在读配置时就报错，也不要"配了却当成没配"（那正是这条问题的老毛病）。
+pub fn decode_spki_pin(pin: &str) -> Result<[u8; 32], String> {
+    let raw = base64::decode(pin.trim()).map_err(|err| format!("不是合法的 base64：{err}"))?;
+    let len = raw.len();
+
+    <[u8; 32]>::try_from(raw)
+        .map_err(|_| format!("base64 解码后是 {len} 字节，必须正好 32 字节（SHA-256 的长度）"))
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct Params(BTreeMap<Arc<str>, Arc<str>>);
 
@@ -585,6 +598,16 @@ impl Params {
             .remove(name)
             .map(|v| T::from_str(v.deref()).ok())
             .unwrap_or_default()
+    }
+
+    /// 🔐 上游 `-spki-pin`：证书公钥（SPKI）DER 的 SHA-256，base64 编码（解码后正好 32 字节）。
+    pub fn set_spki_pin(&mut self, pin: &str) {
+        self.set_param("spki_pin", pin)
+    }
+
+    /// 🔐 配好的 pin（解码后的 32 字节）。没配、或写得不合法时返回 None（解析那一刻已报过错）。
+    pub fn spki_pin(&self) -> Option<[u8; 32]> {
+        decode_spki_pin(&self.get_param::<String>("spki_pin")?).ok()
     }
 
     pub fn is_set(&self, name: &str) -> bool {
@@ -922,6 +945,41 @@ mod tests {
         assert_eq!(url.to_string(), "https://dns.adguard-dns.com/2dns-query#h3");
         assert_eq!(*prefer, HttpsPrefer::H3);
         assert!(url.ip().is_none());
+    }
+
+    /// 🔐 第三部分第 2 条（`-spki-pin`）：pin 必须正好 32 字节（SHA-256 的长度），
+    /// 写错了要在读配置那一刻就报出来，不能"配了却当成没配"。
+    #[test]
+    fn test_decode_spki_pin() {
+        let good = base64::encode([7u8; 32]);
+        assert_eq!(decode_spki_pin(&good), Ok([7u8; 32]));
+        assert_eq!(decode_spki_pin(&format!("  {good}  ")), Ok([7u8; 32]), "两头有空格也应认");
+
+        let short = base64::encode([7u8; 31]);
+        let err = decode_spki_pin(&short).unwrap_err();
+        assert!(err.contains("31 字节"), "要说清解码后是多少字节：{err}");
+
+        while let Err(err) = decode_spki_pin(&base64::encode([7u8; 33])) {
+            assert!(err.contains("33 字节"), "{err}");
+            break;
+        }
+
+        assert!(decode_spki_pin("这不是-base64!!").is_err());
+        assert!(decode_spki_pin("").is_err());
+    }
+
+    /// 上游配置里写 `-spki-pin` 之后，能读回同一个 pin（存取一体）
+    #[test]
+    fn test_url_spki_pin_roundtrip() {
+        let pin = base64::encode([0xABu8; 32]);
+        let mut url = DnsUrl::from_str("tls://8.8.8.8:853").unwrap();
+        assert_eq!(url.spki_pin(), None, "没配就应该是 None");
+
+        url.set_spki_pin(&pin);
+        assert_eq!(url.spki_pin(), Some([0xABu8; 32]));
+
+        url.set_spki_pin("写错了");
+        assert_eq!(url.spki_pin(), None, "写法不合法时按没配处理（解析那一步已经报过错）");
     }
 
     #[test]

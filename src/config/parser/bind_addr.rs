@@ -237,6 +237,8 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             "no-rule-soa" => opts.no_rule_soa = Some(true),
             // 该监听只提供 DoH，不挂管理后台
             "no-api" => opts.no_api = Some(true),
+            // 该监听单独开启访问控制（不匹配 client-rules 的客户端回 REFUSED）
+            "acl" => opts.acl = Some(true),
             // 该监听单独设置连接上限（用于"内网宽松、公网收紧"这类部署）
             "max-connections" => opts.max_connections = v.and_then(|s| s.trim().parse().ok()),
             "max-connections-per-ip" => {
