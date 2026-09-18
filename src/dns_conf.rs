@@ -1799,6 +1799,30 @@ mod tests {
     use super::*;
 
     /// 🔐 P2（用户定策）：组不存在 → 走默认组 + 点名告警。
+    /// 🔐 Q2/Q3/Q4/Q5/Q6：集合相关的那几个开关都要能解析进来，默认都不改行为
+    #[test]
+    fn test_kernel_set_switches_parse() {
+        let cfg = RuntimeConfig::builder()
+            .with("ipset-timeout yes")
+            .with("nftset-timeout yes")
+            .with("ipset-no-speed yes")
+            .with("nftset-no-speed yes")
+            .with("nftset-debug yes")
+            .build()
+            .unwrap();
+
+        assert!(cfg.ipset_timeout(), "Q2：ipset 条目要带过期时间");
+        assert!(cfg.nftset_timeout(), "Q4：nftset 条目要带过期时间");
+        assert!(cfg.nftset_debug(), "Q6：打开 nftset 详细日志");
+        // Q3/Q5 这两个开关只是"认下来 + 启动时说明"，不改变任何行为：
+        // 本实现一律写全部地址，所以这两个值不该影响后面的判断（这里只验它们不 panic、不影响其它开关）
+        assert!(!cfg.log_syslog(), "别的开关不该被它们带开");
+
+        // 默认：全关
+        let cfg = RuntimeConfig::builder().build().unwrap();
+        assert!(!cfg.ipset_timeout() && !cfg.nftset_timeout() && !cfg.nftset_debug());
+    }
+
     /// 🔐 Q18 `-inherit`：显式继承另一个组的规则
     #[test]
     fn test_group_inherit_named_group() {
