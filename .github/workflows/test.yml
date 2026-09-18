@@ -56,6 +56,10 @@ jobs:
         run: just test --features=disable_icmp_ping
         env:
           USE_CROSS: "false"
+          # 真连公网 DNS 的那几条用例（src/dns_client.rs）按项目约定只在有环境变量时运行，
+          # 否则打印说明并跳过；CI 里显式打开，保证这条链路仍然被真实验证。
+          SMARTDNS_TEST_RESOLVE: "1"
+          SMARTDNS_TEST_TLS_URLS: "tls://dns.google?enable_sni=false,tls://dns.cloudflare.com?enable_sni=false,tls://dot.pub"
 
       - name: Setup upterm session for debugging
         uses: lhotari/action-upterm@v1

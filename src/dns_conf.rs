@@ -2197,8 +2197,11 @@ mod tests {
 
     #[test]
     fn test_config_bind_with_device_flags() {
+        // 网卡名故意用一张任何机器都不会有的：装载配置时，若该网卡真实存在，
+        // dns_conf 会把监听地址换成它的 IP（见本文件 1090 行附近），那样这条用例的结果
+        // 就取决于“跑测试的机器上有没有 eth2”，与它要验证的“选项解析”无关。
         let cfg = RuntimeConfig::builder()
-            .with("bind-https 0.0.0.0:443@eth2 -no-rule-addr")
+            .with("bind-https 0.0.0.0:443@sde-testdev -no-rule-addr")
             .build()
             .unwrap();
 
@@ -2209,7 +2212,7 @@ mod tests {
             &BindAddrConfig::Https(HttpsBindAddrConfig {
                 addr: BindAddr::V4("0.0.0.0".parse().unwrap()),
                 port: 443,
-                device: Some("eth2".to_string()),
+                device: Some("sde-testdev".to_string()),
                 opts: ServerOpts {
                     no_rule_addr: Some(true),
                     ..Default::default()

@@ -967,7 +967,23 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
         target: SocketAddr,
     ) -> std::task::Poll<io::Result<usize>> {
         match self {
-            UdpSocket::Tokio(s) => tokio::net::UdpSocket::poll_send_to(s, cx, buf, target),
+            // 🔐 P1-9 的配套修复（2026-09-18）：直连 UDP 上游的套接字已由本文件的 `bind_udp()`
+            // connect() 到该上游（内核按源 IP + 源端口过滤伪造应答），而这里依旧按"带地址发送"
+            // 调用 `sendto()`。POSIX 允许已连接的数据报套接字再带地址发送（Linux / Windows 如此），
+            // 但 **macOS / BSD 直接返回 EISCONN**（errno 56，"Socket is already connected"）——
+            // 结果是 macOS 上所有直连 UDP 上游都发不出去（CI 的 macOS 真机测试因此全挂）。
+            // 两种做法语义完全等价（对端就是 connect 的那个地址），故遇到 EISCONN 时退回不带地址的
+            // `send()`；多播上游（mDNS 等）本就没有 connect，走的仍是原路径，不受影响。
+            UdpSocket::Tokio(s) => {
+                let res = tokio::net::UdpSocket::poll_send_to(s, cx, buf, target);
+                #[cfg(unix)]
+                if let Poll::Ready(Err(err)) = &res {
+                    if err.raw_os_error() == Some(libc::EISCONN) {
+                        return tokio::net::UdpSocket::poll_send(s, cx, buf);
+                    }
+                }
+                res
+            }
             UdpSocket::Proxy(s) => {
                 let res = ready!(s.poll_send_to(cx, buf, target))
                     .map_err(|err| io::Error::other(err.to_string()));

@@ -1341,8 +1341,35 @@ mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
 
+    /// 下面几条用例必须**真连公网 DNS** 才能验证，因此按项目测试约定：开关与目标只从环境变量读，
+    /// 未提供时打印说明并跳过（测试里不保留硬编码的探测地址）。
+    ///
+    /// - 开关：`SMARTDNS_TEST_RESOLVE`（非空 / 非 0 / 非 false 视为开启；CI 里已设置）；
+    /// - TLS 用例的目标：`SMARTDNS_TEST_TLS_URLS`（逗号分隔，如
+    ///   `tls://dns.google?enable_sni=false,tls://dot.pub`）。
+    fn resolve_tests_enabled(what: &str) -> bool {
+        let on = std::env::var("SMARTDNS_TEST_RESOLVE")
+            .map(|v| {
+                !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false" | "no"
+                )
+            })
+            .unwrap_or(false);
+        if !on {
+            println!(
+                "跳过 {what}：需要真实公网 DNS 才能验证。\
+                 设 SMARTDNS_TEST_RESOLVE=1 后重跑（CI 里已设置）。"
+            );
+        }
+        on
+    }
+
     #[tokio::test]
     async fn test_with_default() {
+        if !resolve_tests_enabled("test_with_default") {
+            return;
+        }
         let client = DnsClient::builder().build().await;
         let lookup_ip = client
             .lookup("dns.alidns.com", RecordType::A)
@@ -1401,13 +1428,25 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "dns-over-tls")]
     async fn test_nameserver_tls_resolve() {
-        let urls = [
-            DnsUrl::from_str("tls://dns.google?enable_sni=false").unwrap(),
-            DnsUrl::from_str("tls://dns.cloudflare.com?enable_sni=false").unwrap(),
-            DnsUrl::from_str("tls://dns.quad9.net?enable_sni=false").unwrap(),
-            DnsUrl::from_str("tls://dns.alidns.com").unwrap(),
-            DnsUrl::from_str("tls://dot.pub").unwrap(),
-        ];
+        // 目标从环境变量读（项目测试约定：测试里不保留硬编码的探测地址）。
+        // 形如：SMARTDNS_TEST_TLS_URLS="tls://dns.google?enable_sni=false,tls://dot.pub"
+        let urls: Vec<DnsUrl> = std::env::var("SMARTDNS_TEST_TLS_URLS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| DnsUrl::from_str(s).ok())
+            .collect();
+        if urls.is_empty() {
+            println!(
+                "跳过 test_nameserver_tls_resolve：未设置 SMARTDNS_TEST_TLS_URLS\
+                 （形如 tls://dns.google?enable_sni=false,tls://dot.pub）。"
+            );
+            return;
+        }
+        if !resolve_tests_enabled("test_nameserver_tls_resolve") {
+            return;
+        }
 
         let results = urls
             .into_iter()
@@ -1497,6 +1536,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nameserver_cloudflare_resolve() {
+        if !resolve_tests_enabled("test_nameserver_cloudflare_resolve") {
+            return;
+        }
         let dns_urls = CLOUDFLARE
             .ips
             .iter()
@@ -1511,6 +1553,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nameserver_alidns_resolve() {
+        if !resolve_tests_enabled("test_nameserver_alidns_resolve") {
+            return;
+        }
         let dns_urls = ALIDNS
             .ips
             .iter()
