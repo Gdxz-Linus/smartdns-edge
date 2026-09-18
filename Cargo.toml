@@ -1,6 +1,6 @@
 [package]
 name = "smartdns"
-version = "1.0.2"
+version = "1.0.1"
 authors = ["Gdxz <gdxz-Linus@outlook.com>"]
 edition = "2024"
 # 这一行声明的是"**最低要求**"，不是"用哪个版本编译" —— 它与编出来的程序毫无关系
