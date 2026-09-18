@@ -18,19 +18,27 @@ on:
       - release/**
 
 jobs:
+  # 🧪 跑单测。矩阵与 build.yml 的发布矩阵一一对应，且每条都落在与目标架构相同的运行器上，
+  # 因此跑的是真机原生测试，不再是"号称交叉编译、实际跑主机架构"。
+  # 唯一的例外是 x86_64-apple-darwin —— Apple 已无 Intel 运行器，它只能在 ARM64 运行器上
+  # 交叉编译，故只放在下面的 compatibility 任务里做编译覆盖。
   test:
     name: test ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-    runs-on: ${{matrix.os}}
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm # ARM64 原生运行器
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm # ARM64 原生运行器
+          - target: aarch64-apple-darwin
+            os: macos-latest # macos-latest 本身即 Apple Silicon
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -43,10 +51,11 @@ jobs:
           install_wix: "false"
           install_cargo_edit: "false"
 
+      # 全部为原生运行器，不使用 cross（cross 是给交叉编译用的）
       - name: Test
         run: just test --features=disable_icmp_ping
         env:
-          USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
+          USE_CROSS: "false"
 
       - name: Setup upterm session for debugging
         uses: lhotari/action-upterm@v1
@@ -55,18 +64,10 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: 5
 
+  # 🧹 代码风格与静态检查：与目标平台无关，只跑一次。
+  # 原先是按 3 个目标各跑一遍，但 runs-on 写死 ubuntu-latest，三次重复的是同一个主机检查。
   cleanliness:
-    name: cleanliness ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+    name: cleanliness
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -75,7 +76,7 @@ jobs:
       - name: Setup
         uses: ./.github/actions/setup
         with:
-          rust_target: ${{ matrix.target }}
+          rust_target: x86_64-unknown-linux-gnu
           install_patch_crate: "false"
           install_wix: "false"
           install_cargo_edit: "false"
@@ -85,13 +86,12 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
-          target: ${{ matrix.target }}
 
       - name: Clippy & Rustfmt
         run: just cleanliness
-        env:
-          USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
-      
+
+  # 🧭 编译覆盖：与发布矩阵完全一致（6 个目标），并带 -D warnings。
+  # 只在某个平台编得到的那些分支出问题，会在这一步暴露（包括 Intel 版 macOS）。
   compatibility:
     name: compatibility ${{ matrix.target }}
     strategy:
