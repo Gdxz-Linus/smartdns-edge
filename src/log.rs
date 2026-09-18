@@ -130,7 +130,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
         internal_make_dispatch(console_level, filter, console_writer, true, syslog)
     } else if syslog {
         // 既不写文件也不打控制台，只送系统日志 —— 用 `io::sink()` 当占位写入端
-        internal_make_dispatch(level, filter, || io::sink(), false, true)
+        internal_make_dispatch(level, filter, io::sink, false, true)
     } else {
         Dispatch::none()
     }

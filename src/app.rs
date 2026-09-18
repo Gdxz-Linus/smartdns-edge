@@ -255,7 +255,7 @@ impl App {
                         //   · Windows（本机实测：第二次绑定直接 10048）：每 2/4/8…秒刷一条
                         //     "could not bind" 错误，状态页永远显示"有监听在重试"，排障时把人带偏。
                         // 实测现场见 `probe_a9_reload.py`。
-                        if self.bind_retry.write().await.remove(&bind_addr).is_some() {
+                        if self.bind_retry.write().await.remove(bind_addr).is_some() {
                             log::info!(
                                 "监听 {} 已绑成功，顺手清掉重试队列里的旧账",
                                 bind_addr.sock_addr()
@@ -535,7 +535,7 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let count = PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // 限流：前 5 次每次都记，之后每 100 次记一条，避免被刷爆日志/磁盘
-        if count <= 5 || count % 100 == 0 {
+        if count <= 5 || count.is_multiple_of(100) {
             crate::log::warn!("⚠️ 捕获到 panic（累计第 {count} 次）：{info}");
         }
     }));
@@ -801,17 +801,14 @@ pub(crate) fn response_material(
     use crate::libdns::proto::op::Message;
 
     match message {
-        SerialMessage::Raw(raw, addr, protocol) => Some((
-            raw.header().clone(),
-            raw.queries().to_vec(),
-            *addr,
-            *protocol,
-        )),
+        SerialMessage::Raw(raw, addr, protocol) => {
+            Some((*raw.header(), raw.queries().to_vec(), *addr, *protocol))
+        }
         SerialMessage::Bytes(bytes, addr, protocol) => {
             // ① 能完整解析：连问题段一起带走（客户端对号最稳）
             if let Ok(parsed) = Message::from_vec(bytes.as_ref()) {
                 return Some((
-                    parsed.header().clone(),
+                    *parsed.header(),
                     parsed.queries().to_vec(),
                     *addr,
                     *protocol,
@@ -1410,7 +1407,7 @@ mod p0_2_tests {
         ] {
             let request = query_message(op, MessageType::Query);
             let response = not_imp_response(
-                &request.header(),
+                request.header(),
                 request.queries(),
                 addr,
                 crate::libdns::Protocol::Udp,

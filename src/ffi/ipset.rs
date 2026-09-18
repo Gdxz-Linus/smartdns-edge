@@ -75,13 +75,13 @@ fn align(len: usize) -> usize {
 /// ```
 /// 注意：嵌套属性的 `len` 按 C 版的做法取"对齐后的结束位置 − 起始位置"（含补齐字节）。
 fn encode_add(setname: &str, addr: IpAddr, timeout: u64, seq: u32) -> io::Result<Vec<u8>> {
-    if setname.as_bytes().len() + 1 > IPSET_MAXNAMELEN {
+    if setname.len() + 1 > IPSET_MAXNAMELEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "ipset 集合名太长：'{}' 有 {} 字节，内核上限是 {} 字节（含结尾），最多 {} 个字符",
                 setname,
-                setname.as_bytes().len() + 1,
+                setname.len() + 1,
                 IPSET_MAXNAMELEN,
                 IPSET_MAXNAMELEN - 1
             ),
