@@ -133,7 +133,9 @@ fmt: patch
 # Check the clippy and format.
 cleanliness: patch
   cargo clippy
-  cargo fmt --all -- --check
+  # 只查我们自己的代码：内嵌副本（hickory-dns / dhcproto / axum-h3）刻意保持上游原样，
+  # `--all` 会把它们既有的格式差异也算进来，这一步就会永远失败（实测 194 处）
+  cargo fmt -p smartdns -- --check
 
 
 #-------#
