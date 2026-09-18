@@ -302,7 +302,7 @@ impl LogConsumer {
             Err(mpsc::TrySendError::Full(_)) => {
                 let n = LOG_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
                 // 注意：这里绝不能调用 crate::log::*（正处在日志写入路径上），只能直接写 stderr。
-                if n == 1 || n.is_multiple_of(10_000) {
+                if n == 1 || n % 10_000 == 0 {
                     eprintln!(
                         "[smartdns] WARN: log queue is full, {n} log line(s) dropped so far \
                          (raise log-size/log-num or lower the log level to avoid this)"

@@ -668,83 +668,6 @@ impl Colours {
     }
 }
 
-// =========================================================================
-// 🌟 核心补充：短格式与 JSON 格式的输出引擎
-// =========================================================================
-
-fn print_short(message: &Message) {
-    // 行为完美对标 dig +short，只输出核心数据（如 IP）
-    for r in message.answers() {
-        println!("{}", r.data());
-    }
-}
-
-fn print_json(message: &Message, error: Option<&str>) {
-    // 🌟 核心修复 4：严谨的系统级 JSON 字符安全逃逸机制！
-    // 彻底防御上游通过恶意 TXT 记录下发带换行符(\n)、制表符(\t)或控制符的载荷，
-    // 杜绝 JSON 结构断裂导致的下游解析器崩溃注入漏洞。
-    let escape_json = |s: &str| -> String {
-        let mut escaped = String::with_capacity(s.len() + 4);
-        for c in s.chars() {
-            match c {
-                '"' => escaped.push_str("\\\""),
-                '\\' => escaped.push_str("\\\\"),
-                '\n' => escaped.push_str("\\n"),
-                '\r' => escaped.push_str("\\r"),
-                '\t' => escaped.push_str("\\t"),
-                // 将看不见的系统控制字符安全转化为 Unicode 码点
-                c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
-                c => escaped.push(c),
-            }
-        }
-        escaped
-    };
-
-    let mut json = String::new();
-    json.push('{');
-
-    if let Some(e) = error {
-        json.push_str(&format!(r#""error":"{}","#, escape_json(e)));
-    }
-
-    json.push_str(&format!(r#""status":"{}","#, message.response_code()));
-    json.push_str(&format!(r#""tc":{},"#, message.truncated()));
-
-    // 零依赖宏，手动高效组装 JSON 数组
-    macro_rules! format_section {
-        ($records:expr) => {{
-            let mut vec = Vec::new();
-            for r in $records {
-                vec.push(format!(
-                    r#"{{"name":"{}","type":"{}","ttl":{},"class":"{}","data":"{}"}}"#,
-                    escape_json(&r.name().to_string()),
-                    r.record_type(),
-                    r.ttl(),
-                    r.dns_class(),
-                    escape_json(&r.data().to_string())
-                ));
-            }
-            vec.join(",")
-        }};
-    }
-
-    json.push_str(&format!(
-        r#""answers":[{}],"#,
-        format_section!(message.answers())
-    ));
-    json.push_str(&format!(
-        r#""authorities":[{}],"#,
-        format_section!(message.authorities())
-    ));
-    json.push_str(&format!(
-        r#""additionals":[{}]"#,
-        format_section!(message.additionals())
-    ));
-
-    json.push('}');
-    println!("{}", json);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,4 +759,81 @@ mod tests {
             }
         );
     }
+}
+
+// =========================================================================
+// 🌟 核心补充：短格式与 JSON 格式的输出引擎
+// =========================================================================
+
+fn print_short(message: &Message) {
+    // 行为完美对标 dig +short，只输出核心数据（如 IP）
+    for r in message.answers() {
+        println!("{}", r.data());
+    }
+}
+
+fn print_json(message: &Message, error: Option<&str>) {
+    // 🌟 核心修复 4：严谨的系统级 JSON 字符安全逃逸机制！
+    // 彻底防御上游通过恶意 TXT 记录下发带换行符(\n)、制表符(\t)或控制符的载荷，
+    // 杜绝 JSON 结构断裂导致的下游解析器崩溃注入漏洞。
+    let escape_json = |s: &str| -> String {
+        let mut escaped = String::with_capacity(s.len() + 4);
+        for c in s.chars() {
+            match c {
+                '"' => escaped.push_str("\\\""),
+                '\\' => escaped.push_str("\\\\"),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                // 将看不见的系统控制字符安全转化为 Unicode 码点
+                c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+                c => escaped.push(c),
+            }
+        }
+        escaped
+    };
+
+    let mut json = String::new();
+    json.push('{');
+
+    if let Some(e) = error {
+        json.push_str(&format!(r#""error":"{}","#, escape_json(e)));
+    }
+
+    json.push_str(&format!(r#""status":"{}","#, message.response_code()));
+    json.push_str(&format!(r#""tc":{},"#, message.truncated()));
+
+    // 零依赖宏，手动高效组装 JSON 数组
+    macro_rules! format_section {
+        ($records:expr) => {{
+            let mut vec = Vec::new();
+            for r in $records {
+                vec.push(format!(
+                    r#"{{"name":"{}","type":"{}","ttl":{},"class":"{}","data":"{}"}}"#,
+                    escape_json(&r.name().to_string()),
+                    r.record_type(),
+                    r.ttl(),
+                    r.dns_class(),
+                    escape_json(&r.data().to_string())
+                ));
+            }
+            vec.join(",")
+        }};
+    }
+
+    json.push_str(&format!(
+        r#""answers":[{}],"#,
+        format_section!(message.answers())
+    ));
+    json.push_str(&format!(
+        r#""authorities":[{}],"#,
+        format_section!(message.authorities())
+    ));
+    json.push_str(&format!(
+        r#""additionals":[{}]"#,
+        format_section!(message.additionals())
+    ));
+
+    json.push('}');
+    println!("{}", json);
 }

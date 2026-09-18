@@ -3189,7 +3189,7 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &["proxy-server", "api-token", "bind-cert
 /// 1. 首关键字属于敏感项 → 只报关键字，值整段隐藏；
 /// 2. 其余行 → 原样返回，但把 URL 里的 `user:pass@` 打码（防"配置项认出来了、行尾粘了个带口令的代理 URL"）。
 pub(crate) fn redact_config_line(line: &str) -> String {
-    if let Some(kw) = line.split_whitespace().next() {
+    if let Some(kw) = line.trim_start().split_whitespace().next() {
         let kw_lower = kw.to_ascii_lowercase();
         if SENSITIVE_CONFIG_KEYS.contains(&kw_lower.as_str()) {
             return format!("{kw} <已隐藏：该行含口令/密码>");

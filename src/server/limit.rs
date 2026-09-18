@@ -64,12 +64,12 @@ impl Drop for ConnectionGuard {
             return;
         }
         self.limiter.current.fetch_sub(1, Ordering::Relaxed);
-        if let Ok(mut map) = self.limiter.per_source.lock()
-            && let Some(n) = map.get_mut(&self.key)
-        {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&self.key);
+        if let Ok(mut map) = self.limiter.per_source.lock() {
+            if let Some(n) = map.get_mut(&self.key) {
+                *n -= 1;
+                if *n == 0 {
+                    map.remove(&self.key);
+                }
             }
         }
     }

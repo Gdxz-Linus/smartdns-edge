@@ -508,7 +508,7 @@ async fn new_connection(
                 server_name.clone(),
                 path.clone(),
                 // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
-                Some(http_authority(server, server_name, server_addr.port())),
+                Some(http_authority(&server, &server_name, server_addr.port())),
             ));
 
             let (conn, bg) = exchange.await?;
@@ -572,8 +572,8 @@ async fn new_connection(
                     .disable_grease(*disable_grease)
                     // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
                     .http_host_opt(Some(http_authority(
-                        server,
-                        server_name,
+                        &server,
+                        &server_name,
                         server_addr.port(),
                     )))
                     .build_with_future(

@@ -51,7 +51,7 @@ pub(crate) fn error_backoff_delay(streak: u32) -> std::time::Duration {
 
 /// 出错日志降频：前 3 次逐条打，之后每 100 次打一条（避免日志被刷爆）。
 pub(crate) fn should_log_stream_error(streak: u32) -> bool {
-    streak <= 3 || streak.is_multiple_of(100)
+    streak <= 3 || streak % 100 == 0
 }
 
 pub fn serve(

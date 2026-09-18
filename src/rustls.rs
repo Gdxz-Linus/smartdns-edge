@@ -337,10 +337,10 @@ fn extract_spki(cert_der: &[u8]) -> Option<Vec<u8>> {
     // 第一个字段可能是 [0] version（v2/v3 证书都有）：先把它跳掉，
     // 这样后面的位置就固定了 —— serialNumber, signature, issuer, validity, subject,
     // subjectPublicKeyInfo（= 第 6 个）。
-    if let Some((tag, _, total)) = read_tlv(rest)
-        && tag == 0xA0
-    {
-        rest = &rest[total..];
+    if let Some((tag, _, total)) = read_tlv(rest) {
+        if tag == 0xA0 {
+            rest = &rest[total..];
+        }
     }
 
     for index in 1..=6 {

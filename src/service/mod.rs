@@ -73,24 +73,6 @@ cfg_if! {
         pub mod windows;
         use self::windows::create_service_definition;
         pub use self::windows::CONF_PATH;
-
-pub fn service_manager() -> ServiceManager {
-    create_service_definition().into()
-}
-
-impl InstallerBuilder {
-    fn install_current_exe_to<P: AsRef<Path>>(self, path: P) -> Self {
-        let cmd_path = path.as_ref();
-        let current_exe =
-            env::current_exe().unwrap_or_else(|e| panic!("failed to get current exe path: {e}"));
-
-        if current_exe != cmd_path {
-            self.add_item((current_exe, cmd_path))
-        } else {
-            self
-        }
-    }
-}
     } else {
         unimplemented!();
     }
@@ -142,5 +124,23 @@ mod plist_tests {
         assert!(plist.contains("<string>-c</string>"), "{plist}");
         assert_eq!(plist.matches("<dict>").count(), 1, "只应有一个顶层 dict");
         assert_eq!(plist.matches("</plist>").count(), 1);
+    }
+}
+
+pub fn service_manager() -> ServiceManager {
+    create_service_definition().into()
+}
+
+impl InstallerBuilder {
+    fn install_current_exe_to<P: AsRef<Path>>(self, path: P) -> Self {
+        let cmd_path = path.as_ref();
+        let current_exe =
+            env::current_exe().unwrap_or_else(|e| panic!("failed to get current exe path: {e}"));
+
+        if current_exe != cmd_path {
+            self.add_item((current_exe, cmd_path))
+        } else {
+            self
+        }
     }
 }
