@@ -137,6 +137,8 @@ jobs:
           draft: false
           prerelease: ${{ inputs.prerelease }}
           tag_name: ${{ inputs.version }}
+          # Release 说明直接取自仓库根目录的 RELEASE_NOTES.md（发版前更新该文件即可，不用手动粘贴）
+          body_path: RELEASE_NOTES.md
           files: |
             dist/*.zip
             dist/*.tar.gz
