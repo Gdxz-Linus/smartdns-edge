@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// 单一来源的计数键：IPv4 按地址、IPv6 按 /64 前缀
@@ -295,5 +295,187 @@ mod tests {
         let (_, _, max) = limiter.stats();
         assert!((512..=16384).contains(&max), "自动上限应在 512~16384，实际 {max}");
         assert!(limiter.max_per_source >= 64);
+    }
+}
+
+// ───────────────────────── 🔐 Q10：`max-query-limit`（整机同时处理的查询数） ─────────────────────────
+//
+// 语义对齐 C 版 `src/dns_server/dns_server.c:483`：
+//   * 计数**已进入处理、还没结束**的查询（C 版是 `server.request_num`）；
+//   * 超过上限 → 直接回 `REFUSED`（不查上游、不进缓存），日志**每 120 秒最多告警一次**（避免被打爆时刷屏）；
+//   * `0` = 不限（C 版也是 `> 0` 才判）。
+//
+// 与连接数上限的分工：连接数管的是"socket 占着不放"，这里管的是"查询堆在流水线里"，
+// 两道闸门互相独立 —— 一条连接上可以堆很多条查询。
+
+/// 查询数闸门。做成结构体（而不是一堆全局静态量）是为了能在单测里各建各的，互不干扰。
+#[derive(Debug, Default)]
+pub struct QueryLimiter {
+    in_flight: AtomicUsize,
+    /// 上次告警的时间戳（秒），用于"120 秒最多告警一次"
+    last_warn: AtomicU64,
+}
+
+/// 进入查询的凭据：查询结束时自动归还计数（RAII，出错也一样会归还）
+pub struct QueryGuard {
+    limiter: &'static QueryLimiter,
+}
+
+impl Drop for QueryGuard {
+    fn drop(&mut self) {
+        self.limiter.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// 进程内共用的一份计数器（`max-query-limit` 是整机级别的）
+static QUERY_LIMITER: QueryLimiter = QueryLimiter {
+    in_flight: AtomicUsize::new(0),
+    last_warn: AtomicU64::new(0),
+};
+
+/// 放行结果
+pub enum QueryAdmission {
+    /// 放行：凭据丢掉时自动归还计数
+    Allowed(QueryGuard),
+    /// 超上限：调用方应当直接回 REFUSED
+    Refused,
+}
+
+/// 尝试放行一条查询。
+///
+/// `limit` = 配置里的 `max-query-limit`（0 = 不限）；`is_background` = 内部后台请求（预取、
+/// 双栈探针、过期刷新）**不占这个额度** —— 它们不是"client 在查"，不该被自己的闸门拒掉。
+pub fn enter_query(limit: usize, is_background: bool) -> QueryAdmission {
+    admit(&QUERY_LIMITER, limit, is_background, unix_now())
+}
+
+/// 单测入口：可以传入自己的闸门与"当前时间"
+fn admit(
+    limiter: &'static QueryLimiter,
+    limit: usize,
+    is_background: bool,
+    now: u64,
+) -> QueryAdmission {
+    if is_background || limit == 0 {
+        // 不计数但要保持成对：这里也走一次加/减，靠 guard 归还，语义最简单
+        limiter.in_flight.fetch_add(1, Ordering::Relaxed);
+        return QueryAdmission::Allowed(QueryGuard { limiter });
+    }
+
+    let in_flight = limiter.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+    if in_flight > limit {
+        // 超了：把刚加的那次还回去（这条查询不会继续处理）
+        limiter.in_flight.fetch_sub(1, Ordering::Relaxed);
+        limiter.warn_once_in_window(now);
+        return QueryAdmission::Refused;
+    }
+
+    QueryAdmission::Allowed(QueryGuard { limiter })
+}
+
+impl QueryLimiter {
+    /// 当前在处理的查询数（单测与日志用）
+    #[inline]
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// 每 120 秒最多告警一次（与 C 版的 `last_log_time` 同思路）
+    fn warn_once_in_window(&self, now: u64) {
+        let last = self.last_warn.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < 120 {
+            return;
+        }
+        if self
+            .last_warn
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            crate::log::warn!(
+                "同时处理的查询数已达上限（`max-query-limit`），新的查询会被直接拒绝（REFUSED）。\n\
+                 这说明有异常流量或上游太慢导致查询堆积；确认是正常业务量就调大这个值，或查一下上游。"
+            );
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod query_limit_tests {
+    use super::*;
+
+    fn limiter() -> &'static QueryLimiter {
+        Box::leak(Box::new(QueryLimiter::default()))
+    }
+
+    /// 0 = 不限：来多少放多少
+    #[test]
+    fn zero_limit_means_unlimited() {
+        let l = limiter();
+        let mut guards = Vec::new();
+        for _ in 0..100 {
+            match admit(l, 0, false, 0) {
+                QueryAdmission::Allowed(g) => guards.push(g),
+                QueryAdmission::Refused => panic!("0 = 不限，不该拒"),
+            }
+        }
+        assert_eq!(l.in_flight(), 100, "100 条同时处理中");
+
+        guards.clear();
+        assert_eq!(l.in_flight(), 0, "全部结束后计数归零");
+    }
+
+    /// 超过上限就拒（C 版也是"大于"才拒）
+    #[test]
+    fn refuses_only_above_limit() {
+        let l = limiter();
+
+        let g1 = admit(l, 2, false, 0);
+        let g2 = admit(l, 2, false, 0);
+        assert!(matches!(g1, QueryAdmission::Allowed(_)));
+        assert!(matches!(g2, QueryAdmission::Allowed(_)));
+
+        // 第 3 条超上限
+        assert!(matches!(admit(l, 2, false, 0), QueryAdmission::Refused));
+        // 被拒的那条不该把计数留高
+        assert_eq!(l.in_flight(), 2);
+
+        drop(g1);
+        drop(g2);
+        assert_eq!(l.in_flight(), 0, "凭据丢掉后计数要归还（含出错路径）");
+    }
+
+    /// 后台请求不占额度（否则预取会被自己的闸门拦下）
+    #[test]
+    fn background_queries_do_not_consume_quota() {
+        let l = limiter();
+
+        let _g = admit(l, 1, false, 0);
+        // 额度已满，但后台请求照样放行
+        assert!(matches!(admit(l, 1, true, 0), QueryAdmission::Allowed(_)));
+        // 普通请求仍然被拒
+        assert!(matches!(admit(l, 1, false, 0), QueryAdmission::Refused));
+    }
+
+    /// 告警 120 秒内只发一次
+    #[test]
+    fn warn_window_is_120_seconds() {
+        let l = limiter();
+        let _g = admit(l, 1, false, 0);
+
+        l.warn_once_in_window(1000);
+        assert_eq!(l.last_warn.load(Ordering::Relaxed), 1000, "第一次要记下来");
+
+        l.warn_once_in_window(1100);
+        assert_eq!(l.last_warn.load(Ordering::Relaxed), 1000, "120 秒内不重复告警");
+
+        l.warn_once_in_window(1121);
+        assert_eq!(l.last_warn.load(Ordering::Relaxed), 1121, "过了 120 秒可以再告警");
     }
 }

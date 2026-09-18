@@ -7,7 +7,7 @@ use crate::{
     collections::DomainMap,
     config::{
         AddressRules, CNameRules, ConfigForDomain, ConfigForIP, Domain, DomainRule, DomainRules,
-        DomainSets, ForwardRules, HttpsRecords, NFTsetConfig, SrvRecords,
+        DomainSets, ForwardRules, HttpsRecords, IpsetConfig, NFTsetConfig, SrvRecords,
     },
 };
 
@@ -33,6 +33,7 @@ impl DomainRuleMap {
         srv_records: &SrvRecords,
         https_records: &HttpsRecords,
         nftsets: &Vec<ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>>,
+        ipsets: &Vec<ConfigForDomain<Vec<ConfigForIP<IpsetConfig>>>>,
     ) -> Self {
         let expand_domain = |domain: &Domain| match &domain {
             Domain::Name(name) => {
@@ -108,11 +109,22 @@ impl DomainRuleMap {
             for name in expand_domain(&rule.domain) {
                 // 🌟 P1-12 修复：这里是**覆盖赋值**，导致同一域名配置多条 nftset 时
                 // 只有最后一条生效（README 声称的"多个 nftset 集合数组级平滑合并"因此没有兑现）。
-                // 下游中间件（dns_mw_nftset.rs）本来就是遍历数组逐条写入防火墙集合的，
+                // 下游中间件（dns_mw_ipset_nftset.rs）本来就是遍历数组逐条写入防火墙集合的，
                 // 所以这里改成"合并"即可，无需改动下游。
                 let entry = name_rule_map.entry(name).or_default();
                 entry
                     .nftset
+                    .get_or_insert_with(Vec::new)
+                    .extend(rule.config.iter().cloned());
+            }
+        }
+
+        // 🔐 Q1：ipset 的组装与 nftset 完全同规矩 —— 同域名多条要**合并**，不是覆盖
+        for rule in ipsets {
+            for name in expand_domain(&rule.domain) {
+                let entry = name_rule_map.entry(name).or_default();
+                entry
+                    .ipset
                     .get_or_insert_with(Vec::new)
                     .extend(rule.config.iter().cloned());
             }
@@ -274,6 +286,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &nftsets,
+            &Default::default(),
         );
 
         let rule = map.find(&"a.com".parse().unwrap()).expect("a.com 的规则应存在");
@@ -321,6 +334,7 @@ mod tests {
                     },
                 },
             ],
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),

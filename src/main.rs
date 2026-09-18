@@ -25,8 +25,10 @@ mod dns_mw_dns64;
 mod dns_mw_dnsmasq;
 mod dns_mw_dualstack;
 mod dns_mw_hosts;
-#[cfg(all(feature = "nft", target_os = "linux"))]
-mod dns_mw_nftset;
+// 这个模块本身**所有平台都编译**：写内核集合的那半边按平台/特性门控，
+// 而"从应答算过期时间"这类纯计算要能在本机（Windows）单测。
+// 真正不做事的地方在 `handle` 里：非 Linux 直接放行（启动时另有提示）。
+mod dns_mw_ipset_nftset;
 mod dns_mw_ns;
 mod dns_mw_zone;
 mod dns_rule;
@@ -181,6 +183,8 @@ impl Cli {
                     cfg.log_num(),
                     cfg.log_file_mode().into(),
                     cfg.log_config().console(),
+                    // 🔐 Q7：`log-syslog`（运行日志也送系统日志；Linux 之外的平台会在启动时提示无效）
+                    cfg.log_syslog(),
                 );
                 // 🔐 P3：这里原来用 `.ok()` 吞掉失败 —— 一旦日志系统没装上，之后所有
                 // log::info!/warn!/error! 全部石沉大海，而且没人知道。日志宏此刻不可用，只能直写 stderr。
@@ -361,10 +365,24 @@ impl RuntimeConfig {
         #[cfg(feature = "mdns")]
         if self.mdns_lookup() {
             use crate::libdns::proto::multicast::{MDNS_IPV4, MDNS_IPV6};
+            // 🔐 Q11（顺带修一个静默失效的既有功能）：这里原来拼的是 `mdns://<地址>`，
+            // 而我们的 URL 解析器**没有 `mdns` 这个协议** —— 解析失败后被下面的 `.ok()`
+            // 悄悄丢掉，结果 `mdns-lookup` 配了也永远不起作用（连一句日志都没有）。
+            // 正确写法是普通 `udp://` + 组播地址：连接层是靠"协议是 UDP 且地址是 mDNS 组播地址"
+            // 认出 mDNS 的（见 `src/libdns/custom/connection_provider.rs` 的 UDP 分支）。
             let mdns_servers = [*MDNS_IPV4, *MDNS_IPV6]
                 .into_iter()
-                .map(|ip| format!("mdns://{ip}"))
-                .flat_map(|s| DnsUrl::from_str(&s).ok())
+                .filter_map(|ip| {
+                    let s = format!("udp://{ip}");
+                    match DnsUrl::from_str(&s) {
+                        Ok(url) => Some(url),
+                        Err(err) => {
+                            // 🌟 拒绝静默吞错：解析不了就说出来，别让用户以为配了就能用
+                            log::error!("mDNS 上游地址 `{s}` 解析失败，已跳过：{err:?}");
+                            None
+                        }
+                    }
+                })
                 .map(|url| {
                     let mut config = NameServerInfo::from(url);
                     config.group = vec!["mdns".to_string()];

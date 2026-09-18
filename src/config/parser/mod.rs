@@ -21,8 +21,11 @@ mod glob_pattern;
 mod group_match;
 mod https_record;
 mod ip_alias;
+mod ip_rules;
+mod group_begin;
 mod ip_net;
 mod ip_set;
+mod ipset;
 mod iporset;
 // mod line;
 mod log_level;
@@ -91,6 +94,8 @@ pub enum ConfigItem {
     AclEnable(bool),
     AuditFile(PathBuf),
     AuditFileMode(FileMode),
+    /// 🔐 Q9：审计行同时打到控制台
+    AuditConsole(bool),
     AuditNum(usize),
     AuditSize(Byte),
     BindCertFile(PathBuf),
@@ -107,7 +112,7 @@ pub enum ConfigItem {
     ClientRule(ClientRule),
     CNAME(ConfigForDomain<CNameRule>),
     SrvRecord(ConfigForDomain<SRV>),
-    GroupBegin(String),
+    GroupBegin(GroupBegin),
     GroupEnd,
     GroupMatch(GroupMatch),
     HttpsRecord(ConfigForDomain<HttpsRecordRule>),
@@ -140,6 +145,25 @@ pub enum ConfigItem {
     MaxReplyIpNum(u8),
     MdnsLookup(bool),
     NftSet(ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>),
+    /// 🔐 Q1：`ipset /域名/#4:集合名,#6:集合名`
+    IpSet(ConfigForDomain<Vec<ConfigForIP<IpsetConfig>>>),
+    /// 🔐 Q2/Q4：写进集合的条目带不带过期时间（TTL×3）
+    IpSetTimeout(bool),
+    NftSetTimeout(bool),
+    /// 🔐 Q3/Q5：`-no-speed`（本实现一律全写，等于常开）
+    IpSetNoSpeed(bool),
+    NftSetNoSpeed(bool),
+    /// 🔐 Q6：nftset 详细日志
+    NftSetDebug(bool),
+    /// 🔐 Q10：整机同时处理的查询数上限（0 = 不限）
+    MaxQueryLimit(usize),
+    /// 🔐 Q11：`local-domain <域名>`（`-` = 清空已配的）
+    LocalDomain(String),
+    /// 🔐 Q7/Q8：日志 / 审计送系统日志
+    LogSyslog(bool),
+    AuditSyslog(bool),
+    /// 🔐 Q12：`ip-rules <IP/CIDR> [-blacklist-ip ...]`（按 IP 段挂那几个过滤开关）
+    IpRules(IpRules),
     NumWorkers(usize),
     PrefetchDomain(bool),
     ProxyConfig(NamedProxyConfig),
@@ -254,6 +278,7 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("address"), ConfigItem::Address),
         map(config("audit-enable"), ConfigItem::AuditEnable),
         map(config("audit-file-mode"), ConfigItem::AuditFileMode),
+        map(config("audit-console"), ConfigItem::AuditConsole),
         map(config("audit-file"), ConfigItem::AuditFile),
         map(config("audit-num"), ConfigItem::AuditNum),
         map(config("audit-size"), ConfigItem::AuditSize),
@@ -303,7 +328,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("force-HTTPS-SOA"), ConfigItem::ForceHTTPSSOA),
         map(config("force-qtype-soa"), ConfigItem::ForceQtypeSoa),
         map(config("response"), ConfigItem::ResponseMode),
-        map(config("group-begin"), ConfigItem::GroupBegin),
+        // 🔐 Q18：`group-begin <组> [-inherit ...]`（自带前缀，放通用项之前）
+        map(NomParser::parse, ConfigItem::GroupBegin),
         map(config_name("group-end"), |_| ConfigItem::GroupEnd),
         map(config("prefetch-domain"), ConfigItem::PrefetchDomain),
         map(config("cname"), ConfigItem::CNAME),
@@ -377,6 +403,21 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     ));
 
     let group5 = alt((
+        // 🔐 Q12：`ip-rules ...`（自带前缀，不会和别的项撞；放在通用解析器之前）
+        map(NomParser::parse, ConfigItem::IpRules),
+        map(config("ipset"), ConfigItem::IpSet),
+        map(config("ipset-timeout"), ConfigItem::IpSetTimeout),
+        map(config("ipset-no-speed"), ConfigItem::IpSetNoSpeed),
+        map(config("nftset-timeout"), ConfigItem::NftSetTimeout),
+        map(config("nftset-no-speed"), ConfigItem::NftSetNoSpeed),
+        map(config("nftset-debug"), ConfigItem::NftSetDebug),
+        // 🔐 Q10：整机同时处理的查询数上限（默认 65535，0 = 不限）
+        map(config("max-query-limit"), ConfigItem::MaxQueryLimit),
+        // 🔐 Q11：把域名交给 mDNS 那一组解析（可多条）
+        map(config("local-domain"), ConfigItem::LocalDomain),
+        // 🔐 Q7/Q8：日志与审计送系统日志
+        map(config("log-syslog"), ConfigItem::LogSyslog),
+        map(config("audit-syslog"), ConfigItem::AuditSyslog),
         map(config("whitelist-ip"), ConfigItem::WhitelistIp),
         map(config("ip-set"), ConfigItem::IpSetProvider),
         map(config("ip-alias"), ConfigItem::IpAlias),

@@ -117,6 +117,20 @@ pub struct NameServerInfo {
     #[serde(default = "Default::default")]
     pub subnet: Option<IpNet>,
 
+    /// 🔐 Q16 `-tcp-keepalive <值>`：往查询里带一个 **EDNS 的 TCP keepalive 选项**
+    /// （RFC 7828，选项码 11）—— 意思是"这条 TCP 连接给我留 N 个 100 毫秒"。
+    ///
+    /// ⚠️ 单位是 **100 毫秒**（RFC 7828 就是这么定的，值原样放进选项，与 C 版 `dns.c:1152` 一致）：
+    /// 写 300 = 30 秒；写 0 = 空选项，即"问上游它愿意留多久"。C 版文档写的是"毫秒"，与 RFC 不符，我们按 RFC。
+    #[serde(default = "Default::default")]
+    pub tcp_keepalive: Option<u16>,
+
+    /// 🔐 Q17 `-subnet-all-query-types`：配了 `-subnet`（ECS）时，**所有**查询类型都带 ECS。
+    ///
+    /// 不开（默认）时只有 A / AAAA 带 ECS —— 与 C 版 `packet.c:87-97` 的默认一致。
+    #[serde(default = "Default::default")]
+    pub subnet_all_query_types: bool,
+
     /// The value for the SO_MARK option on socket.
     /// ```
     /// example:
@@ -178,6 +192,8 @@ impl From<DnsUrl> for NameServerInfo {
             so_mark: Default::default(),
             resolve_group: Default::default(),
             subnet: Default::default(),
+            tcp_keepalive: Default::default(),
+            subnet_all_query_types: Default::default(),
             enabled: Default::default(),
         }
     }

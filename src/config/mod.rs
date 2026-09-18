@@ -278,6 +278,49 @@ pub struct Config {
 
     pub nftsets: Vec<ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>>,
 
+    /// 🔐 Q1：`ipset /域名/#4:集合名,#6:集合名` —— 把解析结果写进 Linux 的 ipset
+    pub ipsets: Vec<ConfigForDomain<Vec<ConfigForIP<IpsetConfig>>>>,
+
+    /// 🔐 Q2：写进 ipset 的条目要不要带过期时间（`ipset-timeout [yes|no]`）。
+    /// 开着 = 用"应答 TTL × 3 秒"（C 版 `ds_context.c:668` 的算法）；默认关 = 永不过期。
+    pub ipset_timeout: Option<bool>,
+
+    /// 🔐 Q4：同上，nftables 那一半（`nftset-timeout`）
+    pub nftset_timeout: Option<bool>,
+
+    /// 🔐 Q3：`ipset-no-speed`。**本实现一律把解析出的地址全部写入集合**，
+    /// 也就是"本来就等于开着这个开关"（C 版默认是"先测速、只写最快那一个"）。
+    /// 存下来只为"这行配置我认了"，运行时不改变行为 —— 启动时会明确说明一次，不让用户以为白配。
+    pub ipset_no_speed: Option<bool>,
+
+    /// 🔐 Q5：同上，nftables 那一半（`nftset-no-speed`）
+    pub nftset_no_speed: Option<bool>,
+
+    /// 🔐 Q6：`nftset-debug` —— 打开往防火墙集合写地址时的详细日志
+    pub nftset_debug: Option<bool>,
+
+    /// 🔐 Q7 `log-syslog [yes|no]`：运行日志**同时**送系统日志（Linux 的 syslog）。
+    ///
+    /// 与 C 版对齐（`src/smartdns.c:525` + `openlog("smartdns", LOG_CONS, LOG_USER)`）：
+    /// 级别映射成 syslog 优先级；是"追加一路"，文件/控制台照旧。
+    /// **只在 Linux 上有效**，其它平台启动时会明确提示"不会生效"。
+    pub log_syslog: Option<bool>,
+
+    /// 🔐 Q11 `local-domain <域名>`：把该域名（含子域名）交给 **mDNS** 那一组解析。
+    ///
+    /// 语义对齐 C 版 `src/dns_conf/local_domain.c:50`（`_conf_domain_rule_nameserver(域, "mdns")`）：
+    /// 等价于"这个域名用本地 mDNS 找"，用于局域网里的 `.lan` / `.home` 这类名字。
+    ///
+    /// 比 C 版多两点：① C 版是全局变量，**只支持一条**（写第二条会把第一条顶掉）；我们支持多条。
+    /// ② 配了它却把 `mdns-lookup` 关着时，启动时会**明确告警**（否则就是"配了像没配"）。
+    pub local_domains: Vec<String>,
+
+    /// 🔐 Q10 `max-query-limit`：整机**同时处理**的查询数上限（不是"每客户端"，也不是"每秒"）。
+    ///
+    /// 超过就回 `REFUSED`（不查上游、不进缓存），日志每 120 秒最多告警一次；`0` = 不限。
+    /// 默认 65535（与 C 版 `DNS_MAX_QUERY_LIMIT` 及本仓库文档一致）。
+    pub max_query_limit: Option<usize>,
+
     pub resolv_file: Option<PathBuf>,
     pub domain_set_providers: HashMap<String, Vec<DomainSetProvider>>,
 
@@ -297,6 +340,35 @@ pub struct Config {
 pub struct IpAlias {
     pub ip: IpOrSet,
     pub to: Arc<[IpAddr]>,
+}
+
+/// 🔐 Q18 `group-begin <组名> [-inherit <另一组|none|parent|default>]`
+///
+/// 语义对齐 C 版 `src/dns_conf/dns_conf_group.c:228-302`：
+/// * `none` = 不继承；`parent` = 继承**外层**组；`default` = 继承 `default` 组；写别的组名 = 继承那个组；
+/// * **被继承的组必须已经定义过**（继承在推入该组时解析）—— 不支持前向引用，写错会明确告警；
+/// * 不写这个选项时：**嵌套组默认继承外层组**（C 版如此），顶层组不继承。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GroupBegin {
+    pub name: String,
+    pub inherit: Option<String>,
+}
+
+/// 🔐 Q12 `ip-rules <IP/CIDR 或 ip-set:名字> [-blacklist-ip] [-whitelist-ip] [-bogus-nxdomain] [-ignore-ip] [-ip-alias <IP 列表|ip-set:名字>]`
+///
+/// 语义与 C 版一致（`src/dns_conf/ip_rule.c:104`）：**这就是"按 IP 段"版的那几个开关** ——
+/// 顶层的 `blacklist-ip 1.2.3.0/24`、`bogus-nxdomain 1.2.3.4` 是"一个开关一行"，
+/// `ip-rules` 是"一段 IP 一行，后面挂多个开关"，落到的是同一批表。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpRules {
+    /// 这条规则作用在哪段 IP（也可以是一命名集合 `ip-set:名字`）
+    pub key: IpOrSet,
+    pub blacklist: bool,
+    pub whitelist: bool,
+    pub bogus: bool,
+    pub ignore: bool,
+    /// `-ip-alias`：把这段 IP 映射成这些 IP
+    pub alias: Option<Arc<[IpAddr]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,14 +397,24 @@ impl<T: Sized + parser::NomParser> std::ops::Deref for ConfigForDomain<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// 🔐 Q19/Q20：加 `Serialize` 是为了让监听级的集合配置能出现在 API 的配置回显里（只序列化，不反序列化）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum ConfigForIP<T: Sized + parser::NomParser> {
     V4(T),
     V6(T),
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// 🔐 Q1：`ipset /域名/#4:集合名,#6:集合名` 里的"集合名"。
+///
+/// 与 nftables 那套（`NFTsetConfig`）的区别是：ipset 的集合是**全局的**，
+/// 没有 family/table 的层级，所以这里只有一个名字。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct IpsetConfig {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct NFTsetConfig {
     pub family: &'static str,
     pub table: String,

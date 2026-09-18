@@ -232,6 +232,22 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             "no-rule-addr" => opts.no_rule_addr = Some(true),
             "no-rule-nameserver" => opts.no_rule_nameserver = Some(true),
             "no-rule-ipset" => opts.no_rule_ipset = Some(true),
+            // 🔐 Q19/Q20：监听级的防火墙集合（`bind ... -nftset #4:... -ipset #4:...`）。
+            // 写错了**明确报错并忽略**（不静默）—— 与解析器里其它值的处理风格一致。
+            "nftset" => match v.map(Vec::<ConfigForIP<NFTsetConfig>>::parse) {
+                Some(Ok((_, sets))) => {
+                    opts.nftset.get_or_insert_with(Vec::new).extend(sets);
+                }
+                Some(Err(err)) => crate::log::error!("监听上的 `-nftset` 值不合法，已忽略：{err:?}"),
+                None => crate::log::warn!("监听上的 `-nftset` 后面缺值，已忽略"),
+            },
+            "ipset" => match v.map(Vec::<ConfigForIP<IpsetConfig>>::parse) {
+                Some(Ok((_, sets))) => {
+                    opts.ipset.get_or_insert_with(Vec::new).extend(sets);
+                }
+                Some(Err(err)) => crate::log::error!("监听上的 `-ipset` 值不合法，已忽略：{err:?}"),
+                None => crate::log::warn!("监听上的 `-ipset` 后面缺值，已忽略"),
+            },
             "no-speed-check" => opts.no_speed_check = Some(true),
             "no-cache" => opts.no_cache = Some(true),
             "no-rule-soa" => opts.no_rule_soa = Some(true),

@@ -76,10 +76,34 @@ pub fn unkown_value(input: &str) -> IResult<&str, &str> {
     .parse(input)
 }
 
+/// 以 `#` 开头的值（`#4:name`、`#4:family#table#set`）：吃到下一个空白为止，中间的 `#` 都算值。
+///
+/// 🔐 Q19/Q20/Q21 为什么需要它：C 版的注释规则是"**整行**以 `#` 开头才算注释"
+/// （`src/lib/conf.c:545`），所以 `-nftset #4:...` 里的 `#` 是值的一部分。
+/// 我们的词法更宽松（`#` 出现在哪儿都当注释，支持"行尾注释"这种写法），
+/// 于是 `-nftset #4:...` 的值会被当成注释吃掉、用户看到的是"配了像没配"。
+/// 这里只为这两个选项开这个口子，既兼容 C 版的写法，也不影响行尾注释。
+fn hash_prefixed_value(input: &str) -> IResult<&str, &str> {
+    preceded(
+        space1,
+        recognize((
+            tag("#"),
+            take_till(|c: char| c.is_whitespace()),
+        )),
+    )
+    .parse(input)
+}
+
 pub fn unkown_options(input: &str) -> IResult<&str, (&str, Option<&str>)> {
-    let key = any_name;
-    let value = unkown_value;
-    pair(key, opt(value)).parse(input)
+    let (input, key) = any_name(input)?;
+
+    if matches!(key, "ipset" | "nftset") {
+        let (input, value) = opt(alt((unkown_value, hash_prefixed_value))).parse(input)?;
+        return Ok((input, (key, value)));
+    }
+
+    let (input, value) = opt(unkown_value).parse(input)?;
+    Ok((input, (key, value)))
 }
 
 pub fn parse(input: &str) -> IResult<&str, Options<'_>> {
@@ -116,6 +140,31 @@ mod tests {
                 ]
             )
         );
+    }
+
+    /// 🔐 Q19-21：`-ipset` / `-nftset` 的值以 `#` 开头时不能被当成注释
+    #[test]
+    fn test_hash_prefixed_set_values() {
+        assert_eq!(
+            parse("-nftset #4:inet#filter#set4 -ipset #6:dns6").unwrap(),
+            (
+                "",
+                vec![
+                    ("nftset", Some("#4:inet#filter#set4")),
+                    ("ipset", Some("#6:dns6")),
+                ]
+            )
+        );
+
+        // 行尾注释照旧（后面那个 `#` 不属于任何选项的值）
+        assert_eq!(
+            parse("-nftset #4:t#s#n # 这是注释").unwrap().1[0],
+            ("nftset", Some("#4:t#s#n"))
+        );
+
+        // 别的选项不受影响：`-group #x` 仍然没有值（`#x` 当注释）
+        // （剩下的 ` #x` 留给上层当注释处理）
+        assert_eq!(parse("-group #x").unwrap(), (" #x", vec![("group", None)]));
     }
 
     #[test]

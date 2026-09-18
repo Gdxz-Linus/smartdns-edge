@@ -337,6 +337,9 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
             client_config: self.client_config,
             server_name,
             path,
+            // 这条 builder 通路不单独指定请求头 Host（与 SNI 同名）；
+            // 需要单独指定的入口是智能 DNS 自己的 provider（用 `HttpsClientConnect::new`）。
+            http_host: None,
         };
 
         let connect = self.provider.connect_tcp(name_server, self.bind_addr, None);
@@ -361,6 +364,7 @@ impl<S: DnsTcpStream> HttpsClientConnect<S> {
         name_server: SocketAddr,
         server_name: Arc<str>,
         path: Arc<str>,
+        http_host: Option<Arc<str>>,
     ) -> Self
     where
         S: DnsTcpStream,
@@ -378,6 +382,7 @@ impl<S: DnsTcpStream> HttpsClientConnect<S> {
             client_config,
             server_name,
             path,
+            http_host,
         };
 
         Self(HttpsClientConnectState::TcpConnecting {
@@ -403,6 +408,12 @@ struct TlsConfig {
     client_config: Arc<ClientConfig>,
     server_name: Arc<str>,
     path: Arc<str>,
+    /// 🔐 Q15（`-http-host`）：HTTP 请求里的 Host（`:authority`）单独指定。
+    ///
+    /// 为什么单独一个字段：TLS 的 SNI/证书校验用的是 `server_name`，而请求头里的 Host
+    /// 有时需要另指一个（反代、按 Host 分流的网关）。C 版也是两个独立字段
+    /// （`-host-name` 管 SNI、`-http-host` 管请求头）。`None` = 与 `server_name` 一致（原行为）。
+    http_host: Option<Arc<str>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -473,7 +484,11 @@ where
                     let tls = tls
                         .take()
                         .expect("programming error, tls should not be None here");
-                    let name_server_name = Arc::clone(&tls.server_name);
+                    // 🔐 Q15：请求里的 Host 可以用 `-http-host` 单独指定；没配就与 SNI 名字一致
+                    let name_server_name = tls
+                        .http_host
+                        .clone()
+                        .unwrap_or_else(|| Arc::clone(&tls.server_name));
                     let query_path = tls.path.clone();
 
                     match ServerName::try_from(&*tls.server_name) {

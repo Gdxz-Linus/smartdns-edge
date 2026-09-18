@@ -4,7 +4,7 @@ use super::{AddressRules, CNameRules, DomainRules, ForwardRule, HttpsRecords, Sr
 
 static EMPTY: LazyLock<RuleGroup> = LazyLock::new(RuleGroup::default);
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct RuleGroup {
     /// specific nameserver to domain
     ///

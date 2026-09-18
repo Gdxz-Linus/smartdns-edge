@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::{ConfigForIP, IpsetConfig, NFTsetConfig};
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerOpts {
     /// set domain request to use the appropriate server group.
@@ -21,6 +23,17 @@ pub struct ServerOpts {
     /// skip ipset rule.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_rule_ipset: Option<bool>,
+
+    /// 🔐 Q19：`bind ... -nftset [#4|#6]:family#table#set` —— **这个监听**收到的查询，
+    /// 解析出来的地址都额外写进这些集合（与域名规则里配的集合是**并列**关系，各写各的）。
+    ///
+    /// 与 `-no-rule-ipset` 互为反面：那个是"整个不写"，这个是"总要多写几个"。
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub nftset: Option<Vec<ConfigForIP<NFTsetConfig>>>,
+
+    /// 🔐 Q20：同上，Linux 的 ipset 那一半。
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub ipset: Option<Vec<ConfigForIP<IpsetConfig>>>,
 
     /// do not check speed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,7 +247,17 @@ impl ServerOpts {
             no_serve_expired,
             is_background: _,
             rule_group,
+            nftset,
+            ipset,
         } = other;
+
+        // 🔐 Q19/Q20：集合不是"谁覆盖谁"，而是**两家配的都写**（各写各的集合）
+        if let Some(other_sets) = nftset {
+            self.nftset.get_or_insert_with(Vec::new).extend(other_sets);
+        }
+        if let Some(other_sets) = ipset {
+            self.ipset.get_or_insert_with(Vec::new).extend(other_sets);
+        }
 
         if self.group.is_none() {
             self.group = group;

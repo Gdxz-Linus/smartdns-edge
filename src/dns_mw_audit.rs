@@ -56,11 +56,15 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
 }
 
 impl DnsAuditMiddleware {
+    /// `console` = 🔐 Q9：审计行同时打到控制台（stdout）。
+    /// `syslog` = 🔐 Q8：审计改送系统日志（**不再写文件**、行首不带时间戳，与 C 版一致）。
     pub fn new<P: AsRef<Path>>(
         path: P,
         audit_size: u64,
         audit_num: usize,
         mode: Option<u32>,
+        console: bool,
+        syslog: bool,
     ) -> Self {
         let audit_file = path.as_ref().to_owned();
         
@@ -93,7 +97,10 @@ impl DnsAuditMiddleware {
                             // 相当于给写磁盘开辟了一条专属的“系统辅道”，绝不霸占 Tokio 的高速主干道！
                             // 利用 Rust 的 Move 语义将文件句柄带进辅道，写完再带出来，完美绕过借用检查。
                             audit_file = tokio::task::spawn_blocking(move || {
-                                if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write) {
+                                if syslog {
+                                    // 🔐 Q8：改送系统日志（C 版 `audit.c:145-166` 也是"送 syslog 就不写文件"）
+                                    write_audit_to_syslog(&records_to_write, console);
+                                } else if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write, console) {
                                     warn!("log audit failed {}", err);
                                 }
                                 audit_file // 活干完了，把文件句柄交还给主循环
@@ -109,7 +116,9 @@ impl DnsAuditMiddleware {
                                     
                                     // 🌟 核心修复 2：同上，转移至系统辅道执行磁盘 I/O
                                     audit_file = tokio::task::spawn_blocking(move || {
-                                        if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write) {
+                                        if syslog {
+                                            write_audit_to_syslog(&records_to_write, console);
+                                        } else if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write, console) {
                                             warn!("log audit failed {}", err);
                                         }
                                         audit_file
@@ -200,10 +209,40 @@ impl std::fmt::Display for DnsAuditRecord {
     }
 }
 
+/// 🔐 Q8 `audit-syslog`：把审计行送系统日志。
+///
+/// 与 C 版一致的两点（`src/dns_server/audit.c:145-157`）：
+/// ① 用**不带时间戳**的行（`to_string_without_date`）—— 系统日志自己会加时间；
+/// ② 开着的时候**不写审计文件**（调用方负责不再写）。
+/// 另外保留 `audit-console` 那一路（用户两个都开就两个都出）。
+fn write_audit_to_syslog(records: &[DnsAuditRecord], console: bool) {
+    for audit in records {
+        let line = audit.to_string_without_date();
+        crate::log::audit_to_syslog(&line);
+
+        if console {
+            println!("{line}");
+        }
+    }
+}
+
 fn record_audit_to_file(
     audit_file: &mut MappedFile,
     audit_records: &[DnsAuditRecord],
+    console: bool,
 ) -> io::Result<()> {
+    // 🔐 Q9 `audit-console`：审计行**同时**打到控制台。
+    // 放在落盘之前 —— 文件写不进去也不影响"在屏幕上看得见"这件事。
+    if console {
+        use std::io::Write;
+
+        let mut out = io::stdout();
+        for audit in audit_records {
+            let _ = writeln!(out, "{audit}");
+        }
+        let _ = out.flush();
+    }
+
     if matches!(audit_file.extension(), Some(ext) if ext == "csv") {
         // write as csv
 
@@ -328,6 +367,47 @@ mod tests {
         );
     }
 
+
+    /// 🔐 Q9：开了 `audit-console` 之后，审计**照样**要落到文件里
+    /// （控制台那半走 stdout，单测里只看"文件这半没被搞坏"）。
+    #[test]
+    fn test_audit_console_still_writes_file() {
+        let dir = std::env::temp_dir().join("smartdns_audit_console_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("audit_console.log");
+        let _ = std::fs::remove_file(&file);
+
+        let query = Query::query(Name::from_str("www.example.com").unwrap(), RecordType::A);
+        let result = Ok(DnsResponse::from_rdata(
+            query.to_owned(),
+            RData::A("93.184.216.34".parse().unwrap()),
+        ));
+        let audit = DnsAuditRecord {
+            id: 11,
+            date: "2022-11-11 20:18:11.099966887 +08:00".parse().unwrap(),
+            client: "127.0.0.1".to_string(),
+            query,
+            result,
+            elapsed: Duration::from_millis(10),
+            speed: Duration::from_millis(11),
+            lookup_source: LookupFrom::Server("default".to_string()),
+        };
+        let file = Path::new(file.as_path());
+
+        record_audit_to_file(
+            &mut MappedFile::open(file, 102400, None, Default::default()),
+            &[audit],
+            true,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(file).unwrap();
+        assert!(
+            content.contains("www.example.com"),
+            "开了控制台输出后，文件里仍应有这条审计：{content}"
+        );
+    }
+
     #[test]
     fn test_record_audit_to_file() {
         let query = Query::query(Name::from_str("www.example.com").unwrap(), RecordType::A);
@@ -362,6 +442,7 @@ mod tests {
         record_audit_to_file(
             &mut MappedFile::open(file, 102400, None, Default::default()),
             &[audit],
+            false,
         )
         .unwrap();
 
@@ -429,6 +510,7 @@ mod tests {
         record_audit_to_file(
             &mut MappedFile::open(file, 102400, None, Default::default()),
             &[audit1],
+            false,
         )
         .unwrap();
 
@@ -449,6 +531,7 @@ mod tests {
         record_audit_to_file(
             &mut MappedFile::open(file, 102400, None, Default::default()),
             &[audit2],
+            false,
         )
         .unwrap();
 

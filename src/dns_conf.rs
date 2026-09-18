@@ -23,6 +23,20 @@ use crate::{
 
 const DEFAULT_GROUP: &str = "default";
 
+/// 🔐 Q3/Q5：`ipset-no-speed` / `nftset-no-speed` 的说明（每次加载只提示一次）。
+///
+/// 为什么不用开：本实现把解析出的地址**全部**写入集合（与既有的 `nftset` 行为一致）。
+/// C 版的默认是「先测速、只把最快的那一个写进去」—— 那样按域名做分流时会漏掉其它 IP，
+/// 所以我们不照抄那个默认，也不假装支持这两个开关：认下来 + 说明白。
+fn notice_no_speed() {
+    if log::warn_once("set-no-speed-is-default") {
+        crate::log::warn!(
+            "`ipset-no-speed` / `nftset-no-speed` 无需设置：本实现一律把解析出的地址「全部」写入集合，\
+             效果已等同于这两个开关。配置已受理，行为不变。"
+        );
+    }
+}
+
 /// 配置文件相关错误（文件不存在 / 解析失败）导致启动失败时使用的退出码。
 ///
 /// 单独使用 2 而不是笼统的 1，是为了让脚本与服务管理器能一眼区分
@@ -215,6 +229,46 @@ impl RuntimeConfig {
     pub fn summary(&self) {
         if let Some(user) = self.user() {
             info!("whoami 👉 {user}");
+        }
+
+        // 🔐 Q1：`ipset` 只在 Linux 上有意义 —— 别的平台**启动时就说清楚**，
+        // 而不是等有人查了那个域名、或者干脆一直静默（这正是"配了不起作用"的老毛病）。
+        // 🔐 Q7/Q8：系统日志只在 Linux 上存在，其它平台配了要明确说"不会生效"
+        #[cfg(not(target_os = "linux"))]
+        if self.log_syslog() || self.audit_syslog() {
+            log::warn!(
+                "`log-syslog` / `audit-syslog` 只在 Linux 上有效（其它平台没有系统日志）：本次已忽略。"
+            );
+        }
+
+        // 🔐 Q8：开了 `audit-syslog` 但审计本身没开 —— 什么都不会送
+        if self.audit_syslog() && !self.audit_enable() {
+            log::warn!(
+                "配置里有 `audit-syslog`，但审计没开（缺 `audit-enable yes`）—— 不会有任何审计输出。"
+            );
+        }
+
+        // 🔐 Q8：审计改送系统日志后**不再写审计文件**，这点要说清楚（否则用户会去找文件）
+        if self.audit_syslog() {
+            log::info!("审计已改为送系统日志（`audit-syslog yes`）：不再写审计文件，行首也不带时间戳（系统日志自带）。");
+        }
+
+        // 🔐 Q11：配了 `local-domain` 却把 `mdns-lookup` 关着 —— 这些域名不会走 mDNS，
+        // 用户会以为"配了没用"。启动时说清楚（只提示一次，且只在真配了的情况下提示）。
+        if !self.local_domains.is_empty() && !self.mdns_lookup() {
+            log::warn!(
+                "配置里有 {} 条 `local-domain`，但 `mdns-lookup` 是关着的 —— 这些域名不会走 mDNS 解析。\n\
+                 想用这个功能请加一行 `mdns-lookup yes`。",
+                self.local_domains.len()
+            );
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        if !self.ipsets.is_empty() {
+            log::warn!(
+                "配置里有 {} 条 `ipset` 规则，但当前平台没有 ipset（那是 Linux 内核的特性），这些规则不会生效。",
+                self.ipsets.len()
+            );
         }
 
         info!("DNS Engine activated {} concurrent worker threads.", self.num_workers());
@@ -640,8 +694,67 @@ impl RuntimeConfig {
         self.acl.enable.unwrap_or(false)
     }
 
+    /// 🔐 Q2：写进 ipset 的条目要不要带过期时间。默认关（永不过期，与改动前一致）。
+    #[inline]
+    pub fn ipset_timeout(&self) -> bool {
+        self.ipset_timeout.unwrap_or(false)
+    }
+
+    /// 🔐 Q4：同上，nftables 那一半。
+    #[inline]
+    pub fn nftset_timeout(&self) -> bool {
+        self.nftset_timeout.unwrap_or(false)
+    }
+
+    /// 🔐 Q6：往防火墙集合写地址时要不要打详细日志。
+    #[inline]
+    pub fn nftset_debug(&self) -> bool {
+        self.nftset_debug.unwrap_or(false)
+    }
+
+    /// 🔐 Q10：整机同时处理的查询数上限。默认 65535（与 C 版一致），0 = 不限。
+    #[inline]
+    pub fn max_query_limit(&self) -> usize {
+        self.max_query_limit.unwrap_or(65535)
+    }
+
+    /// 🔐 Q7：运行日志要不要同时送系统日志（只在 Linux 上真正生效）
+    #[inline]
+    pub fn log_syslog(&self) -> bool {
+        self.log_syslog.unwrap_or(false)
+    }
+
+    /// 🔐 Q8：审计行要不要送系统日志（开着就不写审计文件了，与 C 版一致）
+    #[inline]
+    pub fn audit_syslog(&self) -> bool {
+        self.audit.syslog.unwrap_or(false)
+    }
+
+    /// 🔐 Q11：这个域名是不是"用户点名要走 mDNS"的（`local-domain`）。
+    ///
+    /// 匹配规则：**域名本身或它的子域名**（与 C 版域名规则一致）：
+    /// 配了 `lan`，那么 `nas.lan`、`a.b.lan` 都算。
+    pub fn is_local_domain(&self, name: &crate::libdns::proto::rr::Name) -> bool {
+        if self.local_domains.is_empty() {
+            return false;
+        }
+
+        let name = name.to_ascii().to_ascii_lowercase();
+        let name = name.trim_end_matches('.');
+
+        self.local_domains
+            .iter()
+            .any(|d| name == d || name.ends_with(&format!(".{d}")))
+    }
+
     pub fn audit_enable(&self) -> bool {
         self.audit.enable.unwrap_or_default()
+    }
+
+    /// 🔐 Q9：审计行要不要同时打到控制台（stdout）
+    #[inline]
+    pub fn audit_console(&self) -> bool {
+        self.audit.console.unwrap_or(false)
     }
 
     #[inline]
@@ -933,6 +1046,7 @@ impl RuntimeConfigBuilder {
                 &rule_group.srv_records,
                 &rule_group.https_records,
                 &cfg.nftsets,
+                &cfg.ipsets,
             );
             domain_rule_group_map.insert(group_name.to_string(), domain_rule_map);
         }
@@ -1188,6 +1302,62 @@ impl RuntimeConfigBuilder {
         self.config_unchecked(line);
     }
 
+    /// 🔐 Q18：`group-begin <组名> [-inherit <另一组|none|parent|default>]`。
+    ///
+    /// 语义对齐 C 版 `src/dns_conf/dns_conf_group.c:228-302`：
+    /// * 继承在**推入该组时**解析 → 被继承的组必须**已经定义过**（不支持前向引用），
+    ///   写错会明确告警（与 C 版的 "inherit group %s not exist" 同义）；
+    /// * `none` = 不继承；`parent` = 继承外层组；`default` = 继承 `default` 组；别的字符串 = 组名；
+    /// * **不写这个选项时，嵌套组默认继承外层组**（C 版如此）。这条会打一行提示：
+    ///   它改变的是"嵌套组以前是空白组"这个既有行为，不能悄悄改。
+    fn group_begin(&mut self, group: &crate::config::GroupBegin) {
+        let inherit = match group.inherit.as_deref() {
+            Some(v) => Some(v.to_string()),
+            None => {
+                // 没写：嵌套就继承外层（顶层组不继承）
+                if self.rule_group_stack.len() > 1 {
+                    Some("parent".to_string())
+                } else {
+                    None
+                }
+            }
+        };
+
+        let inherited = match inherit.as_deref() {
+            None | Some("none") => None,
+            Some("parent") => self.rule_group_stack.last().map(|(_, g)| g.clone()),
+            Some("default") => self.rule_groups.get(DEFAULT_GROUP).cloned(),
+            Some(name) => match self.rule_groups.get(name) {
+                Some(g) => Some(g.clone()),
+                None => {
+                    log::warn!(
+                        "`group-begin {} -inherit {}`：这个组还没定义过（继承只认**已经定义**的组，不支持前向引用）—— 本次不继承",
+                        group.name,
+                        name
+                    );
+                    None
+                }
+            },
+        };
+
+        let mut rules = RuleGroup::default();
+
+        if let Some(inherited) = inherited {
+            rules.merge(inherited);
+
+            // 嵌套默认继承要明确说出来（它改变了"嵌套组是空白组"的既有行为）
+            if group.inherit.is_none() {
+                log::info!(
+                    "嵌套组 `{}` 默认继承了外层组的规则（与 C 版一致）；不想继承就写 `group-begin {} -inherit none`",
+                    group.name,
+                    group.name
+                );
+            }
+        }
+
+        self.rule_group_stack.push((group.name.clone(), rules));
+    }
+
     fn config_unchecked(&mut self, line: &str) {
         use crate::config::parser::ConfigItem::*;
         let rule_group = match self.rule_group_stack.last_mut() {
@@ -1205,6 +1375,7 @@ impl RuntimeConfigBuilder {
                 AclEnable(v) => self.acl.enable = Some(v),
                 AuditFile(v) => self.audit.file = Some(self.resolve_filepath(v)),
                 AuditFileMode(v) => self.audit.file_mode = Some(v),
+                AuditConsole(v) => self.audit.console = Some(v),
                 AuditNum(v) => self.audit.num = Some(v),
                 AuditSize(v) => self.audit.size = Some(v),
                 BindCertFile(v) => self.bind_cert_file = Some(self.resolve_filepath(v)),
@@ -1218,6 +1389,32 @@ impl RuntimeConfigBuilder {
                 Dns64(v) => self.dns64_prefix = Some(v),
                 ExpandPtrFromAddress(v) => self.expand_ptr_from_address = Some(v),
                 NftSet(v) => self.nftsets.push(v),
+                IpSet(v) => self.ipsets.push(v),
+                IpSetTimeout(v) => self.ipset_timeout = Some(v),
+                NftSetTimeout(v) => self.nftset_timeout = Some(v),
+                NftSetDebug(v) => self.nftset_debug = Some(v),
+                MaxQueryLimit(v) => self.max_query_limit = Some(v),
+                LogSyslog(v) => self.log_syslog = Some(v),
+                AuditSyslog(v) => self.audit.syslog = Some(v),
+                LocalDomain(v) => {
+                    let domain = v.trim().trim_end_matches('.').to_ascii_lowercase();
+                    if domain.is_empty() || domain == "-" {
+                        // 与 C 版一致：写 `-` 表示清空（我们把已配的全部清掉；C 版只记得住一条）
+                        self.local_domains.clear();
+                    } else {
+                        self.local_domains.push(domain);
+                    }
+                }
+                // 🔐 Q3/Q5：这两行我们**认**（不再报"未识别配置行"），但要说明白它们为什么不用开 ——
+                // 免得用户以为「配了却没生效」。本实现一律写入全部解析出的地址。
+                IpSetNoSpeed(v) => {
+                    self.ipset_no_speed = Some(v);
+                    notice_no_speed();
+                }
+                NftSetNoSpeed(v) => {
+                    self.nftset_no_speed = Some(v);
+                    notice_no_speed();
+                }
                 HttpsRecord(v) => rule_group.https_records.push(v),
                 Server(server) => self.nameservers.push(server),
                 ResponseMode(mode) => self.response_mode = Some(mode),
@@ -1269,6 +1466,27 @@ impl RuntimeConfigBuilder {
                 LogSize(v) => self.log.size = Some(v),
                 MaxReplyIpNum(v) => self.max_reply_ip_num = Some(v),
                 BlacklistIp(v) => self.blacklist_ip.push(v),
+                // 🔐 Q12：一段 IP + 一串开关，落到与顶层指令**同一批表**里
+                IpRules(rules) => {
+                    if rules.blacklist {
+                        self.blacklist_ip.push(rules.key.clone());
+                    }
+                    if rules.whitelist {
+                        self.whitelist_ip.push(rules.key.clone());
+                    }
+                    if rules.bogus {
+                        self.bogus_nxdomain.push(rules.key.clone());
+                    }
+                    if rules.ignore {
+                        self.ignore_ip.push(rules.key.clone());
+                    }
+                    if let Some(to) = rules.alias {
+                        self.ip_alias.push(crate::config::IpAlias {
+                            ip: rules.key.clone(),
+                            to,
+                        });
+                    }
+                }
                 BogusNxDomain(v) => self.bogus_nxdomain.push(v),
                 WhitelistIp(v) => self.whitelist_ip.push(v),
                 IgnoreIp(v) => self.ignore_ip.push(v),
@@ -1373,10 +1591,7 @@ impl RuntimeConfigBuilder {
                 }
                 MdnsLookup(enable) => self.mdns_lookup = Some(enable),
                 IpAlias(alias) => self.ip_alias.push(alias),
-                GroupBegin(v) => {
-                    self.rule_group_stack
-                        .push((v.clone(), RuleGroup::default()));
-                }
+                GroupBegin(v) => self.group_begin(&v),
                 GroupEnd => {
                     if let Some((name, rule_group)) = self.rule_group_stack.pop() {
                         let group = self.rule_groups.entry(name).or_default();
@@ -1584,6 +1799,206 @@ mod tests {
     use super::*;
 
     /// 🔐 P2（用户定策）：组不存在 → 走默认组 + 点名告警。
+    /// 🔐 Q18 `-inherit`：显式继承另一个组的规则
+    #[test]
+    fn test_group_inherit_named_group() {
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin base")
+            .with("address /a.test/1.2.3.4")
+            .with("group-end")
+            .with("group-begin child -inherit base")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        let name = Name::from_utf8("a.test").unwrap();
+        assert!(
+            cfg.find_domain_rule(&name, "base")
+                .get(|n| n.address.clone())
+                .is_some(),
+            "base 组自己要有这条地址规则"
+        );
+        assert!(
+            cfg.find_domain_rule(&name, "child")
+                .get(|n| n.address.clone())
+                .is_some(),
+            "child 继承了 base 之后也该有"
+        );
+    }
+
+    /// `-inherit none` = 不继承；写错组名 = 不继承（并且会告警，这里只验行为）
+    #[test]
+    fn test_group_inherit_none_and_missing() {
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin base")
+            .with("address /a.test/1.2.3.4")
+            .with("group-end")
+            .with("group-begin plain -inherit none")
+            .with("group-end")
+            .with("group-begin typo -inherit nosuchgroup")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        let name = Name::from_utf8("a.test").unwrap();
+        assert!(
+            cfg.find_domain_rule(&name, "plain")
+                .get(|n| n.address.clone())
+                .is_none(),
+            "-inherit none 就是不继承"
+        );
+        assert!(
+            cfg.find_domain_rule(&name, "typo")
+                .get(|n| n.address.clone())
+                .is_none(),
+            "继承一个没定义过的组 → 不继承（C 版也是告警后不继承）"
+        );
+    }
+
+    /// 嵌套组：默认继承外层（与 C 版一致）；`-inherit parent` 是显式写法
+    #[test]
+    fn test_group_inherit_nested_defaults_to_parent() {
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin outer")
+            .with("address /a.test/1.2.3.4")
+            .with("group-begin inner")
+            .with("group-end")
+            .with("group-begin explicit -inherit parent")
+            .with("group-end")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        let name = Name::from_utf8("a.test").unwrap();
+        for group in ["inner", "explicit"] {
+            assert!(
+                cfg.find_domain_rule(&name, group)
+                    .get(|n| n.address.clone())
+                    .is_some(),
+                "{group} 应该继承到外层组的地址规则"
+            );
+        }
+    }
+
+    /// 🔐 Q7/Q8：两条 syslog 开关要能解析进来（默认都是关）
+    #[test]
+    fn test_syslog_switches_parse() {
+        let cfg = RuntimeConfig::builder()
+            .with("log-syslog yes")
+            .with("audit-enable yes")
+            .with("audit-syslog yes")
+            .build()
+            .unwrap();
+
+        assert!(cfg.log_syslog());
+        assert!(cfg.audit_syslog());
+
+        let cfg = RuntimeConfig::builder().with("log-syslog no").build().unwrap();
+        assert!(!cfg.log_syslog(), "写 no 就是关");
+        assert!(!cfg.audit_syslog(), "没写默认关");
+    }
+
+    /// 🔐 Q19/Q20/Q21：三种写法都要能配上集合（监听级两个选项、`domain-rules` 里的两个选项）
+    #[test]
+    fn test_kernel_sets_from_listener_and_domain_rules() {
+        let cfg = RuntimeConfig::builder()
+            // 监听级：这个监听收到的查询都要写这几个集合
+            .with("bind 127.0.0.1:0 -nftset #4:inet#filter#set4 -ipset #4:dns4")
+            // 域名规则级：这条规则的域名单独写
+            .with("domain-rules /rule.test/ -nftset #4:inet#filter#ruleset -ipset #6:dns6")
+            // 独立指令（早已支持）：`nftset /域/...`
+            .with("nftset /directive.test/#4:inet#filter#direct")
+            .build()
+            .unwrap();
+
+        // ① 监听级
+        let listener = cfg.binds().first().expect("应有一个监听");
+        let crate::config::BindAddrConfig::Udp(udp) = listener else {
+            panic!("示例里的监听是 UDP");
+        };
+        let listener_nft = udp.opts.nftset.clone().unwrap_or_default();
+        let listener_ip = udp.opts.ipset.clone().unwrap_or_default();
+        assert_eq!(listener_nft.len(), 1, "监听上配了 1 个 nftset");
+        assert_eq!(listener_ip.len(), 1, "监听上配了 1 个 ipset");
+
+        // ② domain-rules 级
+        let rule = cfg
+            .find_domain_rule(&Name::from_utf8("rule.test").unwrap(), "")
+            .expect("应有 rule.test 的规则");
+        assert_eq!(
+            rule.get(|n| n.nftset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            1,
+            "domain-rules 里的 -nftset 要落到规则上"
+        );
+        assert_eq!(
+            rule.get(|n| n.ipset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            1,
+            "domain-rules 里的 -ipset 要落到规则上"
+        );
+
+        // ③ 独立指令那条路没被搞坏
+        let direct = cfg
+            .find_domain_rule(&Name::from_utf8("directive.test").unwrap(), "")
+            .expect("应有 directive.test 的规则");
+        assert_eq!(
+            direct.get(|n| n.nftset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            1
+        );
+    }
+
+    /// 监听上写错了集合语法 → 忽略并告警，但监听本身照常可用（不能因为一个选项就起不来）
+    #[test]
+    fn test_listener_bad_ipset_value_is_ignored() {
+        let cfg = RuntimeConfig::builder()
+            .with("bind 127.0.0.1:0 -ipset 这是错的")
+            .build()
+            .unwrap();
+
+        let listener = cfg.binds().first().expect("监听仍应存在");
+        let crate::config::BindAddrConfig::Udp(udp) = listener else {
+            panic!("示例里的监听是 UDP");
+        };
+        assert!(
+            udp.opts.ipset.as_deref().unwrap_or_default().is_empty(),
+            "值不合法应该被丢掉"
+        );
+    }
+
+    /// 🔐 Q11 `local-domain`：域名本身与**子域名**都算；大小写、末尾的点都不影响。
+    #[test]
+    fn test_local_domain_matching() {
+        let cfg = RuntimeConfig::builder()
+            .with("local-domain lan")
+            .with("local-domain HOME.test")
+            .build()
+            .unwrap();
+
+        let local = |s: &str| cfg.is_local_domain(&Name::from_utf8(s).unwrap());
+
+        assert!(local("lan"), "域名本身算");
+        assert!(local("LAN."), "大小写与末尾的点都不该影响");
+        assert!(local("nas.lan"), "子域名算");
+        assert!(local("a.b.lan"), "多级子域名也算");
+        assert!(local("home.test"), "第二条也生效（C 版只记得住一条）");
+        assert!(!local("lanx"), "lanx 不是 lan 的子域名（别按字符串前缀乱匹配）");
+        assert!(!local("example.com"));
+    }
+
+    /// `local-domain -` 清空已配的（与 C 版 `-` 的语义一致）
+    #[test]
+    fn test_local_domain_dash_clears() {
+        let cfg = RuntimeConfig::builder()
+            .with("local-domain lan")
+            .with("local-domain -")
+            .build()
+            .unwrap();
+
+        assert!(
+            !cfg.is_local_domain(&Name::from_utf8("nas.lan").unwrap()),
+            "写了 `-` 之后不该还有 local-domain"
+        );
+    }
+
     /// 判定"组到底存不存在"要能区分"确实定义过"和"名字根本没见过"。
     #[test]
     fn test_group_existence_detection() {

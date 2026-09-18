@@ -40,6 +40,9 @@ use super::ALPN_H3;
 pub struct H3ClientStream {
     // Corresponds to the dns-name of the HTTP/3 server
     server_name: Arc<str>,
+    /// 🔐 Q15（`-http-host`）：HTTP 请求里的 Host（`:authority`）单独指定。
+    /// `None` = 与 `server_name` 一致（原行为）。
+    http_host: Option<Arc<str>>,
     name_server: SocketAddr,
     path: Arc<str>,
     send_request: SendRequest<OpenStreams, Bytes>,
@@ -251,10 +254,16 @@ impl DnsRequestSender for H3ClientStream {
             Err(err) => return err.into(),
         };
 
+        // 🔐 Q15：请求里的 Host 可以用 `-http-host` 单独指定；没配就与 SNI 名字一致
+        let authority = self
+            .http_host
+            .clone()
+            .unwrap_or_else(|| self.server_name.clone());
+
         Box::pin(Self::inner_send(
             self.send_request.clone(),
             Bytes::from(bytes),
-            self.server_name.clone(),
+            authority,
             self.path.clone(),
         ))
         .into()
@@ -295,6 +304,8 @@ pub struct H3ClientStreamBuilder {
     transport_config: Arc<TransportConfig>,
     bind_addr: Option<SocketAddr>,
     disable_grease: bool,
+    /// 🔐 Q15（`-http-host`）：请求头里的 Host 单独指定；`None` = 与 SNI 名字一致
+    http_host: Option<Arc<str>>,
 }
 
 impl H3ClientStreamBuilder {
@@ -313,6 +324,18 @@ impl H3ClientStreamBuilder {
     /// Sets whether to disable GREASE
     pub fn disable_grease(mut self, disable_grease: bool) -> Self {
         self.disable_grease = disable_grease;
+        self
+    }
+
+    /// 🔐 Q15：单独指定请求头里的 Host（`:authority`），不设则与 SNI 名字一致
+    pub fn http_host(mut self, http_host: Arc<str>) -> Self {
+        self.http_host = Some(http_host);
+        self
+    }
+
+    /// 🔐 Q15：同上，但允许"没配"（`None` = 与 SNI 名字一致）
+    pub fn http_host_opt(mut self, http_host: Option<Arc<str>>) -> Self {
+        self.http_host = http_host;
         self
     }
 
@@ -429,6 +452,7 @@ impl H3ClientStreamBuilder {
 
         Ok(H3ClientStream {
             server_name,
+            http_host: self.http_host,
             name_server,
             path,
             send_request,
@@ -445,6 +469,7 @@ impl Default for H3ClientStreamBuilder {
             transport_config: Arc::new(super::transport()),
             bind_addr: None,
             disable_grease: false,
+            http_host: None,
         }
     }
 }

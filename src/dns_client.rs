@@ -556,6 +556,10 @@ mod name_server {
         /// 🔐 这条上游是不是"后备服务器"（配置里的 `-fallback`）。
         /// 后备服务器**第一轮不参与**竞速，只有同组正常那批给不出可用答案时才上场。
         is_fallback: bool,
+        /// 🔐 Q16：查询里要不要带 EDNS 的 TCP keepalive 选项（RFC 7828）
+        tcp_keepalive: Option<u16>,
+        /// 🔐 Q17：配了 ECS 时，是不是所有查询类型都带（默认只有 A / AAAA 带）
+        subnet_all_query_types: bool,
     }
 
     impl NameServer {
@@ -627,6 +631,8 @@ mod name_server {
 
             let so_mark = config.so_mark;
             let device = config.interface;
+            let tcp_keepalive = config.tcp_keepalive;
+            let subnet_all_query_types = config.subnet_all_query_types;
 
             // UDP 上游额外准备一条"同地址、同端口"的 TCP 备用通路（只在收到截断包时用）
             let tcp_fallback = matches!(config.server.proto(), ProtocolConfig::Udp).then(|| {
@@ -657,6 +663,8 @@ mod name_server {
                 connection,
                 tcp_fallback,
                 is_fallback: config.fallback,
+                tcp_keepalive,
+                subnet_all_query_types,
             })
         }
 
@@ -715,7 +723,14 @@ mod name_server {
             };
 
             let req = DnsRequest::new(
-                build_message(query, request_options, client_subnet, options.is_dnssec),
+                build_message(
+                    query,
+                    request_options,
+                    client_subnet,
+                    options.is_dnssec,
+                    self.tcp_keepalive,
+                    self.subnet_all_query_types,
+                ),
                 request_options,
             );
 
@@ -828,13 +843,21 @@ mod name_server {
     /// （`src/app.rs:954`），不受这里的值影响。
     const MAX_PAYLOAD_LEN: u16 = 4096;
 
+    /// EDNS 的 TCP keepalive 选项码（RFC 7828）
+    const EDNS_OPTION_TCP_KEEPALIVE: u16 = 11;
+
     fn build_message(
         query: Query,
         request_options: DnsRequestOptions,
         client_subnet: Option<ClientSubnet>,
         is_dnssec: bool,
+        tcp_keepalive: Option<u16>,
+        subnet_all_query_types: bool,
     ) -> Message {
         // build the message
+
+        // 先记下查询类型：下面 `add_query` 会把 query 移走
+        let qtype = query.query_type();
 
         let mut message = Message::query();
         // TODO: This is not the final ID, it's actually set in the poll method of DNS future
@@ -842,16 +865,42 @@ mod name_server {
             .add_query(query)
             .set_recursion_desired(request_options.recursion_desired);
 
+        // 🔐 Q17：ECS 只给 A / AAAA 带（与 C 版 `packet.c:87-97` 的默认一致）；
+        // 加了 `-subnet-all-query-types` 才给所有查询类型带。
+        //
+        // 为什么默认收窄：ECS 等于把客户端所在网段告诉上游，类型越多暴露越多；
+        // 而且只有 A/AAAA 的答案真的会按网段挑节点。需要更精细的场景再打开这个开关。
+        let use_subnet = match client_subnet {
+            Some(_) => {
+                matches!(qtype, RecordType::A | RecordType::AAAA) || subnet_all_query_types
+            }
+            None => false,
+        };
+
         // Extended dns
-        if client_subnet.is_some() || request_options.use_edns || is_dnssec {
+        if use_subnet || request_options.use_edns || is_dnssec || tcp_keepalive.is_some() {
             message
                 .extensions_mut()
                 .get_or_insert_with(Edns::new)
                 .set_max_payload(MAX_PAYLOAD_LEN)
                 .set_version(0);
 
-            if let (Some(client_subnet), Some(edns)) = (client_subnet, message.extensions_mut()) {
+            if let (true, Some(client_subnet), Some(edns)) =
+                (use_subnet, client_subnet, message.extensions_mut())
+            {
                 edns.options_mut().insert(EdnsOption::Subnet(client_subnet));
+            }
+
+            // 🔐 Q16：EDNS 的 TCP keepalive 选项（RFC 7828）。值 = 100 毫秒为单位，
+            // 0 时不带内容（= "问上游你愿意留多久"）—— 与 C 版 `dns.c:1152` 的字节一致。
+            if let (Some(value), Some(edns)) = (tcp_keepalive, message.extensions_mut()) {
+                let data = if value == 0 {
+                    Vec::new()
+                } else {
+                    value.to_be_bytes().to_vec()
+                };
+                edns.options_mut()
+                    .insert(EdnsOption::Unknown(EDNS_OPTION_TCP_KEEPALIVE, data));
             }
 
             if let (true, Some(edns)) = (is_dnssec, message.extensions_mut()) {
@@ -860,7 +909,110 @@ mod name_server {
         }
         message
     }
+
+    #[cfg(test)]
+    mod build_message_tests {
+        use std::str::FromStr;
+
+        use super::*;
+
+        use crate::libdns::proto::{
+            op::Query,
+            rr::{Name, RecordType},
+        };
+
+        use crate::libdns::proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+
+        fn query_of(qtype: RecordType) -> Query {
+            Query::query(Name::from_str("example.com.").unwrap(), qtype)
+        }
+
+        /// 造一条查询，返回它带的 EDNS（没有就 None）
+        fn edns_of(
+            qtype: RecordType,
+            subnet: bool,
+            all_types: bool,
+            keepalive: Option<u16>,
+        ) -> Option<Edns> {
+            let subnet = subnet.then(|| ClientSubnet::new("192.168.1.1".parse().unwrap(), 24, 0));
+            let msg = build_message(
+                query_of(qtype),
+                DnsRequestOptions::default(),
+                subnet,
+                false,
+                keepalive,
+                all_types,
+            );
+            msg.extensions().clone()
+        }
+
+        fn has_subnet(edns: &Option<Edns>) -> bool {
+            edns.as_ref()
+                .and_then(|e| e.option(EdnsCode::Subnet))
+                .is_some()
+        }
+
+        /// 选项码 11（RFC 7828 TCP keepalive）的内容；没有这个选项就是 None
+        fn keepalive_data(edns: &Option<Edns>) -> Option<Vec<u8>> {
+            edns.as_ref()
+                .and_then(|e| e.option(EdnsCode::Keepalive))
+                .and_then(|opt| match opt {
+                    EdnsOption::Unknown(11, data) => Some(data.clone()),
+                    _ => None,
+                })
+        }
+
+        /// 🔐 Q17：配了 `-subnet` 时，默认只有 A / AAAA 带 ECS（与 C 版默认一致）
+        #[test]
+        fn ecs_only_for_a_and_aaaa_by_default() {
+            assert!(has_subnet(&edns_of(RecordType::A, true, false, None)), "A 该带 ECS");
+            assert!(has_subnet(&edns_of(RecordType::AAAA, true, false, None)), "AAAA 该带 ECS");
+            assert!(
+                !has_subnet(&edns_of(RecordType::TXT, true, false, None)),
+                "默认下 TXT 不该带 ECS"
+            );
+        }
+
+        /// 🔐 Q17：开了 `-subnet-all-query-types` 之后，所有类型都带
+        #[test]
+        fn ecs_for_all_types_when_flag_on() {
+            assert!(has_subnet(&edns_of(RecordType::TXT, true, true, None)));
+            assert!(has_subnet(&edns_of(RecordType::HTTPS, true, true, None)));
+        }
+
+        /// 没配 `-subnet`：任何类型都不带 ECS（开关本身不制造 ECS）
+        #[test]
+        fn no_subnet_configured_means_no_ecs() {
+            assert!(!has_subnet(&edns_of(RecordType::A, false, true, None)));
+        }
+
+        /// 🔐 Q16：`-tcp-keepalive 300` → EDNS 里带选项码 11、内容是大端 300
+        #[test]
+        fn tcp_keepalive_is_written_as_edns_option_11() {
+            let edns = edns_of(RecordType::A, false, false, Some(300));
+            assert_eq!(keepalive_data(&edns), Some(vec![0x01, 0x2c]), "300 = 0x012c 大端");
+
+            // 即使没配 subnet、没开 edns，也要因为这个选项而带起 EDNS（否则选项发不出去）
+            assert!(!has_subnet(&edns), "不该凭空多出 ECS");
+        }
+
+        /// `-tcp-keepalive 0` → 空内容（RFC 7828：0 长度 = 问上游"你愿意留多久"）
+        #[test]
+        fn tcp_keepalive_zero_sends_empty_option() {
+            let edns = edns_of(RecordType::A, false, false, Some(0));
+            assert_eq!(keepalive_data(&edns), Some(Vec::new()));
+        }
+
+        /// 没配就不该有这个选项（不无中生有）
+        #[test]
+        fn no_keepalive_configured_means_no_option() {
+            let edns = edns_of(RecordType::A, false, false, None);
+            assert_eq!(keepalive_data(&edns), None);
+        }
+    }
+
 }
+
 
 mod bootstrap {
     use super::*;

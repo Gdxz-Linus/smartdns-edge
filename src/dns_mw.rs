@@ -45,6 +45,25 @@ impl DnsMiddlewareHandler {
                 client_ip = addr.into();
             }
 
+        // 🔐 Q10 `max-query-limit`：整机**同时处理**的查询数上限。
+        //
+        // 语义对齐 C 版 `src/dns_server/dns_server.c:483`：超过上限直接回 REFUSED
+        // （不查上游、不进缓存），日志每 120 秒最多告警一次；`0` = 不限。
+        // 放在 ACL 判定**之前** —— C 版也是先过这道闸门再看客户端规则。
+        //
+        // 后台请求（预取、双栈探针、过期刷新）不占这个额度：它们不是"客户端在查"，
+        // 让它们被自己的闸门拒掉只会让缓存永远刷不新。
+        let _query_guard = match crate::server::limit::enter_query(
+            cfg.max_query_limit(),
+            server_opts.is_background,
+        ) {
+            crate::server::limit::QueryAdmission::Allowed(guard) => guard,
+            crate::server::limit::QueryAdmission::Refused => {
+                crate::log::debug!("同时处理的查询数已达上限 → 拒绝（REFUSED）");
+                return Err(crate::libdns::proto::op::ResponseCode::Refused.into());
+            }
+        };
+
         // 🔐 第三部分第 1 条（文档说了、代码没有）：`acl-enable` / `bind ... -acl`。
         //
         // 语义对齐 C 版 `src/dns_server/client_rule.c:22-32`：**开启后，没匹配到任何

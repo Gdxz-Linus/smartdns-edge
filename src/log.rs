@@ -15,12 +15,14 @@ pub fn warn_once(key: &str) -> bool {
 pub use tracing::*;
 pub use tracing::dispatcher::set_default;
 use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
+use tracing::field::{Field, Visit};
 use tracing_subscriber::{
-    EnvFilter,
+    EnvFilter, Layer,
     fmt::{
         FmtContext, FormatEvent, FormatFields, FormattedFields, MakeWriter, format,
         writer::MakeWriterExt,
     },
+    layer::Context,
     prelude::__tracing_subscriber_SubscriberExt,
     registry::LookupSpan,
 };
@@ -39,6 +41,8 @@ pub fn make_dispatch<P: AsRef<Path>>(
     num: u64,
     mode: Option<u32>,
     to_console: bool,
+    // 🔐 Q7 `log-syslog`：是否同时送系统日志（只在 Linux 上真正生效）
+    syslog: bool,
 ) -> Dispatch {
     let cli_level = INIT_CONSOLE_LEVEL.get().cloned();
     let level = match (level, cli_level) {
@@ -90,6 +94,16 @@ pub fn make_dispatch<P: AsRef<Path>>(
 
     let console_writer = io::stdout.with_max_level(console_level);
 
+    if syslog {
+        #[cfg(not(target_os = "linux"))]
+        crate::log::warn_once("log-syslog-non-linux");
+
+        #[cfg(not(target_os = "linux"))]
+        eprintln!(
+            "⚠️ `log-syslog` 只在 Linux 上有效（其它平台没有系统日志），本次已忽略。"
+        );
+    }
+
     if writable {
         // 🌟 1. 手动将横幅瞬间写入文件，弥补配置解析的时间差
         use std::io::Write;
@@ -113,12 +127,16 @@ pub fn make_dispatch<P: AsRef<Path>>(
                 filter,
                 file_writer.and(console_writer),
                 true,
+                syslog,
             )
         } else {
-            internal_make_dispatch(level.max(console_level), filter, file_writer, true)
+            internal_make_dispatch(level.max(console_level), filter, file_writer, true, syslog)
         }
     } else if to_console {
-        internal_make_dispatch(console_level, filter, console_writer, true)
+        internal_make_dispatch(console_level, filter, console_writer, true, syslog)
+    } else if syslog {
+        // 既不写文件也不打控制台，只送系统日志 —— 用 `io::sink()` 当占位写入端
+        internal_make_dispatch(level, filter, || io::sink(), false, true)
     } else {
         Dispatch::none()
     }
@@ -132,6 +150,7 @@ pub fn console(console_level: Level) -> DefaultGuard {
         None,
         console_writer,
         false,
+        false,
     ))
 }
 
@@ -141,13 +160,19 @@ fn internal_make_dispatch<W: for<'writer> MakeWriter<'writer> + 'static + Send +
     filter: Option<&str>,
     writer: W,
     diagnostic: bool,
+    syslog: bool,
 ) -> Dispatch {
     let layer = tracing_subscriber::fmt::layer()
         .event_format(TdnsFormatter)
         .with_writer(writer);
 
+    // 🔐 Q7：`log-syslog` 打开时额外挂一层，把日志也送进系统日志。
+    // 关掉时用 `Option::None` 占位 —— 完全不产生开销（tracing 对 Option<Layer> 有实现）。
+    let syslog_layer = syslog.then_some(SyslogLayer);
+
     let subscriber = tracing_subscriber::registry()
         .with(layer)
+        .with(syslog_layer)
         .with(make_filter(level, filter));
 
     if diagnostic {
@@ -185,6 +210,118 @@ fn all_smart_dns(level: impl ToString, filter: Option<&str>) -> String {
 #[inline]
 fn get_env() -> String {
     env::var("RUST_LOG").unwrap_or_default()
+}
+
+// ───────────────────────── 🔐 Q7 `log-syslog`：运行日志也送系统日志 ─────────────────────────
+//
+// 与 C 版对齐（`src/smartdns.c:525` 的 syslog 回调 + `src/dns_conf/dns_conf.c:534` 的 openlog）：
+//   * 标识（ident）用 `smartdns`，facility 用 `LOG_USER`，选项带 `LOG_CONS`；
+//   * 级别映射：error → LOG_ERR、warn → LOG_WARNING、info → LOG_INFO、debug/trace → LOG_DEBUG；
+//   * 是**追加**一路输出（文件/控制台照旧），不是替代。
+//
+// 只在 Linux 上有效：其它平台没有 syslog，配置了会由 `dns_conf::summary()` 明确提示"不会生效"。
+
+/// 把运行日志送进系统日志的那一层（关掉时用 `Option::None` 占位，不产生任何开销）
+pub(crate) struct SyslogLayer;
+
+impl<S: Subscriber> Layer<S> for SyslogLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut message = String::new();
+        event.record(&mut MessageVisitor(&mut message));
+
+        if message.is_empty() {
+            return;
+        }
+
+        syslog_write(event.metadata().level(), &message);
+    }
+}
+
+/// 只捞 `message` 字段（syslog 那边不需要我们的日期前缀 —— 系统日志自己会加）
+struct MessageVisitor<'a>(&'a mut String);
+
+impl Visit for MessageVisitor<'_> {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.0.push_str(&format!("{value:?}"));
+        } else if self.0.is_empty() {
+            self.0.push_str(&format!("{}={value:?}", field.name()));
+        }
+    }
+}
+
+/// 级别 → syslog 优先级（与 C 版 `src/smartdns.c:525-545` 一致）
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn syslog_priority(level: &tracing::Level) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        match *level {
+            tracing::Level::ERROR => libc::LOG_ERR,
+            tracing::Level::WARN => libc::LOG_WARNING,
+            tracing::Level::INFO => libc::LOG_INFO,
+            tracing::Level::DEBUG | tracing::Level::TRACE => libc::LOG_DEBUG,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // 非 Linux 平台没有 syslog；这里只需要编译得过（真正的写入口是空操作）
+        let _ = level;
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn syslog_write(level: &tracing::Level, message: &str) {
+    use std::ffi::CString;
+
+    static OPENLOG: std::sync::Once = std::sync::Once::new();
+    OPENLOG.call_once(|| unsafe {
+        libc::openlog(
+            c"smartdns".as_ptr(),
+            libc::LOG_CONS,
+            libc::LOG_USER,
+        );
+    });
+
+    if let Ok(message) = CString::new(message) {
+        unsafe {
+            libc::syslog(syslog_priority(level), c"%s".as_ptr(), message.as_ptr());
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn syslog_write(_level: &tracing::Level, _message: &str) {
+    // 非 Linux：没有系统日志可写（启动时会提示用户这条配置不会生效）
+}
+
+/// 🔐 Q8 `audit-syslog`：把**审计行**送进系统日志（级别固定 LOG_INFO，与 C 版 `audit.c:155` 一致）
+pub(crate) fn audit_to_syslog(line: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+
+        static OPENLOG: std::sync::Once = std::sync::Once::new();
+        OPENLOG.call_once(|| unsafe {
+            libc::openlog(c"smartdns".as_ptr(), libc::LOG_CONS, libc::LOG_USER);
+        });
+
+        if let Ok(line) = CString::new(line) {
+            unsafe {
+                libc::syslog(libc::LOG_INFO, c"%s".as_ptr(), line.as_ptr());
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = line;
+    }
 }
 
 struct TdnsFormatter;

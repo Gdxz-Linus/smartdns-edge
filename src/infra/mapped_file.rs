@@ -664,6 +664,7 @@ mod tests {
             2,
             None,
             false,
+            false,
         );
 
         crate::log::dispatcher::with_default(&dispatch, || {

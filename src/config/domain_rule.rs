@@ -26,6 +26,8 @@ pub struct DomainRule {
     pub no_cache: Option<bool>,
     pub no_serve_expired: Option<bool>,
     pub nftset: Option<Vec<ConfigForIP<NFTsetConfig>>>,
+    /// 🔐 Q1：同域名的 ipset 集合（与 nftset 并行，各写各的）
+    pub ipset: Option<Vec<ConfigForIP<IpsetConfig>>>,
 
     pub rr_ttl: Option<u64>,
     pub rr_ttl_min: Option<u64>,
@@ -93,6 +95,17 @@ impl std::ops::AddAssign for DomainRule {
                 }
             } else {
                 self.nftset = Some(rhs_nft);
+            }
+        }
+
+        // 🔐 Q1：ipset 同样合并（别让"配了两条只留最后一条"的老毛病重演）
+        if let Some(rhs_ipset) = rhs.ipset {
+            if let Some(ref mut lhs_ipset) = self.ipset {
+                for it in rhs_ipset {
+                    lhs_ipset.push(it);
+                }
+            } else {
+                self.ipset = Some(rhs_ipset);
             }
         }
 

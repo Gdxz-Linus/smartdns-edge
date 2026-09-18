@@ -71,6 +71,19 @@ impl DnsUrl {
         }
     }
 
+    /// 🔐 Q15 `-http-host`：DoH（https/h3）请求头里的 Host。
+    ///
+    /// 与 TLS 的 SNI 名字是**两件事**：SNI 用 `host()` / `-host-name`，请求头用这个。
+    /// 没配就返回 `None`，由调用方按"与 SNI 名字一致"处理（原行为）。
+    pub fn http_host(&self) -> Option<Arc<str>> {
+        self.get_param::<String>("http_host")
+            .map(|host| Arc::from(host.as_str()))
+    }
+
+    pub fn set_http_host<N: Into<Arc<str>>>(&mut self, host: N) {
+        self.set_param("http_host", host.into().as_ref())
+    }
+
     pub fn ip(&self) -> Option<IpAddr> {
         match self.host() {
             Host::Domain(_) => None,

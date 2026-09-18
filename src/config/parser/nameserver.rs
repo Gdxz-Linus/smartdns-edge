@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::dns_url::DnsUrl;
+use crate::dns_url::{DnsUrl, ProtocolConfig};
 use crate::log;
 use crate::third_ext::FromStrOrHex;
 
@@ -135,6 +135,61 @@ impl NomParser for NameServerInfo {
                             log::warn!("expect spki-pin")
                         }
                     },
+                    // 🔐 Q15 `-http-host <主机名>`：DoH 请求头里的 Host（与 TLS 的 SNI 是两件事）。
+                    // 只对 https / h3 有意义 —— 其它协议上写了要明确告警，不能"配了像没配"。
+                    "http-host" => match v {
+                        Some(host) => match nameserver.server.proto() {
+                            ProtocolConfig::Https { .. } | ProtocolConfig::H3 { .. } => {
+                                nameserver.server.set_http_host(host)
+                            }
+                            _ => log::warn!(
+                                "`-http-host` 只对 DoH 上游（https / h3）有效：这条是 {}，已忽略",
+                                nameserver.server
+                            ),
+                        },
+                        None => log::warn!("expect http-host"),
+                    },
+                    // 🔐 Q16 `-tcp-keepalive <值>`：带一个 EDNS 的 TCP keepalive 选项（RFC 7828）
+                    // 值 = 100 毫秒为单位（见 `NameServerInfo::tcp_keepalive` 的说明）。
+                    "tcp-keepalive" => match v {
+                        Some(value) => match value.parse::<u16>() {
+                            Ok(seconds_100ms) => nameserver.tcp_keepalive = Some(seconds_100ms),
+                            Err(err) => log::error!(
+                                "Invalid tcp-keepalive value: '{}', ignored! ({})",
+                                value,
+                                err
+                            ),
+                        },
+                        None => log::warn!("expect tcp-keepalive"),
+                    },
+                    // 🔐 Q17 `-subnet-all-query-types`：不带值，是个开关
+                    "subnet-all-query-types" => {
+                        nameserver.subnet_all_query_types = true;
+                    }
+                    // 🔐 Q14 `-host-ip <ip>`：**连接**就用这个地址，域名照旧（TLS 校验、SNI 仍用域名）。
+                    //
+                    // 场景：上游地址写的是域名，但不想（或不能）本机去解析它 —— 比如域名解析要靠
+                    // 一个还没起来的 bootstrap、或者要固定连某个特定节点。
+                    // 与 C 版一致（`dc_server.c:306`：`server->server = host_ip`，域名留着做验证），
+                    // 也和 `-tls-host-verify` 用同一个机制（两者只是"谁跟着谁"相反）。
+                    "host-ip" => match v {
+                        Some(ip) => match ip.parse::<IpAddr>() {
+                            Ok(addr) => match nameserver.server.host() {
+                                url::Host::Domain(_) => nameserver.server.set_ip(addr),
+                                url::Host::Ipv4(_) | url::Host::Ipv6(_) => log::warn!(
+                                    "`-host-ip` 只对「地址写的是域名」的上游有意义：这条上游本身就写的 IP，已忽略"
+                                ),
+                            },
+                            Err(err) => log::error!(
+                                "Invalid host-ip value: '{}', ignored! ({})",
+                                ip,
+                                err
+                            ), // 🌟 与 spki-pin 一样：拒绝静默吞错
+                        },
+                        None => {
+                            log::warn!("expect host-ip")
+                        }
+                    },
                     _ => {
                         log::warn!("unknown server options: {}, {:?}", k, v);
                     }
@@ -176,6 +231,78 @@ mod tests {
                 .fallback,
             "不写 -fallback 就是普通上游（默认 false）"
         );
+    }
+
+    /// 🔐 Q15 `-http-host`：DoH 请求头里的 Host（与 TLS 的 SNI 是两件事）
+    #[test]
+    fn test_parse_http_host() {
+        let (_, server) = NameServerInfo::parse(
+            "server-https https://doh.example.com/dns-query -http-host gw.example.com",
+        )
+        .unwrap();
+        assert_eq!(server.server.http_host().as_deref(), Some("gw.example.com"));
+        // SNI 名字不受影响（仍来自地址）
+        assert_eq!(server.server.host().to_string(), "doh.example.com");
+
+        // 非 DoH 上游上写了要忽略（不能"配了像没配"）
+        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -http-host gw.example.com").unwrap();
+        assert_eq!(server.server.http_host(), None);
+
+        // 没配就是 None（原行为：Host 与 SNI 一致）
+        let (_, server) = NameServerInfo::parse("server-https https://doh.example.com/dns-query").unwrap();
+        assert_eq!(server.server.http_host(), None);
+    }
+
+    /// 🔐 Q16/Q17：两个上游选项要能解析进 NameServerInfo
+    #[test]
+    fn test_parse_tcp_keepalive_and_subnet_all_query_types() {
+        let (_, server) =
+            NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive 300").unwrap();
+        assert_eq!(server.tcp_keepalive, Some(300));
+
+        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive 0").unwrap();
+        assert_eq!(server.tcp_keepalive, Some(0), "0 是合法值（空选项 = 问上游）");
+
+        // 写错的值 → 忽略，不改变默认
+        let (_, server) =
+            NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive abc").unwrap();
+        assert_eq!(server.tcp_keepalive, None);
+
+        let (_, server) =
+            NameServerInfo::parse("server udp://1.1.1.1 -subnet-all-query-types").unwrap();
+        assert!(server.subnet_all_query_types);
+
+        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1").unwrap();
+        assert!(!server.subnet_all_query_types, "默认关");
+        assert_eq!(server.tcp_keepalive, None, "默认不带");
+    }
+
+    /// 🔐 Q14 `-host-ip`：地址写域名时，连接改用指定的 IP，域名照旧（TLS 校验/SNI 用域名）
+    #[test]
+    fn test_parse_server_host_ip() {
+        let (_, server) = NameServerInfo::parse("server tls://dot.example.com -host-ip 1.2.3.4").unwrap();
+
+        assert_eq!(server.server.ip(), Some("1.2.3.4".parse::<IpAddr>().unwrap()));
+        assert!(server.server.has_ip(), "配了 host-ip 就算\"有地址\"，不该再要求 bootstrap 解析");
+        assert_eq!(
+            server.server.host().to_string(),
+            "dot.example.com",
+            "域名必须留着 —— TLS 校验和 SNI 都靠它"
+        );
+    }
+
+    /// `-host-ip` 写错（不是 IP）→ 忽略并告警，不改变原行为
+    #[test]
+    fn test_parse_server_host_ip_invalid() {
+        let (_, server) = NameServerInfo::parse("server tls://dot.example.com -host-ip 不是IP").unwrap();
+        assert_eq!(server.server.ip(), None);
+    }
+
+    /// 上游本身就写的 IP 时，`-host-ip` 无意义 → 保持原地址（不覆盖）
+    #[test]
+    fn test_parse_server_host_ip_ignored_when_host_is_ip() {
+        let (_, server) = NameServerInfo::parse("server tls://9.9.9.9 -host-ip 1.2.3.4").unwrap();
+        assert_eq!(server.server.ip(), Some("9.9.9.9".parse::<IpAddr>().unwrap()));
     }
 
     #[test]

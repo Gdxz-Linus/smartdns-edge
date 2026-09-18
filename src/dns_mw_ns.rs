@@ -97,7 +97,13 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         let group_name = ctx.server_group_name().to_string();
 
         let name_server = {
-            let name_server = if ctx.cfg().mdns_lookup() && LOCAL.zone_of(name) {
+            // 🔐 Q11：两种域名都交给 mDNS 那一组 ——
+            //   ① 系统标准里的"本地域"（`.local` 之类，原本就支持）；
+            //   ② 用户在 `local-domain` 里点名要本地解析的域名（含子域名）。
+            let want_mdns =
+                ctx.cfg().mdns_lookup() && (LOCAL.zone_of(name) || ctx.cfg().is_local_domain(name));
+
+            let name_server = if want_mdns {
                 client.get_server_group("mdns").await
             } else {
                 None

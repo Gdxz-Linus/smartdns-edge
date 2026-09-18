@@ -501,6 +501,8 @@ async fn new_connection(
                 server_addr,
                 server_name.clone(),
                 path.clone(),
+                // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
+                Some(http_authority(&server, &server_name, server_addr.port())),
             ));
 
             let (conn, bg) = exchange.await?;
@@ -562,6 +564,8 @@ async fn new_connection(
                 H3ClientStream::builder()
                     .crypto_config(options.tls_config.clone())
                     .disable_grease(*disable_grease)
+                    // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
+                    .http_host_opt(Some(http_authority(&server, &server_name, server_addr.port())))
                     .build_with_future(
                         binder.bind_quic(bind_addr, server_addr)?,
                         server_addr,
@@ -1020,6 +1024,43 @@ fn next_random_udp(bind_addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
         }
     }
     std::net::UdpSocket::bind(bind_addr)
+}
+
+
+/// 🔐 Q15：DoH（https / h3）请求头里的 Host（`:authority`）。
+///
+/// 规则与 C 版一致（`src/utils/misc.c:274` 的 `set_http_host` +
+/// `src/dns_client/server_info.c:348`）：
+/// * 用户写了 `-http-host` → 原样用（他写什么发什么）；
+/// * 地址写的是**域名** → 就用域名，**不带端口**；
+/// * 地址写的是 **IP** → 写 `IP` 或 `IP:端口`（IPv6 加方括号；端口是 443 就省掉）。
+///
+/// 注意与 TLS 的 SNI 分开：SNI 始终是地址里的名字，这里的 Host 可以被 `-http-host` 改掉。
+fn http_authority(server: &DnsUrl, server_name: &Arc<str>, port: u16) -> Arc<str> {
+    if let Some(host) = server.http_host() {
+        return host;
+    }
+
+    match server.host() {
+        // 域名：原样，不带端口（与 C 版一致）
+        Host::Domain(_) => Arc::clone(server_name),
+        Host::Ipv4(_) | Host::Ipv6(_) => {
+            let ip = server_name;
+            let bracketed = matches!(server.host(), Host::Ipv6(_));
+
+            let base = if bracketed {
+                format!("[{ip}]")
+            } else {
+                ip.to_string()
+            };
+
+            if port == 443 {
+                Arc::from(base.as_str())
+            } else {
+                Arc::from(format!("{base}:{port}").as_str())
+            }
+        }
+    }
 }
 
 #[cfg(test)]

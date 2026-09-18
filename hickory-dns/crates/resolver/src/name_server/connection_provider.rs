@@ -211,12 +211,15 @@ impl<P: RuntimeProvider> ConnectionProvider for P {
             }
             #[cfg(feature = "__https")]
             (ProtocolConfig::Https { server_name, path }, _) => {
+                // 这里不设 `-http-host`：请求头 Host 与 SNI 名字保持一致（原行为）。
+                // 单独指定 Host 的入口在 smartdns 自己的 custom provider（见 src/libdns/custom/）。
                 Connecting::Https(DnsExchange::connect(HttpsClientConnect::new(
                     self.connect_tcp(remote_addr, None, None),
                     Arc::new(options.tls_config.clone()),
                     remote_addr,
                     server_name.clone(),
                     path.clone(),
+                    None,
                 )))
             }
             #[cfg(feature = "__quic")]

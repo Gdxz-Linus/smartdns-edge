@@ -40,6 +40,21 @@ impl NomParser for DomainRule {
             map(parse_value(tag_no_case("cname"), NomParser::parse), |v| {
                 rule.cname = Some(v);
             }),
+            // 🔐 Q21：`domain-rules /域/ -nftset #4:family#table#set` 与 `-ipset #4:name`
+            // 语法与独立指令一致（C 版 `dns_conf/domain_rule.c:1055` 也是这两个选项）。
+            // 值里不必再写域名 —— 域名就是这条规则自己的。
+            map(
+                parse_value(alt((tag_no_case("nftset"), tag("t"))), NomParser::parse),
+                |v| {
+                    rule.nftset = Some(v);
+                },
+            ),
+            map(
+                parse_value(alt((tag_no_case("ipset"), tag("p"))), NomParser::parse),
+                |v| {
+                    rule.ipset = Some(v);
+                },
+            ),
             map(parse_value(tag_no_case("subnet"), NomParser::parse), |v| {
                 rule.subnet = Some(From::<IpNet>::from(v));
             }),

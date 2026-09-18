@@ -1148,6 +1148,9 @@ fn build_middleware(
                 cfg.audit_size(),
                 cfg.audit_num(),
                 cfg.audit_file_mode().into(),
+                cfg.audit_console(),
+                // 🔐 Q8：审计改送系统日志（开着就不再写审计文件）
+                cfg.audit_syslog(),
             ));
         }
 
@@ -1178,11 +1181,14 @@ fn build_middleware(
             ));
         }
 
-        // nftset
-        #[cfg(all(feature = "nft", target_os = "linux"))]
+        // 把解析结果写进内核集合（nftables 的 set / Linux 的 ipset）
+        //
+        // 🔐 只门控在"Linux"上，不门控 `nft` 特性：ipset 那半边是纯 Rust 实现，
+        // 没有 nftables 支持的构建里同样该能用（以前这段挂在 `feature = "nft"`，会连带禁掉 ipset）。
+        #[cfg(target_os = "linux")]
         {
-            use crate::dns_mw_nftset::DnsNftsetMiddleware;
-            builder = builder.with(DnsNftsetMiddleware);
+            use crate::dns_mw_ipset_nftset::DnsIpsetNftsetMiddleware;
+            builder = builder.with(DnsIpsetNftsetMiddleware);
         }
 
         // check if cache enabled.
