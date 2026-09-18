@@ -976,9 +976,8 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
             // `send()`；多播上游（mDNS 等）本就没有 connect，走的仍是原路径，不受影响。
             UdpSocket::Tokio(s) => {
                 let res = tokio::net::UdpSocket::poll_send_to(s, cx, buf, target);
-                #[cfg(unix)]
                 if let Poll::Ready(Err(err)) = &res {
-                    if err.raw_os_error() == Some(libc::EISCONN) {
+                    if is_eisconn(err) {
                         return tokio::net::UdpSocket::poll_send(s, cx, buf);
                     }
                 }
@@ -1020,13 +1019,40 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
         use UdpSocket::*;
         match self {
-            Tokio(s) => s.send_to(buf, target).await,
+            // 🔐 上游查询实际走的就是这个入口（内嵌 hickory 的 `udp/udp_client_stream.rs`
+            // 里 `socket.send_to(bytes, addr)`，错误直接向上抛）。直连 UDP 上游的套接字已由
+            // `bind_udp()` connect 到上游（P1-9 的防伪造应答），此时再带地址发送，
+            // macOS / BSD 返回 EISCONN（errno 56），Linux / Windows 允许 —— 见 `is_eisconn`。
+            Tokio(s) => match s.send_to(buf, target).await {
+                Ok(n) => Ok(n),
+                Err(err) if is_eisconn(&err) => s.send(buf).await,
+                Err(err) => Err(err),
+            },
             Proxy(s) => s
                 .send_to(buf, target)
                 .await
                 .map_err(|err| io::Error::other(err.to_string())),
         }
     }
+}
+
+/// macOS / BSD 对"已连接的 UDP 套接字再带地址发送"返回 EISCONN（errno 56，
+/// "Socket is already connected"），Linux / Windows 则允许带地址发送。
+///
+/// 背景：P1-9 把直连 UDP 上游的套接字 `connect()` 到上游，让内核过滤掉其他来源的应答；
+/// 此后发送仍按"带地址"调用。两种做法语义完全等价（对端就是 `connect` 的那个地址），
+/// 因此这里识别出 EISCONN 后，调用方退回**不带地址**的 `send()`。
+///
+/// 影响面：仅当套接字处于已连接状态才会命中；多播上游（mDNS 等）刻意不 connect，
+/// 走的仍是原来的带地址发送，不受影响。
+#[cfg(unix)]
+fn is_eisconn(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EISCONN)
+}
+
+#[cfg(not(unix))]
+fn is_eisconn(_err: &io::Error) -> bool {
+    false
 }
 
 fn next_random_udp(bind_addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
@@ -1099,6 +1125,30 @@ mod p1_9_direct_udp_tests {
     use crate::libdns::proto::udp::DnsUdpSocket;
     use std::ops::Deref;
     use std::time::Duration;
+
+    /// macOS 回归点（CI 2026-09-18 实测）：直连 UDP 上游的套接字已被 `bind_udp()` connect 到上游，
+    /// 此时再按"带地址发送"调用 `send_to`，macOS / BSD 返回 EISCONN（errno 56），Linux / Windows 允许。
+    /// 这条用例走的正是上游查询的真实入口（内嵌 hickory 的 `udp/udp_client_stream.rs` 调的就是
+    /// `socket.send_to(bytes, addr)`）：修复前在 macOS 上必然失败，修复后各平台一致。
+    #[tokio::test]
+    async fn test_connected_socket_can_send_with_address() {
+        // 假上游（本机的一个 UDP 端口）
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+
+        // 客户端套接字：先 connect 到上游（等价于 bind_udp() 里的 P1-9 动作）
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(upstream_addr).await.unwrap();
+        let socket = UdpSocket::Tokio(client);
+
+        // 已连接的套接字上"带地址发送"：macOS 会报 EISCONN，交给 send_to 里的回退处理
+        let sent = socket.send_to(b"ping", upstream_addr).await.unwrap();
+        assert_eq!(sent, 4);
+
+        let mut buf = [0u8; 8];
+        let (len, _from) = upstream.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"ping");
+    }
 
     /// P1-9：直连 UDP 上游的套接字必须真的 connect ——
     /// 这样内核只放行该上游 IP + 端口发来的报文，杜绝伪造应答注入。
