@@ -85,7 +85,10 @@ const DEFAULT_CONF: &str = include_str!("../etc/smartdns/smartdns.conf");
 fn maximize_fd_limit() {
     // 🌟 核心修复：解除 Linux/macOS 默认的 1024 文件描述符并发封印，极大提升网络吞吐上限
     unsafe {
-        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 {
             rl.rlim_cur = rl.rlim_max; // 将软限制提升至硬限制
             if libc::setrlimit(libc::RLIMIT_NOFILE, &rl) != 0 {
@@ -128,11 +131,17 @@ impl Cli {
                 ..
             } => {
                 let pid_path = pid
-                    .or_else(|| directory.as_ref().map(|d| d.join("managed").join("smartdns.pid")))
+                    .or_else(|| {
+                        directory
+                            .as_ref()
+                            .map(|d| d.join("managed").join("smartdns.pid"))
+                    })
                     .unwrap_or_else(|| {
                         std::env::current_exe()
                             .ok()
-                            .and_then(|exe| exe.parent().map(|p| p.join("managed").join("smartdns.pid")))
+                            .and_then(|exe| {
+                                exe.parent().map(|p| p.join("managed").join("smartdns.pid"))
+                            })
                             .unwrap_or_else(|| std::env::temp_dir().join("smartdns.pid"))
                     });
 
@@ -160,7 +169,11 @@ impl Cli {
                         std::process::exit(1);
                     }
                     Err(err) => {
-                        error!("Failed to acquire PID lock at {}: {}. Another instance is likely running.", pid_path.display(), err);
+                        error!(
+                            "Failed to acquire PID lock at {}: {}. Another instance is likely running.",
+                            pid_path.display(),
+                            err
+                        );
                         std::process::exit(1);
                     }
                 };
@@ -235,9 +248,11 @@ impl Cli {
                                 // 🌟 核心修复：补上被遗漏的新状态分支，并输出友好的未安装提示！
                                 service::ServiceStatus::NotInstalled => {
                                     println!("\n❌ SmartDNS service is NOT installed.");
-                                    println!("💡 Hint: Install it via 'smartdns service install'\n");
+                                    println!(
+                                        "💡 Hint: Install it via 'smartdns service install'\n"
+                                    );
                                     None
-                                },
+                                }
                                 service::ServiceStatus::Unknown => None,
                             };
                             if let Some(out) = out {
@@ -271,11 +286,11 @@ impl Cli {
             }
             Commands::Test { directory, conf } => {
                 let cfg = RuntimeConfig::load(directory, conf);
-                
+
                 // 打印出解析到的配置摘要，让用户确信读取成功了
                 crate::hello_starting();
                 cfg.summary();
-                
+
                 // 🔐 用和真正启动时完全相同的一套检查：
                 // 配置自检说"通过"，就必须真的能启动——否则用户会被"✅ 通过"骗到，
                 // 等到重启服务时才发现起不来。
@@ -309,7 +324,10 @@ impl Cli {
                 }
 
                 if link.exists() {
-                    eprintln!("\x1b[33;1m[WARNING]\x1b[0m Symlink or file already exists at: {}", link.display());
+                    eprintln!(
+                        "\x1b[33;1m[WARNING]\x1b[0m Symlink or file already exists at: {}",
+                        link.display()
+                    );
                     return;
                 }
 
@@ -320,18 +338,28 @@ impl Cli {
                 let res = std::os::windows::fs::symlink_file(&original, &link);
 
                 match res {
-                    Ok(()) => println!("\x1b[32;1m[SUCCESS]\x1b[0m Symlink created: {} -> {}", link.display(), original.display()),
+                    Ok(()) => println!(
+                        "\x1b[32;1m[SUCCESS]\x1b[0m Symlink created: {} -> {}",
+                        link.display(),
+                        original.display()
+                    ),
                     Err(err) => {
                         // 🌟 修复暗坑二：拦截臭名昭著的 Win32 OS Error 1314！
                         // 不再扔出冰冷的报错，而是用大红字高亮引导用户去提权，彻底解决用户痛点！
                         #[cfg(windows)]
                         if err.raw_os_error() == Some(1314) {
-                            eprintln!("\x1b[31;1m[FATAL ERROR]\x1b[0m Privilege not held (OS Error 1314).");
-                            eprintln!("On Windows, creating symbolic links requires \x1b[31;1mAdministrator privileges\x1b[0m or enabling \x1b[32;1mDeveloper Mode\x1b[0m.");
-                            eprintln!("👉 \x1b[33mHint: Please right-click your terminal (PowerShell/CMD) and select 'Run as Administrator', then try again.\x1b[0m");
+                            eprintln!(
+                                "\x1b[31;1m[FATAL ERROR]\x1b[0m Privilege not held (OS Error 1314)."
+                            );
+                            eprintln!(
+                                "On Windows, creating symbolic links requires \x1b[31;1mAdministrator privileges\x1b[0m or enabling \x1b[32;1mDeveloper Mode\x1b[0m."
+                            );
+                            eprintln!(
+                                "👉 \x1b[33mHint: Please right-click your terminal (PowerShell/CMD) and select 'Run as Administrator', then try again.\x1b[0m"
+                            );
                             std::process::exit(1);
                         }
-                        
+
                         eprintln!("\x1b[31;1m[ERROR]\x1b[0m Failed to create symlink: {}", err);
                         std::process::exit(1);
                     }
@@ -411,8 +439,8 @@ impl RuntimeConfig {
 
 // 🌟 核心修复 1：加上 pub，让它对外可见
 pub mod signal {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
     // 🌟 核心修复 2：暴露出一个安全的、原生的内存关机通知器

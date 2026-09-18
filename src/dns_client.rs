@@ -94,9 +94,10 @@ impl DnsClientBuilder {
         let mut make_server = |server_config, resolver, dedup| {
             let entry = server_instances.entry(server_config);
             if let std::collections::hash_map::Entry::Occupied(_) = entry
-                && dedup {
-                    return None;
-                }
+                && dedup
+            {
+                return None;
+            }
             let server = entry.or_insert_with(|| {
                 let proxy = server_config
                     .proxy
@@ -422,7 +423,7 @@ mod name_server_group {
                 .map(|ns| GenericResolver::lookup(ns.as_ref(), name.clone(), options.clone()))
                 .collect::<Vec<_>>();
 
-			// 🌟 核心防御保护：拦截空任务列表，防止 select_all 触发 Panic 崩盘
+            // 🌟 核心防御保护：拦截空任务列表，防止 select_all 触发 Panic 崩盘
             if tasks.is_empty() {
                 return Err(crate::libdns::proto::ProtoErrorKind::NoConnections.into());
             }
@@ -461,7 +462,6 @@ mod name_server_group {
                 tasks = rest;
             }
         }
-
     }
 
     #[async_trait::async_trait]
@@ -704,15 +704,16 @@ mod name_server {
             let client_subnet = options.client_subnet.or(self.options().client_subnet);
 
             if options.client_subnet.is_none()
-                && let Some(subnet) = client_subnet.as_ref() {
-                    log::debug!(
-                        "query name: {} type: {} subnet: {}/{}",
-                        query.name(),
-                        query.query_type(),
-                        subnet.addr(),
-                        subnet.scope_prefix(),
-                    );
-                }
+                && let Some(subnet) = client_subnet.as_ref()
+            {
+                log::debug!(
+                    "query name: {} type: {} subnet: {}/{}",
+                    query.name(),
+                    query.query_type(),
+                    subnet.addr(),
+                    subnet.scope_prefix(),
+                );
+            }
 
             let request_options = {
                 let opts = &self.options();
@@ -773,9 +774,11 @@ mod name_server {
                 const TCP_FALLBACK_RETRY_DEADLINE: std::time::Duration =
                     std::time::Duration::from_millis(300);
 
-                let first =
-                    tokio::time::timeout(TCP_FALLBACK_DEADLINE, tcp.send(tcp_req.clone()).first_answer())
-                        .await;
+                let first = tokio::time::timeout(
+                    TCP_FALLBACK_DEADLINE,
+                    tcp.send(tcp_req.clone()).first_answer(),
+                )
+                .await;
 
                 // 先记下第一次为什么失败（只为日志），再把结果用掉
                 let first_why = match &first {
@@ -785,7 +788,9 @@ mod name_server {
                 };
 
                 if let Ok(Ok(full)) = first {
-                    debug!("{url}: udp response is truncated, retried over tcp and got a complete answer");
+                    debug!(
+                        "{url}: udp response is truncated, retried over tcp and got a complete answer"
+                    );
                     return Ok(From::<Message>::from(full.into()));
                 }
 
@@ -805,7 +810,9 @@ mod name_server {
                 .await
                 {
                     Ok(Ok(full)) => {
-                        debug!("{url}: udp response is truncated, tcp retry succeeded after first attempt failed ({first_why}), got a complete answer");
+                        debug!(
+                            "{url}: udp response is truncated, tcp retry succeeded after first attempt failed ({first_why}), got a complete answer"
+                        );
                         return Ok(From::<Message>::from(full.into()));
                     }
                     Ok(Err(err2)) => debug!(
@@ -871,9 +878,7 @@ mod name_server {
         // 为什么默认收窄：ECS 等于把客户端所在网段告诉上游，类型越多暴露越多；
         // 而且只有 A/AAAA 的答案真的会按网段挑节点。需要更精细的场景再打开这个开关。
         let use_subnet = match client_subnet {
-            Some(_) => {
-                matches!(qtype, RecordType::A | RecordType::AAAA) || subnet_all_query_types
-            }
+            Some(_) => matches!(qtype, RecordType::A | RecordType::AAAA) || subnet_all_query_types,
             None => false,
         };
 
@@ -965,8 +970,14 @@ mod name_server {
         /// 🔐 Q17：配了 `-subnet` 时，默认只有 A / AAAA 带 ECS（与 C 版默认一致）
         #[test]
         fn ecs_only_for_a_and_aaaa_by_default() {
-            assert!(has_subnet(&edns_of(RecordType::A, true, false, None)), "A 该带 ECS");
-            assert!(has_subnet(&edns_of(RecordType::AAAA, true, false, None)), "AAAA 该带 ECS");
+            assert!(
+                has_subnet(&edns_of(RecordType::A, true, false, None)),
+                "A 该带 ECS"
+            );
+            assert!(
+                has_subnet(&edns_of(RecordType::AAAA, true, false, None)),
+                "AAAA 该带 ECS"
+            );
             assert!(
                 !has_subnet(&edns_of(RecordType::TXT, true, false, None)),
                 "默认下 TXT 不该带 ECS"
@@ -990,7 +1001,11 @@ mod name_server {
         #[test]
         fn tcp_keepalive_is_written_as_edns_option_11() {
             let edns = edns_of(RecordType::A, false, false, Some(300));
-            assert_eq!(keepalive_data(&edns), Some(vec![0x01, 0x2c]), "300 = 0x012c 大端");
+            assert_eq!(
+                keepalive_data(&edns),
+                Some(vec![0x01, 0x2c]),
+                "300 = 0x012c 大端"
+            );
 
             // 即使没配 subnet、没开 edns，也要因为这个选项而带起 EDNS（否则选项发不出去）
             assert!(!has_subnet(&edns), "不该凭空多出 ECS");
@@ -1010,9 +1025,7 @@ mod name_server {
             assert_eq!(keepalive_data(&edns), None);
         }
     }
-
 }
-
 
 mod bootstrap {
     use super::*;
@@ -1053,9 +1066,14 @@ mod bootstrap {
 
             // 🌟 修复炸弹一：不仅要看有没有，还要看有没有过期！
             if let Some((valid_until, records)) = store.get(&query)
-                && Instant::now() < *valid_until {
-                    return Some(DnsResponse::new_with_deadline(query, records.to_vec(), *valid_until));
-                }
+                && Instant::now() < *valid_until
+            {
+                return Some(DnsResponse::new_with_deadline(
+                    query,
+                    records.to_vec(),
+                    *valid_until,
+                ));
+            }
             None
         }
     }
@@ -1067,7 +1085,7 @@ mod bootstrap {
                     // 🌟 核心修复：贯彻 Fail-Fast 原则，绝不静默兜底撒谎！
                     // 一旦读取系统网卡 DNS 失败，立刻大声报错并终止程序。
                     // 强迫用户直面网络配置问题，或引导其使用命令行参数显式指定。
-                    
+
                     // 使用 ANSI 转义码在控制台打印高亮的红、黄、绿色文本
                     // 🔐 B4：这里**不会退出**（P1-6 起已改成降级继续运行），所以不能再喊 FATAL ——
                     // 用户看到"致命错误"却发现服务照常跑，会以为出了更严重的问题。
@@ -1080,10 +1098,10 @@ mod bootstrap {
                          需要解析主机名的上游（DoH/DoT/DoQ）会失败，请显式指定 \
                          \x1b[32m-s 119.29.29.29\x1b[0m 或配置 `bootstrap-dns <ip>`。\n"
                     );
-                    
+
                     // 同时也记录到标准日志中，以防是作为后台服务运行时的静默崩溃
                     crate::log::error!("read system conf failed: {}", err);
-                    
+
                     // 🌟 P1-6 修复：这里原来是 `std::process::exit(1)`。
                     //
                     // 原来的行为有两个致命问题：
@@ -1158,22 +1176,22 @@ mod bootstrap {
                     );
 
                     // 🌟 【修复炸弹二】：护栏！只有拿到真实 IP，才允许存入账本！
-                if !records.is_empty() {
-                    let min_ttl = lookup.min_ttl().unwrap_or(60);
-                    let valid_until = Instant::now() + Duration::from_secs(min_ttl as u64);
+                    if !records.is_empty() {
+                        let min_ttl = lookup.min_ttl().unwrap_or(60);
+                        let valid_until = Instant::now() + Duration::from_secs(min_ttl as u64);
 
-                    self.ip_store.write().await.insert(
-                        Query::query(
-                            {
-                                let mut name = name.clone();
-                                name.set_fqdn(true);
-                                name
-                            },
-                            record_type,
-                        ),
-                        (valid_until, records.into()), 
-                    );
-                }
+                        self.ip_store.write().await.insert(
+                            Query::query(
+                                {
+                                    let mut name = name.clone();
+                                    name.set_fqdn(true);
+                                    name
+                                },
+                                record_type,
+                            ),
+                            (valid_until, records.into()),
+                        );
+                    }
 
                     Ok(lookup)
                 }
@@ -1277,8 +1295,8 @@ where
             Ipv4Only => self.lookup(name.clone(), RecordType::A).await,
             Ipv6Only => self.lookup(name.clone(), RecordType::AAAA).await,
             Ipv4AndIpv6 => {
-                use futures_util::future::select_all;
                 use futures_util::FutureExt;
+                use futures_util::future::select_all;
                 let mut tasks = vec![
                     self.lookup(name.clone(), RecordType::A).boxed(),
                     self.lookup(name.clone(), RecordType::AAAA).boxed(),
@@ -1286,12 +1304,12 @@ where
 
                 loop {
                     let (res, _, rest) = select_all(tasks).await;
-                    
+
                     // 🌟 修复炸弹一：只有拿到包含真实 IP 的包裹，才算赢得比赛！空包直接无视，等另一个！
                     if matches!(res.as_ref(), Ok(lookup) if !lookup.records().is_empty()) {
                         return res;
                     }
-                    
+
                     if rest.is_empty() {
                         return res; // 如果两个都不通或者都是空包，只能无奈认命返回
                     }
@@ -1323,7 +1341,7 @@ mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
 
-        #[tokio::test]
+    #[tokio::test]
     async fn test_with_default() {
         let client = DnsClient::builder().build().await;
         let lookup_ip = client
@@ -1381,7 +1399,7 @@ mod tests {
     }
 
     #[tokio::test]
-        #[cfg(feature = "dns-over-tls")]
+    #[cfg(feature = "dns-over-tls")]
     async fn test_nameserver_tls_resolve() {
         let urls = [
             DnsUrl::from_str("tls://dns.google?enable_sni=false").unwrap(),
@@ -1407,7 +1425,7 @@ mod tests {
     }
 
     #[tokio::test]
-        #[cfg(feature = "dns-over-https")]
+    #[cfg(feature = "dns-over-https")]
     async fn test_nameserver_https_resolve() {
         let urls = [
             DnsUrl::from_str("https://dns.cloudflare.com/dns-query").unwrap(),
@@ -1477,7 +1495,7 @@ mod tests {
         assert!(results.into_iter().all(|r| r));
     }
 
-        #[tokio::test]
+    #[tokio::test]
     async fn test_nameserver_cloudflare_resolve() {
         let dns_urls = CLOUDFLARE
             .ips
@@ -1491,7 +1509,7 @@ mod tests {
         assert!(query_alidns(&client).await);
     }
 
-        #[tokio::test]
+    #[tokio::test]
     async fn test_nameserver_alidns_resolve() {
         let dns_urls = ALIDNS
             .ips

@@ -89,20 +89,32 @@ mod plist_tests {
             "/opt/homebrew/sbin/smartdns",
             "/opt/homebrew/etc/smartdns/smartdns.conf",
         );
-        assert!(plist.contains("<string>/opt/homebrew/sbin/smartdns</string>"), "{plist}");
+        assert!(
+            plist.contains("<string>/opt/homebrew/sbin/smartdns</string>"),
+            "{plist}"
+        );
         assert!(
             plist.contains("<string>/opt/homebrew/etc/smartdns/smartdns.conf</string>"),
             "{plist}"
         );
         // 🌟 P1-8 的回归点：不能再有任何写死的 /usr/local（Apple Silicon 上它不存在）
-        assert!(!plist.contains("/usr/local"), "plist 不应再写死 /usr/local：{plist}");
+        assert!(
+            !plist.contains("/usr/local"),
+            "plist 不应再写死 /usr/local：{plist}"
+        );
     }
 
     #[test]
     fn launchd_plist_keeps_the_original_shape() {
-        let plist = render_launchd_plist("/usr/local/sbin/smartdns", "/usr/local/etc/smartdns/smartdns.conf");
+        let plist = render_launchd_plist(
+            "/usr/local/sbin/smartdns",
+            "/usr/local/etc/smartdns/smartdns.conf",
+        );
         // 老 Intel Mac 路径仍可用
-        assert!(plist.contains("<string>/usr/local/sbin/smartdns</string>"), "{plist}");
+        assert!(
+            plist.contains("<string>/usr/local/sbin/smartdns</string>"),
+            "{plist}"
+        );
         // 其余关键项与被替换掉的静态文件保持一致
         assert!(plist.contains("<string>smartdns-rs</string>"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key>"), "{plist}");

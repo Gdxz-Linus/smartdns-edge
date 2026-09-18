@@ -6,8 +6,8 @@ use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -27,9 +27,9 @@ use crate::{
     middleware::*,
 };
 use lru::LruCache;
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
-use std::sync::Mutex;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +50,14 @@ pub struct DnsCacheMiddleware {
     cfg: Arc<RuntimeConfig>,
     cache: Arc<DnsCache>,
     client: DnsHandle,
-    inflight: Arc<Mutex<std::collections::HashMap<CacheKey, tokio::sync::broadcast::Sender<Option<DnsResponse>>>>>,
+    inflight: Arc<
+        Mutex<
+            std::collections::HashMap<
+                CacheKey,
+                tokio::sync::broadcast::Sender<Option<DnsResponse>>,
+            >,
+        >,
+    >,
 }
 
 impl DnsCacheMiddleware {
@@ -69,16 +76,20 @@ impl DnsCacheMiddleware {
             if cache_file.exists() {
                 let cache_clone = cache.clone();
                 let path = cache_file.to_path_buf();
-                
+
                 // 🌟 核心防御：捕获子线程可能的 Panic 崩溃！
                 // 绝对不允许一个损坏的缓存文件，把整个 DNS 服务给拖垮！
                 let res = std::thread::spawn(move || {
                     cache_clone.load_cache(path.as_path());
-                }).join();
+                })
+                .join();
 
                 if let Err(e) = res {
                     // 如果子线程读取因为文件损坏而当场崩溃了，我们把它拦截下来，打一条红字警告！
-                    crate::log::error!("🔥 FATAL: Cache file corrupted or read panic: {:?}. Ignoring old cache and starting fresh!", e);
+                    crate::log::error!(
+                        "🔥 FATAL: Cache file corrupted or read panic: {:?}. Ignoring old cache and starting fresh!",
+                        e
+                    );
                     // 🔐 P2：坏档**不再直接删除** —— 改名存档（只留最近 1 份），方便用户排查后再清
                     let _ = archive_cache_file(&cache_file, "load-panic");
                 }
@@ -97,8 +108,12 @@ impl DnsCacheMiddleware {
             inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
-	
-    pub fn with_cache(cfg: &Arc<RuntimeConfig>, dns_handle: DnsHandle, cache: Arc<DnsCache>) -> Self {
+
+    pub fn with_cache(
+        cfg: &Arc<RuntimeConfig>,
+        dns_handle: DnsHandle,
+        cache: Arc<DnsCache>,
+    ) -> Self {
         // 🔐 P2：热重载时缓存策略必须跟着换 —— 原来直接复用旧 DnsCache，
         // 改完 serve-expired / cache-persist / cache-size 之后一部分生效一部分不生效。
         cache.reload_config(cfg);
@@ -116,7 +131,9 @@ impl DnsCacheMiddleware {
             if cache_file.exists() {
                 let cache_for_load = cache.clone();
                 // 运行期读档不拖住重载本身：丢给阻塞线程池去做
-                tokio::task::spawn_blocking(move || cache_for_load.load_cache_only_missing(&cache_file));
+                tokio::task::spawn_blocking(move || {
+                    cache_for_load.load_cache_only_missing(&cache_file)
+                });
             }
         }
 
@@ -142,10 +159,7 @@ impl DnsCacheMiddleware {
             None
         };
 
-        let mut slot = cache
-            .persist_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut slot = cache.persist_task.lock().unwrap_or_else(|e| e.into_inner());
         let current: Option<(PathBuf, u64)> =
             slot.as_ref().map(|t| (t.file.clone(), t.checkpoint_secs));
 
@@ -200,7 +214,11 @@ impl DnsCacheMiddleware {
         }
     }
 
-    fn spawn_background_tasks(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>, client_handle: DnsHandle) {
+    fn spawn_background_tasks(
+        cfg: &Arc<RuntimeConfig>,
+        cache: &Arc<DnsCache>,
+        client_handle: DnsHandle,
+    ) {
         // 🔐 A8（2026-09-17）：周期落盘任务改由 `sync_persist_task` 统一管理 ——
         // 启动时按配置建一个，热重载时按新配置停掉/重建（原来是在这里一次性建死，
         // 于是运行期改 cache-persist / cache-file / cache-checkpoint-time 全都半生效）。
@@ -215,7 +233,10 @@ impl DnsCacheMiddleware {
                 if let Some(cache_clone) = gc_cache_weak.upgrade() {
                     let purged = cache_clone.purge_dead_records(Instant::now()).await;
                     if purged > 0 {
-                        log::info!("Cache GC: purged {} totally dead records from memory", purged);
+                        log::info!(
+                            "Cache GC: purged {} totally dead records from memory",
+                            purged
+                        );
                     }
                 } else {
                     break;
@@ -276,7 +297,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
         let flatten_cname = |lookup: &mut DnsResponse, query: &Query| {
             if query.query_type().is_ip_addr() {
                 let target_type = query.query_type();
-                let has_target = lookup.answers().iter().any(|r| r.record_type() == target_type);
+                let has_target = lookup
+                    .answers()
+                    .iter()
+                    .any(|r| r.record_type() == target_type);
 
                 if has_target {
                     let original_name = query.name().clone();
@@ -284,7 +308,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                     let real_min_ttl = lookup.answers().iter().map(|r| r.ttl()).min().unwrap_or(60);
 
                     // 清理门户：干掉 CNAME，只留下终点 IP
-                    lookup.answers_mut().retain(|record| record.record_type() == target_type);
+                    lookup
+                        .answers_mut()
+                        .retain(|record| record.record_type() == target_type);
 
                     // 移花接木：把终点 IP 的 Name 强行改成用户最初请求的主域名
                     for record in lookup.answers_mut() {
@@ -310,7 +336,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
         }
 
         // 🌟 提取 EDNS0 ECS 子网信息
-        let ecs_str = req.extensions()
+        let ecs_str = req
+            .extensions()
             .as_ref()
             .and_then(|edns| edns.option(crate::libdns::proto::rr::rdata::opt::EdnsCode::Subnet))
             .and_then(|opt| match opt {
@@ -321,7 +348,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 }
                 _ => None,
             })
-            .or_else(|| ctx.domain_rule.get_ref(|r| r.subnet.as_ref()).map(|s| format!("{}/{}", s.addr(), s.source_prefix())));
+            .or_else(|| {
+                ctx.domain_rule
+                    .get_ref(|r| r.subnet.as_ref())
+                    .map(|s| format!("{}/{}", s.addr(), s.source_prefix()))
+            });
 
         let cache_key = CacheKey {
             query: req.query().original().to_owned(),
@@ -351,7 +382,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 Some((res, status)) => {
                     match status {
                         CacheStatus::Valid => {
-                            debug!("name: {} {} using caching (ECS: {:?})", cache_key.query.name(), cache_key.query.query_type(), cache_key.ecs);
+                            debug!(
+                                "name: {} {} using caching (ECS: {:?})",
+                                cache_key.query.name(),
+                                cache_key.query.query_type(),
+                                cache_key.ecs
+                            );
                             ctx.source = LookupFrom::Cache;
                             return Ok(res);
                         }
@@ -360,14 +396,19 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                 // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
                                 let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl());
                                 let sync_valid_until = Instant::now() + reply_ttl;
-                                
-                                self.cache.set_valid_until_for_prefetch(&cache_key, sync_valid_until).await;
 
-                                let mut guards = vec![PrefetchGuard { cache: self.cache.clone(), key: cache_key.clone() }];
+                                self.cache
+                                    .set_valid_until_for_prefetch(&cache_key, sync_valid_until)
+                                    .await;
+
+                                let mut guards = vec![PrefetchGuard {
+                                    cache: self.cache.clone(),
+                                    key: cache_key.clone(),
+                                }];
                                 let mut opts = ctx.server_opts.clone();
                                 opts.is_background = true;
                                 let client = self.client.with_new_opt(opts);
-                                
+
                                 if cache_key.query.query_type().is_ip_addr() {
                                     let other_type = match cache_key.query.query_type() {
                                         RecordType::A => RecordType::AAAA,
@@ -382,49 +423,71 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                         }
                                     };
                                     let other_key = CacheKey {
-                                        query: Query::query(cache_key.query.name().clone(), other_type),
+                                        query: Query::query(
+                                            cache_key.query.name().clone(),
+                                            other_type,
+                                        ),
                                         group: cache_key.group.clone(),
                                         ecs: cache_key.ecs.clone(),
                                         opts: cache_key.opts.clone(),
                                     };
-                                    
+
                                     if self.cache.mark_prefetching(&other_key).await {
                                         // 🌟 核心修复 4：双栈兄弟使用完全一样的基准时间戳，绝对对齐！
-                                        self.cache.set_valid_until_for_prefetch(&other_key, sync_valid_until).await;
-                                        guards.push(PrefetchGuard { cache: self.cache.clone(), key: other_key });
+                                        self.cache
+                                            .set_valid_until_for_prefetch(
+                                                &other_key,
+                                                sync_valid_until,
+                                            )
+                                            .await;
+                                        guards.push(PrefetchGuard {
+                                            cache: self.cache.clone(),
+                                            key: other_key,
+                                        });
                                     }
                                 }
 
                                 let client_clone = client.clone();
                                 let self_key = cache_key.clone();
                                 tokio::spawn(async move {
-                                    let _guards = guards; 
+                                    let _guards = guards;
                                     let mut msg = Message::query();
                                     msg.add_query(self_key.query);
                                     client_clone.send(msg).await;
                                 });
-                                
+
                                 // 🌟 统一公式：触发者也老老实实算时间！同样向上取整！
                                 let mut resurrected_res = res;
-                                let ttl_duration = sync_valid_until.saturating_duration_since(Instant::now());
+                                let ttl_duration =
+                                    sync_valid_until.saturating_duration_since(Instant::now());
                                 let mut actual_ttl = ttl_duration.as_secs() as u32;
                                 if ttl_duration.subsec_nanos() > 0 {
                                     actual_ttl += 1;
                                 }
                                 resurrected_res.set_new_ttl(actual_ttl);
-                                
-                                debug!("name: {} {} using caching (Expired) (ECS: {:?})", cache_key.query.name(), cache_key.query.query_type(), cache_key.ecs);
+
+                                debug!(
+                                    "name: {} {} using caching (Expired) (ECS: {:?})",
+                                    cache_key.query.name(),
+                                    cache_key.query.query_type(),
+                                    cache_key.ecs
+                                );
                                 ctx.source = LookupFrom::Cache;
-                                return Ok(resurrected_res); 
+                                return Ok(resurrected_res);
                             }
 
                             // 极小概率兜底：如果有其他并发已经拿了预取锁，但时间戳还未更新完毕
                             let reply_ttl_secs = self.cache.expired_reply_ttl() as u32;
                             let mut fallback_res = res;
                             fallback_res.set_new_ttl(reply_ttl_secs);
-                            debug!("name: {} {} using caching (Expired) (ECS: {:?})", cache_key.query.name(), cache_key.query.query_type(), cache_key.ecs);
+                            debug!(
+                                "name: {} {} using caching (Expired) (ECS: {:?})",
+                                cache_key.query.name(),
+                                cache_key.query.query_type(),
+                                cache_key.ecs
+                            );
                             ctx.source = LookupFrom::Cache;
-                            return Ok(fallback_res); 
+                            return Ok(fallback_res);
                         }
                         // 明确不要过期数据（全局 serve-expired no / 域名级 no-serve-expired）：
                         // 就地丢弃 —— 上游失败时也不拿它兜底（用户定调）。
@@ -439,11 +502,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
         let rx = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(tx) = map.get(&cache_key) {
-                Some(tx.subscribe()) 
+                Some(tx.subscribe())
             } else {
                 let (tx, _) = tokio::sync::broadcast::channel(1);
                 map.insert(cache_key.clone(), tx);
-                None 
+                None
             }
         };
 
@@ -479,7 +542,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             cache_key.query.query_type()
                         );
                     } else {
-                        self.cache.insert_full_response(cache_key.clone(), lookup.clone(), Instant::now()).await;
+                        self.cache
+                            .insert_full_response(cache_key.clone(), lookup.clone(), Instant::now())
+                            .await;
                     }
 
                     // 🌟 完美收取双栈探针带回的战利品，同样组装完整 CacheKey
@@ -488,7 +553,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         // 🚨 核心防线：双栈淘汰带回来的“副包裹”也要展平后再入库！
                         // 否则冰柜里会混入带有 CNAME 的脏数据！
                         flatten_cname(&mut extra_resp, &extra_query);
-                        
+
                         let extra_key = CacheKey {
                             query: extra_query,
                             group: ctx.server_group_name().to_string(), // 现在可以畅通无阻地读取 ctx 了
@@ -502,20 +567,24 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                 extra_key.query.query_type()
                             );
                         } else {
-                            self.cache.insert_full_response(extra_key, extra_resp, Instant::now()).await;
+                            self.cache
+                                .insert_full_response(extra_key, extra_resp, Instant::now())
+                                .await;
                         }
                     }
 
                     // 截断包没有进缓存，也就没有"到期再预取"这回事
                     if !lookup.truncated()
                         && ctx.cfg().prefetch_domain()
-                        && let Some(ttl) = lookup.min_ttl() {
-                            self.cache.prefetch_notify
-                                .notify_after(Duration::from_secs(ttl as u64))
-                                .await;
-                        }
+                        && let Some(ttl) = lookup.min_ttl()
+                    {
+                        self.cache
+                            .prefetch_notify
+                            .notify_after(Duration::from_secs(ttl as u64))
+                            .await;
+                    }
                 }
-                
+
                 {
                     let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(tx) = map.remove(&cache_key) {
@@ -611,10 +680,7 @@ enum PersistAction {
     /// 配置里关掉了持久化 → 停掉任务
     Stop,
     /// 没任务 → 建一个；路径或节拍变了 → 停掉重建
-    Restart {
-        file: PathBuf,
-        checkpoint_secs: u64,
-    },
+    Restart { file: PathBuf, checkpoint_secs: u64 },
 }
 
 /// 🔐 A8：比对"现在这个任务"和"配置想要的"，得出该做什么。
@@ -646,15 +712,16 @@ fn persist_action(current: Option<(&Path, u64)>, want: Option<(&Path, u64)>) -> 
 fn prefetch_query_for(key: &CacheKey) -> Message {
     let mut msg = Message::query();
     msg.add_query(key.query.clone());
-    if let Some(subnet) = key
-        .ecs
-        .as_deref()
-        .and_then(|s| s.parse::<crate::libdns::proto::rr::rdata::opt::ClientSubnet>().ok())
-    {
+    if let Some(subnet) = key.ecs.as_deref().and_then(|s| {
+        s.parse::<crate::libdns::proto::rr::rdata::opt::ClientSubnet>()
+            .ok()
+    }) {
         msg.extensions_mut()
             .get_or_insert_with(crate::libdns::proto::op::Edns::new)
             .options_mut()
-            .insert(crate::libdns::proto::rr::rdata::opt::EdnsOption::Subnet(subnet));
+            .insert(crate::libdns::proto::rr::rdata::opt::EdnsOption::Subnet(
+                subnet,
+            ));
     }
     msg
 }
@@ -719,7 +786,10 @@ fn spawn_prefetch_task(cache: &Arc<DnsCache>, client_handle: DnsHandle) -> Cance
 
                         let msg = prefetch_query_for(&cache_key);
                         tokio::spawn(async move {
-                            let _guard = PrefetchGuard { cache: cache_clone, key: cache_key.clone() };
+                            let _guard = PrefetchGuard {
+                                cache: cache_clone,
+                                key: cache_key.clone(),
+                            };
                             req_client.send(msg).await;
                         });
                     }
@@ -795,7 +865,7 @@ pub struct DnsCache {
     persist_task: Mutex<Option<PersistTask>>,
     /// 🔐 当前这个域名预取任务的取消牌（`None` = 没有任务，即预取关着）
     prefetch_task: Mutex<Option<CancellationToken>>,
-    pub prefetch_notify: Arc<DomainPrefetchingNotify>, 
+    pub prefetch_notify: Arc<DomainPrefetchingNotify>,
 }
 
 impl DnsCache {
@@ -815,8 +885,8 @@ impl DnsCache {
         }
 
         Self {
-            persist_task: Mutex::new(None),   // 🔐 A8：任务由 sync_persist_task 建，这里只是占位
-            prefetch_task: Mutex::new(None),  // 🔐 任务由 sync_prefetch_task 建
+            persist_task: Mutex::new(None), // 🔐 A8：任务由 sync_persist_task 建，这里只是占位
+            prefetch_task: Mutex::new(None), // 🔐 任务由 sync_prefetch_task 建
             shards: Arc::new(shards),
             serve_expired: AtomicBool::new(serve_expired),
             expired_ttl: AtomicU64::new(expired_ttl),
@@ -873,8 +943,8 @@ impl DnsCache {
 
     #[inline]
     fn get_shard(&self, key: &CacheKey) -> &Mutex<LruCache<CacheKey, DnsCacheEntry>> {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let idx = (hasher.finish() as usize) & (SHARD_COUNT - 1);
@@ -888,26 +958,39 @@ impl DnsCache {
     }
 
     pub async fn mark_prefetching(&self, key: &CacheKey) -> bool {
-        let mut cache = self.get_shard(key).lock().unwrap_or_else(|e| e.into_inner()); 
+        let mut cache = self
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get_mut(key) {
-            if entry.is_in_prefetching { return false; }
+            if entry.is_in_prefetching {
+                return false;
+            }
             entry.is_in_prefetching = true;
         }
         true
     }
-	
-	// 🌟 核心修复 2：改为接收外部绝对基准时间，确保双栈微秒级一致！
+
+    // 🌟 核心修复 2：改为接收外部绝对基准时间，确保双栈微秒级一致！
     pub async fn set_valid_until_for_prefetch(&self, key: &CacheKey, new_valid_until: Instant) {
-        let mut cache = self.get_shard(key).lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get_mut(key)
-            && entry.valid_until < new_valid_until {
-                entry.valid_until = new_valid_until;
-            }
+            && entry.valid_until < new_valid_until
+        {
+            entry.valid_until = new_valid_until;
+        }
     }
 
     pub async fn purge_dead_records(&self, now: Instant) -> usize {
         let mut count = 0;
-        let grace_period = if self.serve_expired() { Duration::from_secs(self.expired_ttl()) } else { Duration::ZERO };
+        let grace_period = if self.serve_expired() {
+            Duration::from_secs(self.expired_ttl())
+        } else {
+            Duration::ZERO
+        };
 
         for shard in self.shards.iter() {
             {
@@ -919,14 +1002,20 @@ impl DnsCache {
                     }
                 }
                 count += to_remove.len();
-                for q in to_remove { cache.pop(&q); }
+                for q in to_remove {
+                    cache.pop(&q);
+                }
             }
             tokio::task::yield_now().await;
         }
         count
     }
 
-    pub async fn cached_records_paginated(&self, offset: usize, limit: usize) -> (usize, Vec<CachedQueryRecord>) {
+    pub async fn cached_records_paginated(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> (usize, Vec<CachedQueryRecord>) {
         let mut total = 0;
         let mut records = Vec::new();
         let mut current_offset = 0;
@@ -937,11 +1026,11 @@ impl DnsCache {
 
             for (key, entry) in cache.iter() {
                 if records.len() >= limit {
-                    continue; 
+                    continue;
                 }
                 if current_offset < offset {
                     current_offset += 1;
-                    continue; 
+                    continue;
                 }
                 records.push(CachedQueryRecord {
                     name: key.query.name().clone(),
@@ -957,18 +1046,39 @@ impl DnsCache {
         (total, records)
     }
 
-    pub async fn insert_full_response(&self, key: CacheKey, response: DnsResponse, now: Instant) -> DnsResponse {
+    pub async fn insert_full_response(
+        &self,
+        key: CacheKey,
+        response: DnsResponse,
+        now: Instant,
+    ) -> DnsResponse {
         let mut min_ttl = MAX_TTL;
 
         if !response.answers().is_empty() {
-            let ans_ttl = response.answers().iter().map(|r| r.ttl()).min().unwrap_or(60);
+            let ans_ttl = response
+                .answers()
+                .iter()
+                .map(|r| r.ttl())
+                .min()
+                .unwrap_or(60);
             min_ttl = min_ttl.min(ans_ttl);
         } else {
-            let soa_record = response.message().authorities().iter().find(|r| r.record_type() == RecordType::SOA)
-                .or_else(|| response.answers().iter().find(|r| r.record_type() == RecordType::SOA));
+            let soa_record = response
+                .message()
+                .authorities()
+                .iter()
+                .find(|r| r.record_type() == RecordType::SOA)
+                .or_else(|| {
+                    response
+                        .answers()
+                        .iter()
+                        .find(|r| r.record_type() == RecordType::SOA)
+                });
             if let Some(soa) = soa_record {
                 let mut negative_ttl = soa.ttl();
-                if let RData::SOA(soa_data) = soa.data() { negative_ttl = negative_ttl.min(soa_data.minimum()); }
+                if let RData::SOA(soa_data) = soa.data() {
+                    negative_ttl = negative_ttl.min(soa_data.minimum());
+                }
                 min_ttl = min_ttl.min(negative_ttl);
             } else {
                 min_ttl = 5;
@@ -978,15 +1088,15 @@ impl DnsCache {
 
         let valid_until = now + Duration::from_secs(min_ttl as u64);
         let mut cache_resp = response.clone();
-        
+
         // 🌟 将组名刻印进 Response
         cache_resp = cache_resp.with_name_server_group(key.group.clone());
         cache_resp = cache_resp.with_valid_until(valid_until);
         cache_resp.set_new_ttl(min_ttl);
 
         // 🌟 核心优化：同步直接写入分段锁缓存（耗时 <0.05微秒），保障时序一致性（Read-After-Write）
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let idx = (hasher.finish() as usize) & (SHARD_COUNT - 1);
@@ -996,7 +1106,7 @@ impl DnsCache {
             entry.data = cache_resp.clone();
             entry.valid_until = valid_until;
             entry.is_in_prefetching = false;
-            entry.stats.hits = 1; 
+            entry.stats.hits = 1;
         } else {
             cache.put(
                 key.clone(),
@@ -1014,7 +1124,10 @@ impl DnsCache {
     }
 
     async fn get(&self, key: &CacheKey, now: Instant) -> Option<(DnsResponse, CacheStatus)> {
-        let mut cache = self.get_shard(key).lock().unwrap_or_else(|e| e.into_inner()); 
+        let mut cache = self
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.get_mut(key).map(|value| {
             value.stats.hit();
             let mut res = value.data.clone();
@@ -1034,7 +1147,11 @@ impl DnsCache {
     }
 
     // 🌟 返回类型变更为精准的 CacheKey
-    async fn get_expired(&self, now: Instant, seconds_ahead: Option<u64>) -> (Vec<CacheKey>, Duration) {
+    async fn get_expired(
+        &self,
+        now: Instant,
+        seconds_ahead: Option<u64>,
+    ) -> (Vec<CacheKey>, Duration) {
         let mut most_recent = Duration::from_secs(MAX_TTL as u64);
         let mut to_prefetch = std::collections::HashMap::new();
         let ahead_secs = seconds_ahead.unwrap_or(5);
@@ -1042,23 +1159,34 @@ impl DnsCache {
         for shard in self.shards.iter() {
             {
                 let mut cache = shard.lock().unwrap_or_else(|e| e.into_inner());
-                if cache.is_empty() { continue; }
+                if cache.is_empty() {
+                    continue;
+                }
 
                 for (key, entry) in cache.iter_mut() {
-                    if entry.is_in_prefetching { continue; }
-                    if !key.query.query_type().is_ip_addr() { continue; }
+                    if entry.is_in_prefetching {
+                        continue;
+                    }
+                    if !key.query.query_type().is_ip_addr() {
+                        continue;
+                    }
 
                     let is_frequent = entry.stats.hits >= 2;
 
                     if self.serve_expired() {
                         if entry.is_current(now) {
                             most_recent = most_recent.min(entry.ttl(now));
-                            continue; 
+                            continue;
                         }
                         if self.expired_prefetch_time() > 0 {
-                            let expired_for = now.saturating_duration_since(entry.valid_until).as_secs();
-                            if expired_for < self.expired_prefetch_time() { continue; }
-                            if !is_frequent { continue; }
+                            let expired_for =
+                                now.saturating_duration_since(entry.valid_until).as_secs();
+                            if expired_for < self.expired_prefetch_time() {
+                                continue;
+                            }
+                            if !is_frequent {
+                                continue;
+                            }
                         } else if !is_frequent {
                             continue;
                         }
@@ -1066,19 +1194,21 @@ impl DnsCache {
                         let prefetch_now = now + Duration::from_secs(ahead_secs);
                         if entry.is_current(prefetch_now) {
                             most_recent = most_recent.min(entry.ttl(now));
-                            continue; 
+                            continue;
                         }
-                        if !is_frequent { continue; }
+                        if !is_frequent {
+                            continue;
+                        }
                     }
 
                     entry.is_in_prefetching = true;
                     entry.stats.hits = entry.stats.hits.saturating_sub(1);
-                    
+
                     // 🌟 保持 CacheKey 的原汁原味，不丢失 RecordType 和 ECS 信息
                     let current_hits = to_prefetch.get(key).copied().unwrap_or(0);
                     to_prefetch.insert(key.clone(), std::cmp::max(current_hits, entry.stats.hits));
                 }
-            } 
+            }
 
             tokio::task::yield_now().await;
         }
@@ -1099,7 +1229,11 @@ impl DnsCache {
             // 临时名带 PID：多个实例各写各的，不再互相踩（进程内由上面的锁串行）
             let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
 
-            let mut file = File::options().create(true).truncate(true).write(true).open(&tmp_path)?;
+            let mut file = File::options()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp_path)?;
 
             // 🔐 P2：先写文件头（魔数 + 格式版本 + 条目数）——
             // 以后读到不认识的版本，就能明确说"版本不兼容"，而不是含混的"可能损坏"。
@@ -1111,7 +1245,10 @@ impl DnsCache {
                 let mut shard_buffer = Vec::new();
                 {
                     let cache = shard.lock().unwrap_or_else(|e| e.into_inner());
-                    DnsCacheEntry::serialize_many(cache.iter().map(|(_, entry)| entry), &mut shard_buffer)?;
+                    DnsCacheEntry::serialize_many(
+                        cache.iter().map(|(_, entry)| entry),
+                        &mut shard_buffer,
+                    )?;
                 }
 
                 std::io::Write::write_all(&mut file, &shard_buffer)?;
@@ -1156,14 +1293,17 @@ impl DnsCache {
 
         match cache_to_file() {
             Ok(_) => {
-                info!("save DNS cache to file \"{}\" successfully.", path.display());
+                info!(
+                    "save DNS cache to file \"{}\" successfully.",
+                    path.display()
+                );
                 // 顺手清掉历史遗留的固定名临时档（旧版本用的是 `.tmp`）
                 let _ = std::fs::remove_file(path.with_extension("tmp"));
             }
             Err(err) => error!("failed to save DNS cache to file {}", err),
         }
     }
-	
+
     /// 启动时读档：文件里的条目**覆盖**内存（启动时内存本来就是空的，这是正常路径）。
     pub fn load_cache(&self, path: &Path) {
         self.load_cache_impl(path, false)
@@ -1180,13 +1320,13 @@ impl DnsCache {
         let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         #[allow(unused_mut)]
         let mut display_str = display_path.to_string_lossy().to_string();
-        
+
         // 🌟 终极清洗：剥离 Windows 丑陋的 UNC 长路径前缀 (\\?\)
         #[cfg(windows)]
         if display_str.starts_with("\\\\?\\") {
             display_str = display_str[4..].to_string();
         }
-        
+
         info!("reading DNS cache from file: {}", display_str);
         let now = Instant::now();
 
@@ -1241,7 +1381,9 @@ impl DnsCache {
                 "缓存文件 {} 读取中断：{}（文件声明 {} 条，已挽救 {} 条）—— **未删除**，已改名存档为 {}",
                 display_str,
                 err,
-                declared.map(|c| c.to_string()).unwrap_or_else(|| "未知".to_string()),
+                declared
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "未知".to_string()),
                 entries.len(),
                 archived
                     .as_ref()
@@ -1263,19 +1405,26 @@ impl DnsCache {
                     entry.valid_until = now - (offline_duration - remaining);
                 }
             } else {
-                entry.valid_until -= offline_duration; 
+                entry.valid_until -= offline_duration;
             }
 
             let query = entry.data.query().clone();
-            let group = entry.data.name_server_group().unwrap_or("default").to_string();
+            let group = entry
+                .data
+                .name_server_group()
+                .unwrap_or("default")
+                .to_string();
             let key = CacheKey {
                 query,
                 group,
                 ecs: entry.ecs.clone(),
                 opts: entry.opts.clone(),
             };
-            
-            let mut cache = self.get_shard(&key).lock().unwrap_or_else(|e| e.into_inner());
+
+            let mut cache = self
+                .get_shard(&key)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if only_missing && cache.peek(&key).is_some() {
                 // 🔐 A8：内存里已经有这个条目了（运行期刚查到的更新答案）→ 不覆盖
                 skipped += 1;
@@ -1302,7 +1451,10 @@ impl DnsCache {
     }
 
     pub fn total_len(&self) -> usize {
-        self.shards.iter().map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len()).sum()
+        self.shards
+            .iter()
+            .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .sum()
     }
 }
 
@@ -1384,7 +1536,10 @@ fn is_our_archive(file_name: &str, candidate: &str) -> bool {
         // 末尾是 `YYYYMMDD-HHMMSS`
         let stamp = &rest[rest.len() - 15..];
         let b = stamp.as_bytes();
-        b[8] == b'-' && b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit())
+        b[8] == b'-'
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| i == 8 || c.is_ascii_digit())
     }
 }
 
@@ -1410,25 +1565,26 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
     // `{缓存文件名}.{corrupt|load-panic|vN-incompatible}-YYYYMMDD-HHMMSS`，
     // 并且每次清理都在日志里点名删了哪个文件。
     if let Some(dir) = path.parent()
-        && let Ok(entries) = std::fs::read_dir(dir) {
-            let mut siblings: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p != &archived
-                        && p.file_name()
-                            .map(|n| is_our_archive(&file_name, &n.to_string_lossy()))
-                            .unwrap_or(false)
-                })
-                .collect();
-            siblings.sort();
-            for old in &siblings {
-                match std::fs::remove_file(old) {
-                    Ok(()) => info!("清理旧缓存存档：{}", old.display()),
-                    Err(err) => crate::log::warn!("清理旧缓存存档失败 {}：{}", old.display(), err),
-                }
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        let mut siblings: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p != &archived
+                    && p.file_name()
+                        .map(|n| is_our_archive(&file_name, &n.to_string_lossy()))
+                        .unwrap_or(false)
+            })
+            .collect();
+        siblings.sort();
+        for old in &siblings {
+            match std::fs::remove_file(old) {
+                Ok(()) => info!("清理旧缓存存档：{}", old.display()),
+                Err(err) => crate::log::warn!("清理旧缓存存档失败 {}：{}", old.display(), err),
             }
         }
+    }
 
     Some(archived)
 }
@@ -1495,7 +1651,7 @@ impl<T> DnsCacheEntry<T> {
 struct DnsCacheStats {
     hits: usize,
     last_access: DateTime<Local>,
-	last_access_ins: std::time::Instant,
+    last_access_ins: std::time::Instant,
 }
 
 impl DnsCacheStats {
@@ -1503,7 +1659,7 @@ impl DnsCacheStats {
         Self {
             hits: 0,
             last_access: Local::now(),
-			last_access_ins: std::time::Instant::now(),
+            last_access_ins: std::time::Instant::now(),
         }
     }
 
@@ -1607,13 +1763,15 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
         let mut ecs = None;
         if let Ok(tag) = decoder.read_u8()
             && tag.unverified() == 6
-                && let Ok(len) = decoder.read_u16() {
-                    let len = len.unverified();
-                    if len > 0
-                        && let Ok(bytes) = decoder.read_slice(len as usize) {
-                            ecs = String::from_utf8(bytes.unverified().to_vec()).ok();
-                        }
-                }
+            && let Ok(len) = decoder.read_u16()
+        {
+            let len = len.unverified();
+            if len > 0
+                && let Ok(bytes) = decoder.read_slice(len as usize)
+            {
+                ecs = String::from_utf8(bytes.unverified().to_vec()).ok();
+            }
+        }
 
         // 🌟 读取"会影响答案的监听级选项"（v2 新增，tag 7）。
         //
@@ -1684,7 +1842,11 @@ struct PrefetchGuard {
 
 impl Drop for PrefetchGuard {
     fn drop(&mut self) {
-        let mut cache = self.cache.get_shard(&self.key).lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .cache
+            .get_shard(&self.key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get_mut(&self.key) {
             entry.is_in_prefetching = false;
         }
@@ -1692,7 +1854,14 @@ impl Drop for PrefetchGuard {
 }
 
 struct InflightCacheGuard {
-    inflight: Arc<Mutex<std::collections::HashMap<CacheKey, tokio::sync::broadcast::Sender<Option<DnsResponse>>>>>,
+    inflight: Arc<
+        Mutex<
+            std::collections::HashMap<
+                CacheKey,
+                tokio::sync::broadcast::Sender<Option<DnsResponse>>,
+            >,
+        >,
+    >,
     key: CacheKey,
     done: bool,
 }
@@ -1702,7 +1871,7 @@ impl Drop for InflightCacheGuard {
         if !self.done {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(tx) = map.remove(&self.key) {
-                let _ = tx.send(None); 
+                let _ = tx.send(None);
             }
         }
     }
@@ -1825,7 +1994,11 @@ mod cache_reload_tests {
     fn test_key_of(entry: &DnsCacheEntry) -> CacheKey {
         CacheKey {
             query: entry.data.query().clone(),
-            group: entry.data.name_server_group().unwrap_or("default").to_string(),
+            group: entry
+                .data
+                .name_server_group()
+                .unwrap_or("default")
+                .to_string(),
             ecs: entry.ecs.clone(),
             opts: entry.opts.clone(),
         }
@@ -1835,7 +2008,10 @@ mod cache_reload_tests {
     fn cached_answer_ip(cache: &DnsCache, key: &CacheKey) -> Option<std::net::Ipv4Addr> {
         use crate::libdns::proto::rr::RData;
 
-        let shard = cache.get_shard(key).lock().unwrap_or_else(|e| e.into_inner());
+        let shard = cache
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = shard.peek(key)?;
         entry.data.answers().iter().find_map(|r| match r.data() {
             RData::A(a) => Some(a.0),
@@ -1933,7 +2109,10 @@ mod cache_reload_tests {
 
         // 旧版无头文件：不能误判成"有头"
         let legacy = b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-        assert!(parse_cache_header(legacy).is_none(), "无头文件必须被判为旧格式");
+        assert!(
+            parse_cache_header(legacy).is_none(),
+            "无头文件必须被判为旧格式"
+        );
 
         // 太短/空文件也不能崩
         assert!(parse_cache_header(b"SMCA").is_none());
@@ -1974,7 +2153,11 @@ mod cache_reload_tests {
             b"old",
         )
         .unwrap();
-        std::fs::write(path.with_file_name("smartdns.cache.2024.bak"), b"user-backup").unwrap();
+        std::fs::write(
+            path.with_file_name("smartdns.cache.2024.bak"),
+            b"user-backup",
+        )
+        .unwrap();
         std::fs::write(&path, b"current").unwrap();
 
         let archived = archive_cache_file(&path, "corrupt").expect("应能改名存档");
@@ -1987,13 +2170,18 @@ mod cache_reload_tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(left.len(), 2, "应只剩【最新存档 + 用户的备份】，实际 {left:?}");
+        assert_eq!(
+            left.len(),
+            2,
+            "应只剩【最新存档 + 用户的备份】，实际 {left:?}"
+        );
         assert!(
             left.iter().any(|n| n == "smartdns.cache.2024.bak"),
             "用户自己放在同目录的备份不许被删（B6）：{left:?}"
         );
         assert!(
-            left.iter().any(|n| n.starts_with("smartdns.cache.corrupt-")),
+            left.iter()
+                .any(|n| n.starts_with("smartdns.cache.corrupt-")),
             "应保留最新那份存档：{left:?}"
         );
 
@@ -2022,7 +2210,10 @@ mod cache_reload_tests {
             opts: AnswerAffectingOpts::from_server_opts(&no_speed),
             ..base.clone()
         };
-        assert_ne!(base, with_no_speed, "带 -no-speed-check 的监听不能与默认监听共用同一份缓存");
+        assert_ne!(
+            base, with_no_speed,
+            "带 -no-speed-check 的监听不能与默认监听共用同一份缓存"
+        );
 
         // 不影响答案的选项（`-no-api` / 连接数上限）不许把缓存拆开
         let mut cosmetic = ServerOpts::default();
@@ -2067,15 +2258,24 @@ mod cache_reload_tests {
                 o
             }),
         ] {
-            let k = CacheKey { opts: AnswerAffectingOpts::from_server_opts(&o), ..base.clone() };
+            let k = CacheKey {
+                opts: AnswerAffectingOpts::from_server_opts(&o),
+                ..base.clone()
+            };
             assert_ne!(base, k, "{name} 会改变答案，必须体现在缓存标记里");
         }
 
         // rule_group 也要能区分
         let mut rg = ServerOpts::default();
         rg.rule_group = Some("guest".to_string());
-        let k = CacheKey { opts: AnswerAffectingOpts::from_server_opts(&rg), ..base.clone() };
-        assert_ne!(base, k, "rule_group 决定用哪套域名规则，必须体现在缓存标记里");
+        let k = CacheKey {
+            opts: AnswerAffectingOpts::from_server_opts(&rg),
+            ..base.clone()
+        };
+        assert_ne!(
+            base, k,
+            "rule_group 决定用哪套域名规则，必须体现在缓存标记里"
+        );
     }
 
     /// 🔐 2026-09-17：这组选项要能随条目落盘、再读回来（重启后重建标记时要用）。
@@ -2123,7 +2323,11 @@ mod cache_reload_tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.contains("-incompatible"))
             .collect();
-        assert_eq!(archived.len(), 1, "必须留下一个 -incompatible 的存档，实际 {archived:?}");
+        assert_eq!(
+            archived.len(),
+            1,
+            "必须留下一个 -incompatible 的存档，实际 {archived:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2169,7 +2373,10 @@ mod cache_reload_tests {
         // 再落一次：应当直接覆盖同一个文件（不依赖"先删旧档"），且不留临时档
         cache.persist_cache(&path);
         let again = std::fs::read(&path).unwrap();
-        assert!(parse_cache_header(&again).is_some(), "第二次落盘后文件仍应是合法格式");
+        assert!(
+            parse_cache_header(&again).is_some(),
+            "第二次落盘后文件仍应是合法格式"
+        );
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -2197,7 +2404,10 @@ mod cache_reload_tests {
         let cache = DnsCache::new(1024, false, 0, 0, 0);
         cache.persist_cache(&path); // 失败路径：只应当打日志，不得 panic、不得删掉旧档
 
-        assert!(path.is_dir(), "替换失败后，原位置的东西（这里是目录）必须还在");
+        assert!(
+            path.is_dir(),
+            "替换失败后，原位置的东西（这里是目录）必须还在"
+        );
         assert_eq!(
             std::fs::read(path.join("occupied").join("keep.txt")).unwrap(),
             b"old-must-survive",
@@ -2224,8 +2434,14 @@ mod archive_naming_tests {
     #[test]
     fn only_our_own_archives_may_be_pruned() {
         // 我们产出的三种命名（tag 见 archive_cache_file 的调用点）
-        assert!(is_our_archive("smartdns.cache", "smartdns.cache.corrupt-20260916-231530"));
-        assert!(is_our_archive("smartdns.cache", "smartdns.cache.load-panic-20260101-000000"));
+        assert!(is_our_archive(
+            "smartdns.cache",
+            "smartdns.cache.corrupt-20260916-231530"
+        ));
+        assert!(is_our_archive(
+            "smartdns.cache",
+            "smartdns.cache.load-panic-20260101-000000"
+        ));
         assert!(is_our_archive(
             "smartdns.cache",
             "smartdns.cache.v2-incompatible-20260916-231530"
@@ -2257,7 +2473,10 @@ mod prefetch_query_tests {
 
     fn key(ecs: Option<&str>) -> CacheKey {
         CacheKey {
-            query: Query::query(Name::from_ascii("ecs-prefetch.test.").unwrap(), RecordType::A),
+            query: Query::query(
+                Name::from_ascii("ecs-prefetch.test.").unwrap(),
+                RecordType::A,
+            ),
             group: String::new(),
             ecs: ecs.map(str::to_string),
             opts: AnswerAffectingOpts::default(),
@@ -2289,6 +2508,10 @@ mod prefetch_query_tests {
     #[test]
     fn refresh_without_ecs_stays_without_ecs() {
         let msg = prefetch_query_for(&key(None));
-        assert_eq!(ecs_of(&msg), None, "原记录不带 ECS 时，刷新不该凭空带上一段");
+        assert_eq!(
+            ecs_of(&msg),
+            None,
+            "原记录不带 ECS 时，刷新不该凭空带上一段"
+        );
     }
 }

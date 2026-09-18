@@ -1,7 +1,8 @@
 use std::net::Ipv6Addr;
 
 use nom::{
-    IResult, Parser,
+    IResult,
+    Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n}, // 🌟 引入 take_while_m_n
     character::complete::char,                           // 🌟 删除了闲置的 hex_digit1
@@ -15,17 +16,18 @@ use super::ipv4;
 
 pub fn ipv6(input: &str) -> IResult<&str, Ipv6Addr> {
     fn octal(input: &str) -> IResult<&str, u16> {
-        map_res(
-            take_while_m_n(1, 4, |c: char| c.is_ascii_hexdigit()),
-            |s| u16::from_str_radix(s, 16),
-        )
+        map_res(take_while_m_n(1, 4, |c: char| c.is_ascii_hexdigit()), |s| {
+            u16::from_str_radix(s, 16)
+        })
         .parse(input)
     }
 
     context(
         "Ipv6Addr",
         alt((
-            map(preceded(tag_no_case("::ffff:"), ipv4), |ip| ip.to_ipv6_mapped()),
+            map(preceded(tag_no_case("::ffff:"), ipv4), |ip| {
+                ip.to_ipv6_mapped()
+            }),
             map(
                 verify(
                     (

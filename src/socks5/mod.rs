@@ -772,7 +772,10 @@ where
 
     fn parse_header_sync(bytes: &[u8]) -> Result<(usize, AddrKind)> {
         if bytes.len() < 4 {
-            return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short")));
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Packet too short",
+            )));
         }
         if bytes[0] != 0x00 || bytes[1] != 0x00 {
             return Err(Error::InvalidReserved(bytes[0]));
@@ -787,36 +790,57 @@ where
         let addr = match atyp {
             0x01 => {
                 if bytes.len() < offset + 6 {
-                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for IPv4")));
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Packet too short for IPv4",
+                    )));
                 }
                 let mut ip_bytes = [0u8; 4];
                 ip_bytes.copy_from_slice(&bytes[offset..offset + 4]);
                 offset += 4;
                 let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
-                AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_bytes), port)))
+                AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::from(ip_bytes),
+                    port,
+                )))
             }
             0x04 => {
                 if bytes.len() < offset + 18 {
-                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for IPv6")));
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Packet too short for IPv6",
+                    )));
                 }
                 let mut ip_bytes = [0u8; 16];
                 ip_bytes.copy_from_slice(&bytes[offset..offset + 16]);
                 offset += 16;
                 let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
-                AddrKind::Ip(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_bytes), port, 0, 0)))
+                AddrKind::Ip(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(ip_bytes),
+                    port,
+                    0,
+                    0,
+                )))
             }
             0x03 => {
                 if bytes.len() < offset + 1 {
-                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for Domain len")));
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Packet too short for Domain len",
+                    )));
                 }
                 let len = bytes[offset] as usize;
                 offset += 1;
                 if bytes.len() < offset + len + 2 {
-                    return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Packet too short for Domain")));
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Packet too short for Domain",
+                    )));
                 }
-                let domain = String::from_utf8(bytes[offset..offset + len].to_vec()).map_err(Error::FromUtf8)?;
+                let domain = String::from_utf8(bytes[offset..offset + len].to_vec())
+                    .map_err(Error::FromUtf8)?;
                 offset += len;
                 let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
                 offset += 2;
@@ -913,10 +937,12 @@ where
                             }
                             let payload_len = filled.len() - header_len;
                             if payload_len > buf.len() {
-                                return std::task::Poll::Ready(Err(Error::Io(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    "User buffer too small for UDP payload",
-                                ))));
+                                return std::task::Poll::Ready(Err(Error::Io(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::InvalidInput,
+                                        "User buffer too small for UDP payload",
+                                    ),
+                                )));
                             }
                             buf[..payload_len].copy_from_slice(&filled[header_len..]);
                             return std::task::Poll::Ready(Ok((payload_len, addr)));
@@ -968,7 +994,7 @@ mod tests {
     use tokio::net::TcpStream;
 
     use crate::proxy::{
-        handshake_tcp, handshake_udp, ProxyConfig, ProxyProtocol, UdpSocket as ProxyUdpSocket,
+        ProxyConfig, ProxyProtocol, UdpSocket as ProxyUdpSocket, handshake_tcp, handshake_udp,
     };
 
     const DATA: &[u8] = b"Hello, world!";
@@ -1291,9 +1317,11 @@ mod p1_9_source_validation_tests {
             .unwrap();
 
         let mut buf = [0u8; 512];
-        let res =
-            tokio::time::timeout(Duration::from_millis(300), dgram.recv_from(&mut buf)).await;
-        assert!(res.is_err(), "来源不符的数据报必须被丢弃，实际收到了 {res:?}");
+        let res = tokio::time::timeout(Duration::from_millis(300), dgram.recv_from(&mut buf)).await;
+        assert!(
+            res.is_err(),
+            "来源不符的数据报必须被丢弃，实际收到了 {res:?}"
+        );
         assert_eq!(
             UDP_SOURCE_REJECTED.load(std::sync::atomic::Ordering::Relaxed) - before,
             1,
@@ -1309,7 +1337,10 @@ mod p1_9_source_validation_tests {
             .expect("来源正确的数据报必须被接收")
             .unwrap();
         assert_eq!(&buf[..n], b"legit");
-        assert_eq!(addr, AddrKind::Ip("1.1.1.1:53".parse::<SocketAddr>().unwrap()));
+        assert_eq!(
+            addr,
+            AddrKind::Ip("1.1.1.1:53".parse::<SocketAddr>().unwrap())
+        );
     }
 
     #[tokio::test]
@@ -1335,6 +1366,9 @@ mod p1_9_source_validation_tests {
             .expect("未设置期望来源时不应过滤")
             .unwrap();
         assert_eq!(&buf[..n], b"whatever");
-        assert_eq!(addr, AddrKind::Ip("8.8.8.8:53".parse::<SocketAddr>().unwrap()));
+        assert_eq!(
+            addr,
+            AddrKind::Ip("8.8.8.8:53".parse::<SocketAddr>().unwrap())
+        );
     }
 }

@@ -6,7 +6,7 @@ use url::Url;
 
 use anyhow::Result;
 
-use super::{set_cache::SetCache, IpNet, NomParser};
+use super::{IpNet, NomParser, set_cache::SetCache};
 
 /// IP 集合的取用缓存（与域名集合共用同一套语义，见 `set_cache`）。
 static IP_SET_CACHE: SetCache<Vec<IpNet>> = SetCache::new();
@@ -105,10 +105,7 @@ pub struct IpSetHttpProvider {
 }
 
 impl IpSetHttpProvider {
-    fn download(
-        &self,
-        proxies: &HashMap<String, crate::proxy::ProxyConfig>,
-    ) -> Result<Vec<IpNet>> {
+    fn download(&self, proxies: &HashMap<String, crate::proxy::ProxyConfig>) -> Result<Vec<IpNet>> {
         use crate::infra::http_client::{self, HttpResponse};
 
         // 只匹配用户显式指定的 proxy 名称（与 ip-set 同款：不偷拿）；
@@ -162,8 +159,8 @@ asdfghjkl
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
 
         let hits = Arc::new(AtomicUsize::new(0));

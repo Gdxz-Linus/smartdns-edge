@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 
 use crate::libdns::proto::rr::Name;
 use serde::{Deserialize, Serialize};

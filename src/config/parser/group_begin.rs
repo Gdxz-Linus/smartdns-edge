@@ -53,7 +53,9 @@ mod tests {
         );
 
         assert_eq!(
-            GroupBegin::parse("group-begin lan -inherit base").unwrap().1,
+            GroupBegin::parse("group-begin lan -inherit base")
+                .unwrap()
+                .1,
             GroupBegin {
                 name: "lan".to_string(),
                 inherit: Some("base".to_string())
@@ -62,7 +64,10 @@ mod tests {
 
         // 特殊值原样带着走（解释在处理器里做，与 C 版一致）
         assert_eq!(
-            GroupBegin::parse("group-begin lan -inherit none").unwrap().1.inherit,
+            GroupBegin::parse("group-begin lan -inherit none")
+                .unwrap()
+                .1
+                .inherit,
             Some("none".to_string())
         );
     }

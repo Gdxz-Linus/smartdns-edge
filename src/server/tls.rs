@@ -36,7 +36,10 @@ pub fn serve(
 
     let handler = handler.clone();
 
-    log::debug!("TLS listener successfully registered on {}", listener.local_addr().unwrap());
+    log::debug!(
+        "TLS listener successfully registered on {}",
+        listener.local_addr().unwrap()
+    );
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -90,7 +93,7 @@ pub fn serve(
                     }
                 },
                 None => None,
-};
+            };
 
             let handler = handler.clone();
             let tls_acceptor = tls_acceptor.clone();
@@ -98,15 +101,14 @@ pub fn serve(
             // kick out to a different task immediately, let them do the TLS handshake
             inner_join_set.spawn(async move {
                 let _conn_guard = conn_guard; // 连接结束时自动归还配额
-                    let _listener_guard = listener_guard;
+                let _listener_guard = listener_guard;
                 log::debug!("starting TLS request from: {}", src_addr);
 
                 // perform the TLS
                 // 🌟 核心修复：为 TLS 握手套上 5 秒绝对枷锁，防 Slowloris 半连接耗尽资源攻击！
-                let tls_stream = tokio::time::timeout(
-                    Duration::from_secs(5), 
-                    tls_acceptor.accept(tcp_stream)
-                ).await;
+                let tls_stream =
+                    tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
+                        .await;
 
                 let tls_stream = match tls_stream {
                     Ok(Ok(tls_stream)) => AsyncIoTokioAsStd(tls_stream),
@@ -140,7 +142,11 @@ pub fn serve(
                     let message = match next {
                         Ok(Some(Ok(message))) => message,
                         Ok(Some(Err(e))) => {
-                            log::debug!("error in DNS request_stream src: {} error: {}", src_addr, e);
+                            log::debug!(
+                                "error in DNS request_stream src: {} error: {}",
+                                src_addr,
+                                e
+                            );
                             return; // 网络中断，断开连接
                         }
                         Ok(None) => break,
@@ -158,9 +164,9 @@ pub fn serve(
 
                     let (bytes, addr) = message.into_parts();
                     let req_message = SerialMessage::binary(bytes, addr, Protocol::Tls);
-                    
+
                     let handler = handler.clone();
-                    let mut stream_handle = stream_handle.clone(); 
+                    let mut stream_handle = stream_handle.clone();
 
                     tokio::spawn(async move {
                         let _permit = permit; // 🌟 绑定许可的生命周期

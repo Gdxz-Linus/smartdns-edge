@@ -1,6 +1,7 @@
 use nom::{
-    IResult, Parser,
-    branch::alt,                     // 🌟 新增 alt 用于匹配多种分隔符
+    IResult,
+    Parser,
+    branch::alt, // 🌟 新增 alt 用于匹配多种分隔符
     bytes::complete::take_while_m_n,
     character::complete::char,
     combinator::{recognize, verify},
@@ -14,11 +15,11 @@ pub fn mac_addr(input: &str) -> IResult<&str, &str> {
 
     // 🌟 核心修复 2：同时兼容冒号 (:) 和横杠 (-) 两种 MAC 地址格式
     let parts = separated_list1(alt((char(':'), char('-'))), hextal);
-    
+
     // 必须有 6 段
     let parts = verify(parts, |s: &Vec<&str>| s.len() == 6);
     let parts = recognize(parts);
-    
+
     context("MacAddr", parts).parse(input)
 }
 

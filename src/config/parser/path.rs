@@ -5,7 +5,10 @@ impl NomParser for PathBuf {
         let delimited_path = delimited(char('"'), is_not("\""), char('"'));
         let unix_path = recognize((
             opt(char('/')),
-            separated_list1(char('/'), escaped(is_not("\n \t\\"), '\\', one_of(r#" \""#))),
+            separated_list1(
+                char('/'),
+                escaped(is_not("\n \t\\"), '\\', one_of(r#" \""#)),
+            ),
             opt(char('/')),
         ));
         // 反斜杠路径（Windows 原生写法）。注意每个路径段都用 `is_not(" \t\\")` —— **不许含空白**。

@@ -23,7 +23,7 @@ const UDP_RECV_BUFFER_SIZE: usize = 16 * 1024;
 // 🌟 接收外部传入的 token，不再自己创建和返回
 pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToken) {
     let cancellation_token = token;
-    
+
     // 🌟 终极优化：在 Linux 下配合 SO_REUSEPORT 实现内核级多队列负载均衡！
     // 配合底层的 4MB SO_RCVBUF，彻底榨干网卡吞吐极限！
     let socket = Arc::new(socket);
@@ -33,7 +33,7 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
         // （不再用 BytesMut + split()：那会把容量一点点吃掉，可用空间随前序流量漂移）
         let mut buf = vec![0u8; UDP_RECV_BUFFER_SIZE];
         let mut inner_join_set = JoinSet::new();
-        
+
         log::debug!("UDP IO Reactor started");
 
         // 🔐 P2：连续收包出错的次数（用于退避 + 日志降频）
@@ -117,7 +117,7 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
             inner_join_set.spawn(async move {
                 let req_message = SerialMessage::binary(packet, src_addr, Protocol::Udp);
                 let res_message = handler.send(req_message).await;
-                
+
                 if let Ok(buffer) = Vec::<u8>::try_from(res_message) {
                     // 只放行"真正的应答"（至少 12 字节报文头 + QR=1）。
                     // 原来的判断是 `!buffer.is_empty()`，它只拦得住"系统降载/请求被丢弃"那条

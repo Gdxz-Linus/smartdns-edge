@@ -9,7 +9,8 @@ pub fn bind_to<T: LocalAddr>(
     bind_addr: SocketAddr,
     bind_device: Option<&str>,
     bind_type: &str,
-) -> io::Result<T> { // 🌟 修复：返回 io::Result
+) -> io::Result<T> {
+    // 🌟 修复：返回 io::Result
     let device_note = bind_device
         .map(|device| format!("@{device}"))
         .unwrap_or_default();

@@ -7,9 +7,8 @@ impl NomParser for IpsetConfig {
         // ipset 的集合名就是普通名字（内核上限 31 字节）。
         // 这里只做"字符集"的基本约束；长度在真正写集合时校验并把原因报到日志里
         // （C 版是在写的时候静默失败，用户看不到自己名字写长了）。
-        let mut name = take_while1(|c: char| {
-            c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
-        });
+        let mut name =
+            take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
 
         let (input, name) = name.parse(input)?;
         Ok((
@@ -28,11 +27,17 @@ impl NomParser for ConfigForIP<IpsetConfig> {
         // （例如 `#4:dns4,#6:-` = 只把 IPv4 结果写进 dns4）
         let v4 = preceded(
             tag("#4:"),
-            alt((map(char('-'), |_| ConfigForIP::None), map(IpsetConfig::parse, ConfigForIP::V4))),
+            alt((
+                map(char('-'), |_| ConfigForIP::None),
+                map(IpsetConfig::parse, ConfigForIP::V4),
+            )),
         );
         let v6 = preceded(
             tag("#6:"),
-            alt((map(char('-'), |_| ConfigForIP::None), map(IpsetConfig::parse, ConfigForIP::V6))),
+            alt((
+                map(char('-'), |_| ConfigForIP::None),
+                map(IpsetConfig::parse, ConfigForIP::V6),
+            )),
         );
 
         alt((map(char('-'), |_| ConfigForIP::None), v4, v6)).parse(input)

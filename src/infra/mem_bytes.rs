@@ -14,10 +14,7 @@ pub trait MemBytes<T: Copy + Sized> {
 
     fn as_bytes(&self) -> &[u8] {
         unsafe {
-            std::slice::from_raw_parts(
-                (self as *const Self) as *const u8,
-                std::mem::size_of::<T>(),
-            )
+            std::slice::from_raw_parts((self as *const Self) as *const u8, std::mem::size_of::<T>())
         }
     }
 
@@ -53,7 +50,9 @@ mod sealed {
         ($($t:ty),* $(,)?) => { $( impl Sealed for $t {} )* };
     }
 
-    impl_sealed!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64);
+    impl_sealed!(
+        u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+    );
     // 字节数组也是"任意内容都合法"的
     impl<const N: usize> Sealed for [u8; N] {}
 }
@@ -65,7 +64,9 @@ macro_rules! impl_pod {
     ($($t:ty),* $(,)?) => { $( impl PodValue for $t {} )* };
 }
 
-impl_pod!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64);
+impl_pod!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+);
 impl<const N: usize> PodValue for [u8; N] {}
 
 // 🔐 P2：边界从 `T: Copy` 收紧为 `T: PodValue` —— char / bool / 枚举 不再能用

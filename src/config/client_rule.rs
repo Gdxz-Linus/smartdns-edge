@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use ipnet::IpNet;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Client {
@@ -112,11 +112,11 @@ mod tests {
         };
 
         for notation in [
-            "01:23:45:67:89:ab",  // Linux / 本项目内部格式
-            "01-23-45-67-89-ab",  // Windows `arp -a` —— A10 报的就是这种不生效
-            "01-23-45-67-89-AB",  // 大写 + 横杠
-            "0123456789AB",       // 无分隔符 + 大写
-            "0123.4567.89ab",     // 点分格式（部分交换机/脚本这么写）
+            "01:23:45:67:89:ab", // Linux / 本项目内部格式
+            "01-23-45-67-89-ab", // Windows `arp -a` —— A10 报的就是这种不生效
+            "01-23-45-67-89-AB", // 大写 + 横杠
+            "0123456789AB",      // 无分隔符 + 大写
+            "0123.4567.89ab",    // 点分格式（部分交换机/脚本这么写）
         ] {
             assert!(
                 rule(notation).match_mac(&actual),
@@ -133,7 +133,13 @@ mod tests {
         }
 
         // 不合法/奇怪的写法不许"碰巧命中"（这里退回忽略大小写的原样比较）
-        for weird in ["", "abd", "01:23:45:67:89", "01:23:45:67:89:ab:cd", "zz:zz:zz:zz:zz:zz"] {
+        for weird in [
+            "",
+            "abd",
+            "01:23:45:67:89",
+            "01:23:45:67:89:ab:cd",
+            "zz:zz:zz:zz:zz:zz",
+        ] {
             assert!(
                 !rule(weird).match_mac(&actual),
                 "规则 {weird} 不是合法 MAC，不该命中 {actual}"

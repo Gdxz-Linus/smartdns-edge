@@ -18,15 +18,15 @@ mod domain_set;
 mod file_mode;
 mod forward_rule;
 mod glob_pattern;
+mod group_begin;
 mod group_match;
 mod https_record;
 mod ip_alias;
-mod ip_rules;
-mod group_begin;
 mod ip_net;
+mod ip_rules;
 mod ip_set;
-mod ipset;
 mod iporset;
+mod ipset;
 // mod line;
 mod log_level;
 mod nameserver;
@@ -172,7 +172,7 @@ pub enum ConfigItem {
     ServeExpired(bool),
     ServeExpiredTtl(u64),
     ServeExpiredReplyTtl(u64),
-	ServeExpiredPrefetchTime(u64),
+    ServeExpiredPrefetchTime(u64),
     Server(NameServerInfo),
     ServerName(Name),
     ResolvFile(PathBuf),
@@ -383,16 +383,22 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("serve-expired-ttl"), |v: u64| {
             ConfigItem::ServeExpiredTtl(sanitize_ttl("serve-expired-ttl", v))
         }),
-		map(config("serve-expired-prefetch-time"), |v: u64| {
+        map(config("serve-expired-prefetch-time"), |v: u64| {
             ConfigItem::ServeExpiredPrefetchTime(sanitize_ttl("serve-expired-prefetch-time", v))
         }),
         map(config("serve-expired"), ConfigItem::ServeExpired),
         map(config("srv-record"), ConfigItem::SrvRecord),
         map(config("resolv-hostname"), ConfigItem::ResolvHostname),
         map(config("tcp-idle-time"), ConfigItem::TcpIdleTime),
-        map(config("first-packet-timeout"), ConfigItem::FirstPacketTimeout),
+        map(
+            config("first-packet-timeout"),
+            ConfigItem::FirstPacketTimeout,
+        ),
         map(config("max-connections"), ConfigItem::MaxConnections),
-        map(config("max-connections-per-ip"), ConfigItem::MaxConnectionsPerIp),
+        map(
+            config("max-connections-per-ip"),
+            ConfigItem::MaxConnectionsPerIp,
+        ),
         map(config("nftset"), ConfigItem::NftSet),
         map(config("user"), ConfigItem::User),
         // `acl-enable`：访问控制总开关（放在 group4 —— 它离 21 项上限还有余量）
@@ -462,9 +468,7 @@ pub fn parse_config(input: &str) -> IResult<&str, Option<ConfigItem>> {
 /// 放这里是因为域名集合与 IP 集合共用同一套判断与提醒。
 pub(crate) fn warn_if_interval_too_short(kind: &str, name: &str, interval: Option<usize>) {
     if let Some(secs) = interval.filter(|secs| *secs > 0 && *secs < 10) {
-        crate::log::warn!(
-            "{kind} {name}: -interval {secs} 秒太短，会频繁重载配置（建议 ≥ 10 秒）"
-        );
+        crate::log::warn!("{kind} {name}: -interval {secs} 秒太短，会频繁重载配置（建议 ≥ 10 秒）");
     }
 }
 

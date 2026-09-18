@@ -25,19 +25,13 @@ impl NomParser for DomainSetFileProvider {
             map(
                 // 显式写 `String::parse`：不写的话，下面 `&name`（要 `&str`）会把推断带偏，
                 // 编译器会把 name 推成 `str` 然后报一堆 "the size for values of type str"。
-                options::parse_value(
-                    alt((tag_no_case("name"), tag_no_case("n"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("name"), tag_no_case("n"))), String::parse),
                 |v| {
                     name = Some(v);
                 },
             ),
             map(
-                options::parse_value(
-                    alt((tag_no_case("file"), tag_no_case("f"))),
-                    PathBuf::parse,
-                ),
+                options::parse_value(alt((tag_no_case("file"), tag_no_case("f"))), PathBuf::parse),
                 |v| {
                     file = Some(v);
                 },
@@ -123,10 +117,7 @@ impl NomParser for DomainSetHttpProvider {
             ),
             // 🌟 教解析器认识 -proxy 和 -p 参数
             map(
-                options::parse_value(
-                    alt((tag_no_case("proxy"), tag_no_case("p"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("proxy"), tag_no_case("p"))), String::parse),
                 |v| proxy = Some(v),
             ),
         ));

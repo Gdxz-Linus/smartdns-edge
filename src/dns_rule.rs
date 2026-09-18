@@ -289,18 +289,18 @@ mod tests {
             &Default::default(),
         );
 
-        let rule = map.find(&"a.com".parse().unwrap()).expect("a.com 的规则应存在");
+        let rule = map
+            .find(&"a.com".parse().unwrap())
+            .expect("a.com 的规则应存在");
         let got = rule.get(|n| n.nftset.as_ref().cloned()).unwrap_or_default();
 
-        assert_eq!(
-            got.len(),
-            2,
-            "两条 nftset 都应生效，实际只有 {:?}",
-            got
-        );
+        assert_eq!(got.len(), 2, "两条 nftset 都应生效，实际只有 {:?}", got);
         assert!(
-            got.iter().any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t1" && c.name == "s1"))
-                && got.iter().any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t2" && c.name == "s2")),
+            got.iter()
+                .any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t1" && c.name == "s1"))
+                && got
+                    .iter()
+                    .any(|c| matches!(c, ConfigForIP::V4(c) if c.table == "t2" && c.name == "s2")),
             "t1#s1 与 t2#s2 都应保留，实际 {:?}",
             got
         );

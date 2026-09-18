@@ -9,7 +9,11 @@ use std::{
 use thiserror::Error;
 
 // 🌟 核心修复 1：管道入口开放，接收 domain 上下文
-pub async fn ping(dest: PingAddr, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
+pub async fn ping(
+    dest: PingAddr,
+    domain: Option<&str>,
+    opts: PingOptions,
+) -> Result<PingOutput, PingError> {
     match dest {
         PingAddr::Icmp(addr) => icmp::ping(addr, opts).await,
         PingAddr::Tcp(addr) => tcp::ping(addr, opts).await,
@@ -18,7 +22,11 @@ pub async fn ping(dest: PingAddr, domain: Option<&str>, opts: PingOptions) -> Re
     }
 }
 
-pub async fn ping_batch(dests: &[PingAddr], domain: Option<&str>, opts: PingOptions) -> Vec<Result<PingOutput, PingError>> {
+pub async fn ping_batch(
+    dests: &[PingAddr],
+    domain: Option<&str>,
+    opts: PingOptions,
+) -> Vec<Result<PingOutput, PingError>> {
     let mut outs = Vec::new();
     for dest in dests.iter() {
         outs.push(match dest {
@@ -30,9 +38,15 @@ pub async fn ping_batch(dests: &[PingAddr], domain: Option<&str>, opts: PingOpti
     outs
 }
 
-pub async fn ping_fastest(dests: Vec<PingAddr>, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
+pub async fn ping_fastest(
+    dests: Vec<PingAddr>,
+    domain: Option<&str>,
+    opts: PingOptions,
+) -> Result<PingOutput, PingError> {
     use futures_util::future::select_ok;
-    if dests.is_empty() { return Err(PingError::NoAddress); }
+    if dests.is_empty() {
+        return Err(PingError::NoAddress);
+    }
 
     let ping_tasks = dests.iter().map(|dst| match dst {
         PingAddr::Icmp(addr) => icmp::ping(*addr, opts).boxed(),
@@ -593,9 +607,9 @@ mod https {
         time::{Duration, Instant},
     };
 
+    use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use tokio_rustls::TlsConnector;
-    use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt}; // 🌟 新增 IO 依赖
+    use tokio_rustls::TlsConnector; // 🌟 新增 IO 依赖
 
     use crate::third_ext::FutureTimeoutExt;
 
@@ -614,7 +628,10 @@ mod https {
         let request = if safe_domain.is_empty() {
             "GET / HTTP/1.1\r\nConnection: close\r\n\r\n".to_string()
         } else {
-            format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", safe_domain)
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                safe_domain
+            )
         };
 
         stream.write_all(request.as_bytes()).await?;
@@ -626,7 +643,11 @@ mod https {
     }
 
     #[inline]
-    pub async fn ping(sock_addr: SocketAddr, domain: Option<&str>, opts: PingOptions) -> Result<PingOutput, PingError> {
+    pub async fn ping(
+        sock_addr: SocketAddr,
+        domain: Option<&str>,
+        opts: PingOptions,
+    ) -> Result<PingOutput, PingError> {
         let PingOptions {
             times,
             timeout,
@@ -782,7 +803,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn test_ping_simple() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -852,7 +873,7 @@ mod tests {
     ///
     /// 本机若无法直连目标，可以把目标换成直连可达的 HTTPS 站点，
     /// 或者就让它保持失败——那正是生产会遭遇的情形（该候选 IP 会被判为不可达）。
-        #[test]
+    #[test]
     fn test_ping_https() {
         let target = std::env::var("SMARTDNS_TEST_PING_HTTPS_URL")
             .unwrap_or_else(|_| "https://223.5.5.5:443".to_string());

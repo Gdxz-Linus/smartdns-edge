@@ -3,9 +3,11 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use crate::dns::{DefaultSOA, DnsContext, DnsError, DnsRequest, DnsResponse, Name, RData, RecordType};
-use crate::zone::ZoneProvider;
+use crate::dns::{
+    DefaultSOA, DnsContext, DnsError, DnsRequest, DnsResponse, Name, RData, RecordType,
+};
 use crate::libdns::proto::rr::rdata::PTR;
+use crate::zone::ZoneProvider;
 
 pub struct LocalPtrZoneProvider {
     server_names: BTreeSet<Name>,
@@ -46,7 +48,7 @@ impl ZoneProvider for LocalPtrZoneProvider {
         // 2. 解析 ARPA 格式，利用纯数学规则拦截私网反向查询
         if let Ok(net) = name.parse_arpa_name() {
             let ip = net.addr();
-            
+
             // 🌟 核心修复：抛弃僵化的网卡 IP 抓取，改用数学法则覆盖全量私网网段！
             // 无论宿主机增加多少虚拟网卡或 VPN，只要落在私有网段内，100% 绝对拦截！
             let is_private_ip = match ip {
@@ -73,14 +75,14 @@ impl ZoneProvider for LocalPtrZoneProvider {
                 let mut res = DnsResponse::empty();
                 res.add_query(query.original().to_owned());
                 res.set_response_code(ResponseCode::NXDomain);
-                
+
                 let soa = crate::dns::Record::from_rdata(
-                    crate::dns::Name::root(), 
-                    3600, 
-                    crate::dns::RData::default_soa()
+                    crate::dns::Name::root(),
+                    3600,
+                    crate::dns::RData::default_soa(),
                 );
                 res.add_authority(soa);
-                
+
                 return Ok(Some(res));
             }
         }
@@ -154,7 +156,10 @@ mod private_range_tests {
         let v6: Ipv6Addr = "::ffff:192.168.1.1".parse().unwrap();
         let v4 = v6.to_ipv4_mapped().expect("IPv4-mapped 地址应能还原");
         assert_eq!(v4, Ipv4Addr::new(192, 168, 1, 1));
-        assert!(is_private_v4(v4), "还原后必须被判为私网（改前这里会被转发到公网）");
+        assert!(
+            is_private_v4(v4),
+            "还原后必须被判为私网（改前这里会被转发到公网）"
+        );
 
         let cgnat_v6: Ipv6Addr = "::ffff:100.64.0.9".parse().unwrap();
         assert!(is_private_v4(cgnat_v6.to_ipv4_mapped().unwrap()));

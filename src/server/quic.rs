@@ -76,14 +76,14 @@ pub fn serve(
                     }
                 },
                 None => None,
-};
+            };
 
             let handler = handler.clone();
             let cancellation_token = cancellation_token.clone();
 
             inner_join_set.spawn(async move {
                 let _conn_guard = conn_guard; // 连接结束时自动归还配额
-                    let _listener_guard = listener_guard;
+                let _listener_guard = listener_guard;
                 log::debug!("starting quic stream request from: {src_addr}");
 
                 // 🔐 P0-5：单条 QUIC 连接允许的子流数。原值 100 会让一条连接最坏占到
@@ -106,21 +106,24 @@ pub fn serve(
                     };
 
                     let handler = handler.clone();
-                    
+
                     // 🌟 核心修复：拿到一个新的 QUIC Stream 后，立刻派发后台处理！
                     // 主循环秒级回归，疯狂接收该 QUIC 连接发来的下一个并发查询流，彻底实现 QUIC 多路复用。
                     tokio::spawn(async move {
                         // 🔐 P0-5：单条子流的"首包"同样要限时——
                         // 否则只发 2 字节长度前缀就能长期占住这条流（DoQ 是最便宜的放大面）。
                         let read_result = match first_packet_timeout {
-                            Some(t) => match tokio::time::timeout(t, request_stream.receive_bytes()).await {
-                                Ok(r) => r,
-                                Err(_) => {
-                                    log::debug!("QUIC 子流首包超时，关闭该子流: {src_addr}");
-                                    let _ = request_stream.stop(DoqErrorCode::NoError);
-                                    return;
+                            Some(t) => {
+                                match tokio::time::timeout(t, request_stream.receive_bytes()).await
+                                {
+                                    Ok(r) => r,
+                                    Err(_) => {
+                                        log::debug!("QUIC 子流首包超时，关闭该子流: {src_addr}");
+                                        let _ = request_stream.stop(DoqErrorCode::NoError);
+                                        return;
+                                    }
                                 }
-                            },
+                            }
                             None => request_stream.receive_bytes().await,
                         };
                         let bytes = match read_result {
@@ -153,7 +156,9 @@ pub fn serve(
                     max_requests -= 1;
 
                     if max_requests == 0 {
-                        log::warn!("exceeded max request count (32), shutting down quic conn: {src_addr}");
+                        log::warn!(
+                            "exceeded max request count (32), shutting down quic conn: {src_addr}"
+                        );
                         break; // 触发反滥用机制，关闭整个 QUIC 连接
                     }
                 }

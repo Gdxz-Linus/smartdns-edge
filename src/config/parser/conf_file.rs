@@ -17,10 +17,7 @@ impl NomParser for ConfFileItem {
 
         let one = alt((
             map(
-                options::parse_value(
-                    alt((tag_no_case("group"), tag_no_case("g"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("group"), tag_no_case("g"))), String::parse),
                 Arg::Group,
             ),
             map(PathBuf::parse, Arg::Path),

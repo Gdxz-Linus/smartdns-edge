@@ -22,7 +22,10 @@ pub fn serve(
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
 
-    log::debug!("HTTP listener successfully registered on {}", listener.local_addr().unwrap());
+    log::debug!(
+        "HTTP listener successfully registered on {}",
+        listener.local_addr().unwrap()
+    );
 
     let state = Arc::new(ServeState { app, dns_handle });
 
@@ -31,8 +34,8 @@ pub fn serve(
     } else {
         crate::api::dns_only_routes()
     })
-        .with_state(state.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
+    .with_state(state.clone())
+    .into_make_service_with_connect_info::<SocketAddr>();
 
     tokio::spawn(async move {
         // 🔐 逐监听连接上限（若该监听单独配了 max-connections*，与全局限额同时生效）
@@ -84,13 +87,13 @@ pub fn serve(
                     }
                 },
                 None => None,
-};
+            };
 
             // kick out to a different task immediately, let them do the TLS handshake
             let mut make_service = make_service.clone();
             inner_join_set.spawn(async move {
                 let _conn_guard = conn_guard; // 连接结束时自动归还配额
-                    let _listener_guard = listener_guard;
+                let _listener_guard = listener_guard;
                 log::debug!("starting HTTP request from: {}", src_addr);
 
                 let socket = tcp_stream;

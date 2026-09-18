@@ -51,8 +51,12 @@ impl LanClientStore {
         // 🌟 核心修复：把读取硬盘元数据的阻塞操作踢给外包线程池
         let file_path = self.file.clone();
         let modified_at = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&file_path).ok().and_then(|meta| meta.modified().ok())
-        }).await.unwrap_or(None);
+            std::fs::metadata(&file_path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+        })
+        .await
+        .unwrap_or(None);
 
         {
             let mut cache = self.cache.write().unwrap_or_else(|err| err.into_inner());
@@ -72,8 +76,12 @@ impl LanClientStore {
         let file_path = self.file.clone();
         let zone = self.zone.clone();
         let refreshed = tokio::task::spawn_blocking(move || {
-            read_lease_file(&file_path, zone.as_ref()).ok().map(Arc::new)
-        }).await.unwrap_or(None);
+            read_lease_file(&file_path, zone.as_ref())
+                .ok()
+                .map(Arc::new)
+        })
+        .await
+        .unwrap_or(None);
 
         let mut cache = self.cache.write().unwrap_or_else(|err| err.into_inner());
         if let Some(clients) = refreshed {
@@ -105,9 +113,10 @@ impl LanClientStore {
 
                 if !name.is_fqdn() {
                     if let Some(zone) = self.zone.as_ref()
-                        && let Ok(n) = name.clone().append_name(zone) {
-                            name = n;
-                        }
+                        && let Ok(n) = name.clone().append_name(zone)
+                    {
+                        name = n;
+                    }
                     name.set_fqdn(true);
                 }
 
@@ -123,7 +132,9 @@ impl LanClientStore {
                     _ => None,
                 }) {
                     match client_info.ip {
-                        IpAddr::V4(v) if record_type == RecordType::A => Some(vec![RData::A(v.into())]),
+                        IpAddr::V4(v) if record_type == RecordType::A => {
+                            Some(vec![RData::A(v.into())])
+                        }
                         IpAddr::V6(v) if record_type == RecordType::AAAA => {
                             Some(vec![RData::AAAA(v.into())])
                         }
@@ -213,7 +224,7 @@ fn read_lease_file<P: AsRef<Path>>(
     let mut map = HashMap::new();
 
     // 🌟 1. 获取当前的时间戳，准备作为“生死审判”的标准
-    let now_ts = chrono::Utc::now().timestamp(); 
+    let now_ts = chrono::Utc::now().timestamp();
 
     for line in reader.lines() {
         let line = match line {
@@ -229,14 +240,15 @@ fn read_lease_file<P: AsRef<Path>>(
 
         if let Ok(mut client_info) = ClientInfo::from_str(line) {
             // 🌟 2. 核心修复：发现是过期的历史设备，直接忽略（continue），绝不进冰柜！
-            if client_info.is_expired(now_ts) { 
-                continue; 
+            if client_info.is_expired(now_ts) {
+                continue;
             }
-			
+
             if let Some(z) = zone
-                && let Ok(host) = client_info.host.clone().append_name(z) {
-                    client_info.host = host;
-                }
+                && let Ok(host) = client_info.host.clone().append_name(z)
+            {
+                client_info.host = host;
+            }
             client_info.host.set_fqdn(true);
             map.insert(client_info.host.clone().into(), client_info);
         }
@@ -298,7 +310,9 @@ mod tests {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Default::default());
 
         assert_eq!(
-            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::AAAA).await,
+            store
+                .lookup(&"iphone-abc".parse().unwrap(), RecordType::AAAA)
+                .await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
@@ -310,7 +324,9 @@ mod tests {
         // （源码注释明确写着：绝不能返回 None，否则内网设备名会流向外网泄露）。
         // 原测试断言的是这次改动之前的行为。
         assert_eq!(
-            store.lookup(&"iphone-abc".parse().unwrap(), RecordType::A).await,
+            store
+                .lookup(&"iphone-abc".parse().unwrap(), RecordType::A)
+                .await,
             Some(vec![])
         );
     }
@@ -320,7 +336,9 @@ mod tests {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Default::default());
 
         assert_eq!(
-            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::AAAA).await,
+            store
+                .lookup(&"iphone-abc.".parse().unwrap(), RecordType::AAAA)
+                .await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
@@ -330,7 +348,9 @@ mod tests {
 
         // 同上：类型不匹配时按设计返回空数组，而不是 None
         assert_eq!(
-            store.lookup(&"iphone-abc.".parse().unwrap(), RecordType::A).await, 
+            store
+                .lookup(&"iphone-abc.".parse().unwrap(), RecordType::A)
+                .await,
             Some(vec![])
         );
     }
@@ -340,7 +360,9 @@ mod tests {
         let store = LanClientStore::new("tests/test_data/dhcp.leases", Name::from_str("xyz").ok());
 
         assert_eq!(
-            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::AAAA).await,
+            store
+                .lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::AAAA)
+                .await,
             "2402:4e00:1013:e500:0:9671:f018:4947"
                 .to_ip()
                 // 修复编译错误：lookup() 的返回类型已从 Option<IpAddr> 改为 Option<Vec<RData>>
@@ -350,7 +372,9 @@ mod tests {
 
         // 同上：类型不匹配时按设计返回空数组，而不是 None
         assert_eq!(
-            store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A).await,
+            store
+                .lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A)
+                .await,
             Some(vec![])
         );
     }

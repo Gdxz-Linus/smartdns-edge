@@ -123,9 +123,14 @@ impl IDomainSetProvider for DomainSetHttpProvider {
         proxies: &HashMap<String, crate::proxy::ProxyConfig>,
         force: bool,
     ) -> Result<HashSet<WildcardName>> {
-        DOMAIN_SET_CACHE.get("DomainSet", &self.name, self.url.as_str(), self.interval, force, || {
-            self.get_domain_set(proxies)
-        })
+        DOMAIN_SET_CACHE.get(
+            "DomainSet",
+            &self.name,
+            self.url.as_str(),
+            self.interval,
+            force,
+            || self.get_domain_set(proxies),
+        )
     }
 }
 
@@ -244,7 +249,11 @@ mod tests {
         let base = hits.load(Ordering::SeqCst);
         zero.get_domain_set_cached(&proxies, false).unwrap();
         zero.get_domain_set_cached(&proxies, false).unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), base + 2, "-interval 0 应视为关闭");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            base + 2,
+            "-interval 0 应视为关闭"
+        );
     }
 
     /// 🔐 P2：刷新失败时**保留上一次的名单**，不能让规则因为一次网络抖动集体消失。

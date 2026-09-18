@@ -55,10 +55,7 @@ pub fn unkown_value(input: &str) -> IResult<&str, &str> {
     alt((
         // 🌟 核心修复情况 A：当用户明确使用 "=" 赋值时，彻底解除首字符 "-" 的防线！
         // 完美放行如 `-group=-cn_nodes` 或 `-cert=--base64--` 等合法但极端的配置值。
-        preceded(
-            tag("="),
-            is_not(" \t\r\n#")
-        ),
+        preceded(tag("="), is_not(" \t\r\n#")),
         // 🌟 核心修复情况 B：当使用空格分隔时，依然保持对首字符 "-" 的拦截（防吞噬下一个 Flag），
         // 但保留“孤立减号”的特权通行证（专门用于 -host-name - 等关闭场景）。
         preceded(
@@ -69,9 +66,9 @@ pub fn unkown_value(input: &str) -> IResult<&str, &str> {
                     // 仅拦截减号开头，保障参数边界安全
                     is_not("- \t\r\n#"),
                     take_till(|c: char| c.is_whitespace() || c == '#'),
-                ))
-            ))
-        )
+                )),
+            )),
+        ),
     ))
     .parse(input)
 }
@@ -86,10 +83,7 @@ pub fn unkown_value(input: &str) -> IResult<&str, &str> {
 fn hash_prefixed_value(input: &str) -> IResult<&str, &str> {
     preceded(
         space1,
-        recognize((
-            tag("#"),
-            take_till(|c: char| c.is_whitespace()),
-        )),
+        recognize((tag("#"), take_till(|c: char| c.is_whitespace()))),
     )
     .parse(input)
 }

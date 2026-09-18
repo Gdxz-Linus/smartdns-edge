@@ -151,25 +151,25 @@ impl MappedFile {
         match self.file {
             Some(ref mut file) => Ok(file),
             None => {
-                    let res = {
-                        let mut opt = File::options();
+                let res = {
+                    let mut opt = File::options();
 
-                        #[cfg(unix)]
-                        if let Some(mode) = self.mode {
-                            use std::os::unix::fs::OpenOptionsExt;
-                            opt.mode(mode);
-                        }
+                    #[cfg(unix)]
+                    if let Some(mode) = self.mode {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opt.mode(mode);
+                    }
 
-                        // 🌟 核心修复 1：Windows 文件被打开时，强行赋予共享删除与读取权限！
-                        // 否则在 backup_files() 中执行 fs::rename 时必报 OS Error 32 (Sharing Violation)
-                        #[cfg(windows)]
-                        {
-                            use std::os::windows::fs::OpenOptionsExt;
-                            // 0x00000004 (FILE_SHARE_DELETE) | 0x00000001 (FILE_SHARE_READ) | 0x00000002 (FILE_SHARE_WRITE) = 7
-                            opt.share_mode(7);
-                        }
+                    // 🌟 核心修复 1：Windows 文件被打开时，强行赋予共享删除与读取权限！
+                    // 否则在 backup_files() 中执行 fs::rename 时必报 OS Error 32 (Sharing Violation)
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::OpenOptionsExt;
+                        // 0x00000004 (FILE_SHARE_DELETE) | 0x00000001 (FILE_SHARE_READ) | 0x00000002 (FILE_SHARE_WRITE) = 7
+                        opt.share_mode(7);
+                    }
 
-                        opt.create(true).write(true);
+                    opt.create(true).write(true);
 
                     if self.path.exists() {
                         if self.is_full() {
@@ -208,7 +208,7 @@ impl MappedFile {
             if let Some(ext) = self.path.extension() {
                 new_path = new_path.with_extension(ext);
             }
-            
+
             // 🌟 核心修复：在对旧文件执行 rename 重命名归档之前，必须先将当前打开的文件句柄 take() 出去并 drop 释放！
             // 否则在 Windows 下，一个正在被打开写入的文件直接执行 rename 会引发句柄锁冲突（OS Error 32）。
             if let Some(mut file) = self.file.take() {

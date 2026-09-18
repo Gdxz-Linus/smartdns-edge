@@ -33,7 +33,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsBogusMiddl
                     // 强制修改状态码为域名不存在
                     use crate::libdns::proto::op::ResponseCode;
                     lookup.set_response_code(ResponseCode::NXDomain);
-                    
+
                     // 🌟 核心修复 3：补发 SOA 记录，激活系统的“否定缓存 (Negative Caching)”机制，阻断查询风暴！
                     if lookup.authorities().is_empty() {
                         // 1. 提取用户真实查询的域名

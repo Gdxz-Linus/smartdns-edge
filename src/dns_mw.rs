@@ -2,9 +2,7 @@ use std::{borrow::Borrow, net::IpAddr, sync::Arc};
 
 use crate::libdns::proto::{
     op::Query,
-    rr::{
-        IntoName, RecordType,
-    },
+    rr::{IntoName, RecordType},
 };
 
 use crate::{
@@ -41,9 +39,10 @@ impl DnsMiddlewareHandler {
         // 🌟 修复：坚决剥夺 ECS 参与本地 ACL 控制的权利，只认真实的请求来源物理 IP
         let mut client_ip = req.src().ip();
         if let IpAddr::V6(addr) = client_ip
-            && let Some(addr) = addr.to_ipv4_mapped() {
-                client_ip = addr.into();
-            }
+            && let Some(addr) = addr.to_ipv4_mapped()
+        {
+            client_ip = addr.into();
+        }
 
         // 🔐 Q10 `max-query-limit`：整机**同时处理**的查询数上限。
         //
@@ -313,8 +312,8 @@ mod tests {
     /// 匹配到的照常服务；后台请求（预取/探针）不受影响；监听级 `-acl` 与全局开关是"或"的关系。
     #[tokio::test(flavor = "multi_thread")]
     async fn acl_enable_refuses_only_unmatched_clients() {
-        use crate::libdns::proto::op::ResponseCode;
         use crate::config::ServerOpts;
+        use crate::libdns::proto::op::ResponseCode;
 
         let name = "acltest.example.com";
         let matching_rule = "client-rules 127.0.0.0/8";
@@ -328,7 +327,10 @@ mod tests {
         let res = mw
             .search(&req_from(name, "127.0.0.1:55001"), &ServerOpts::default())
             .await;
-        assert!(res.is_ok(), "不开 ACL 时，匹配不上规则也必须照常解析：{res:?}");
+        assert!(
+            res.is_ok(),
+            "不开 ACL 时，匹配不上规则也必须照常解析：{res:?}"
+        );
 
         // ② 全局打开 + 规则不匹配 → REFUSED（且是"明确状态码"，不是 SERVFAIL）
         let cfg = RuntimeConfig::builder()
@@ -401,7 +403,10 @@ mod tests {
                 },
             )
             .await;
-        assert!(res.is_ok(), "后台请求不许被 ACL 拒掉（否则预取会自己废掉）：{res:?}");
+        assert!(
+            res.is_ok(),
+            "后台请求不许被 ACL 拒掉（否则预取会自己废掉）：{res:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -173,12 +173,13 @@ impl FromStr for DnsUrl {
             Some(host) => {
                 let mut host = host.to_owned();
                 if let Host::Domain(ref domain) = host
-                    && let Ok(ip) = IpAddr::from_str(domain) {
-                        host = match ip {
-                            IpAddr::V4(ip) => Host::Ipv4(ip),
-                            IpAddr::V6(ip) => Host::Ipv6(ip),
-                        };
-                    }
+                    && let Ok(ip) = IpAddr::from_str(domain)
+                {
+                    host = match ip {
+                        IpAddr::V4(ip) => Host::Ipv4(ip),
+                        IpAddr::V6(ip) => Host::Ipv6(ip),
+                    };
+                }
                 Some(host)
             }
             None => None,
@@ -966,16 +967,19 @@ mod tests {
     fn test_decode_spki_pin() {
         let good = base64::encode([7u8; 32]);
         assert_eq!(decode_spki_pin(&good), Ok([7u8; 32]));
-        assert_eq!(decode_spki_pin(&format!("  {good}  ")), Ok([7u8; 32]), "两头有空格也应认");
+        assert_eq!(
+            decode_spki_pin(&format!("  {good}  ")),
+            Ok([7u8; 32]),
+            "两头有空格也应认"
+        );
 
         let short = base64::encode([7u8; 31]);
         let err = decode_spki_pin(&short).unwrap_err();
         assert!(err.contains("31 字节"), "要说清解码后是多少字节：{err}");
 
-        while let Err(err) = decode_spki_pin(&base64::encode([7u8; 33])) {
-            assert!(err.contains("33 字节"), "{err}");
-            break;
-        }
+        let long = base64::encode([7u8; 33]);
+        let err = decode_spki_pin(&long).unwrap_err();
+        assert!(err.contains("33 字节"), "要说清解码后是多少字节：{err}");
 
         assert!(decode_spki_pin("这不是-base64!!").is_err());
         assert!(decode_spki_pin("").is_err());
@@ -992,7 +996,11 @@ mod tests {
         assert_eq!(url.spki_pin(), Some([0xABu8; 32]));
 
         url.set_spki_pin("写错了");
-        assert_eq!(url.spki_pin(), None, "写法不合法时按没配处理（解析那一步已经报过错）");
+        assert_eq!(
+            url.spki_pin(),
+            None,
+            "写法不合法时按没配处理（解析那一步已经报过错）"
+        );
     }
 
     #[test]

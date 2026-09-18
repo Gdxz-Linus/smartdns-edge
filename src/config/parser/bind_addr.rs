@@ -238,7 +238,9 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
                 Some(Ok((_, sets))) => {
                     opts.nftset.get_or_insert_with(Vec::new).extend(sets);
                 }
-                Some(Err(err)) => crate::log::error!("监听上的 `-nftset` 值不合法，已忽略：{err:?}"),
+                Some(Err(err)) => {
+                    crate::log::error!("监听上的 `-nftset` 值不合法，已忽略：{err:?}")
+                }
                 None => crate::log::warn!("监听上的 `-nftset` 后面缺值，已忽略"),
             },
             "ipset" => match v.map(Vec::<ConfigForIP<IpsetConfig>>::parse) {
@@ -514,13 +516,13 @@ mod tests {
         assert_eq!(
             TlsBindAddrConfig::parse("bind-tls 0.0.0.0:4453 -server-name dns.example.com -ssl-certificate /etc/nginx/dns.example.com.crt -ssl-certificate-key /etc/nginx/dns.example.com.key").unwrap(),
             (
-                "", 
+                "",
                 TlsBindAddrConfig {
                     addr: BindAddr::V4("0.0.0.0".parse().unwrap()),
                     port: 4453,
                     ssl_config: SslConfig {
-                        server_name: Some("dns.example.com".to_string()), 
-                        certificate: Some(Path::new("/etc/nginx/dns.example.com.crt").to_path_buf()), 
+                        server_name: Some("dns.example.com".to_string()),
+                        certificate: Some(Path::new("/etc/nginx/dns.example.com.crt").to_path_buf()),
                         certificate_key: Some(Path::new("/etc/nginx/dns.example.com.key").to_path_buf()),
                         ..Default::default()
                     },

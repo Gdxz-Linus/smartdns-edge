@@ -15,7 +15,9 @@ pub struct IdentityZoneProvider {
     // 🌟 一级防御：全局 LRU 缓存，容量 4096，生存期 60 秒
     arp_cache: Arc<std::sync::Mutex<lru::LruCache<IpAddr, (String, std::time::Instant)>>>,
     // 🌟 二级防御：基于 IP 的 Single-Flight 并发折叠状态表，彻底消除全局锁
-    inflight_arp: Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>>>,
+    inflight_arp: Arc<
+        std::sync::Mutex<std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>>,
+    >,
 }
 
 impl IdentityZoneProvider {
@@ -31,14 +33,15 @@ impl IdentityZoneProvider {
     // 🌟 核心防御引擎：Single-Flight 并发请求折叠
     async fn get_client_mac(&self, client_ip: IpAddr) -> String {
         let now = std::time::Instant::now();
-        
+
         // 1. 无锁光速尝试读取缓存
         {
             let mut cache = self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((mac, expire_at)) = cache.get(&client_ip)
-                && now < *expire_at {
-                    return mac.clone();
-                }
+                && now < *expire_at
+            {
+                return mac.clone();
+            }
         }
 
         // 2. 缓存穿透，准备请求操作系统。
@@ -64,7 +67,11 @@ impl IdentityZoneProvider {
 
         // 🌟 3. 给天选之子发放生命周期智能工牌，防止中途异常 panic 导致对讲机永远不响应
         struct InflightArpGuard {
-            inflight: Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>>>,
+            inflight: Arc<
+                std::sync::Mutex<
+                    std::collections::HashMap<IpAddr, tokio::sync::broadcast::Sender<String>>,
+                >,
+            >,
             ip: IpAddr,
             done: bool,
         }
@@ -86,17 +93,22 @@ impl IdentityZoneProvider {
         };
 
         // 4. 扔到 blocking 线程池，绝不挂起 Tokio 主线程！
-        let fetched_mac = tokio::task::spawn_blocking(move || {
-            lookup_client_mac_from_arp(client_ip)
-        })
-        .await
-        .unwrap_or(None)
-        .unwrap_or_else(|| UNKNOWN_CLIENT_MAC.to_string());
+        let fetched_mac =
+            tokio::task::spawn_blocking(move || lookup_client_mac_from_arp(client_ip))
+                .await
+                .unwrap_or(None)
+                .unwrap_or_else(|| UNKNOWN_CLIENT_MAC.to_string());
 
         // 5. 拿到结果，先存入冰柜造福后续请求
         {
             let mut cache = self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.put(client_ip, (fetched_mac.clone(), std::time::Instant::now() + std::time::Duration::from_secs(60)));
+            cache.put(
+                client_ip,
+                (
+                    fetched_mac.clone(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(60),
+                ),
+            );
         }
 
         // 6. 用对讲机广播复印件给所有坐在板凳上等待的兄弟，并销毁频道
@@ -143,9 +155,11 @@ impl ZoneProvider for IdentityZoneProvider {
                 txt_response(query, crate::BUILD_VERSION.to_string())
             }
             CanonicalIdentityQuery::ClientIp => txt_response(query, client_ip.to_string()),
-            
+
             // 🌟 安全接入：只有在真正需要查 MAC 的记录时，才去触发带有阵列防御的异步引擎！
-            CanonicalIdentityQuery::ClientMac => txt_response(query, self.get_client_mac(client_ip).await),
+            CanonicalIdentityQuery::ClientMac => {
+                txt_response(query, self.get_client_mac(client_ip).await)
+            }
             CanonicalIdentityQuery::WhoAmIJson => txt_response(
                 query,
                 build_info_json_text(

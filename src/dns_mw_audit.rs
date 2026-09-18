@@ -67,7 +67,7 @@ impl DnsAuditMiddleware {
         syslog: bool,
     ) -> Self {
         let audit_file = path.as_ref().to_owned();
-        
+
         // 🌟 扩大缓冲池，配合 try_send 吸收突发流量
         let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(1024);
 
@@ -83,7 +83,7 @@ impl DnsAuditMiddleware {
             const BUF_SIZE: usize = 10;
             // 改用 Vec 方便利用 std::mem::replace 进行内存腾挪
             let mut buf: Vec<DnsAuditRecord> = Vec::with_capacity(BUF_SIZE);
-            
+
             // 🌟 核心修复 2：加入定时器，每 3 秒强制刷新一次，拒绝“日志黑洞”
             let mut flush_interval = tokio::time::interval(Duration::from_secs(3));
 
@@ -92,7 +92,7 @@ impl DnsAuditMiddleware {
                     _ = flush_interval.tick() => {
                         if !buf.is_empty() {
                             let records_to_write = std::mem::replace(&mut buf, Vec::with_capacity(BUF_SIZE));
-                            
+
                             // 🌟 核心修复 1：把 block_in_place 替换为 spawn_blocking。
                             // 相当于给写磁盘开辟了一条专属的“系统辅道”，绝不霸占 Tokio 的高速主干道！
                             // 利用 Rust 的 Move 语义将文件句柄带进辅道，写完再带出来，完美绕过借用检查。
@@ -113,7 +113,7 @@ impl DnsAuditMiddleware {
                                 buf.push(audit);
                                 if buf.len() >= BUF_SIZE {
                                     let records_to_write = std::mem::replace(&mut buf, Vec::with_capacity(BUF_SIZE));
-                                    
+
                                     // 🌟 核心修复 2：同上，转移至系统辅道执行磁盘 I/O
                                     audit_file = tokio::task::spawn_blocking(move || {
                                         if syslog {
@@ -366,7 +366,6 @@ mod tests {
             "127.0.0.1 query www.example.com, type: A, elapsed: 10ms, speed: 11ms, result 93.184.216.34 86400 A"
         );
     }
-
 
     /// 🔐 Q9：开了 `audit-console` 之后，审计**照样**要落到文件里
     /// （控制台那半走 stdout，单测里只看"文件这半没被搞坏"）。

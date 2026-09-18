@@ -18,11 +18,14 @@ pub use self::windows_service::run;
 
 #[inline]
 pub(super) fn create_service_definition() -> ServiceDefinition {
-    let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("smartdns.exe"));
-    let current_dir = current_exe.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let current_exe =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("smartdns.exe"));
+    let current_dir = current_exe
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
     let conf_path_abs = current_dir.join("smartdns.conf");
-	
-	// 🌟 新增这一行：提取 exe 的绝对路径，后面配置防火墙要用
+
+    // 🌟 新增这一行：提取 exe 的绝对路径，后面配置防火墙要用
     // 🔐 P2：这个路径要插进 PowerShell 的**双引号**字符串里（下面两条防火墙规则），
     // 其中的 ` 、$ 、" 都会改变命令含义（`$` 会被当变量展开），先转义再拼。
     let exe_path_str = current_exe
@@ -33,7 +36,12 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
 
     let installer = Installer::builder()
         // 🌟 修复编译报错：加上 .as_bytes()，满足 Rust 的强类型检查
-        .add_item((conf_path_abs.as_path(), crate::DEFAULT_CONF.as_bytes(), Preserve, Keep))
+        .add_item((
+            conf_path_abs.as_path(),
+            crate::DEFAULT_CONF.as_bytes(),
+            Preserve,
+            Keep,
+        ))
         .build();
 
     let mut bin_path = OsString::new();
@@ -76,7 +84,7 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 ).into(),
             ],
         }),
-        
+
         // 🌟 终极修复：卸载时先强杀进程，清防火墙，再删除服务。
         uninstall: Some(ServiceCommand {
             program: "powershell.exe".into(),
@@ -95,7 +103,7 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 ).into()
             ],
         }),
-        
+
         // 🌟 终极修复：使用 Start-Service，自带友好的错误捕获
         start: ServiceCommand {
             program: "powershell.exe".into(),
@@ -111,7 +119,7 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 ).into()
             ],
         },
-        
+
         // 🌟 终极修复：Stop-Service 是同步阻塞的！它会耐心等待服务彻底停稳，杜绝重启时的竞态条件报错！
         stop: ServiceCommand {
             program: "powershell.exe".into(),
@@ -127,7 +135,7 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 ).into()
             ],
         },
-		
+
         // 🌟 终极修复：利用 PowerShell 原生的 Restart-Service 实现原子级平滑重启！
         restart: Some(ServiceCommand {
             program: "powershell.exe".into(),
@@ -143,7 +151,7 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 ).into()
             ],
         }),
-		
+
         // 🌟 终极修复：抛弃原始丑陋的 sc query 文本，改用 PowerShell 面向对象查询！
         // 免疫 Windows 中英文语言差异，并输出带有状态指示灯 (🟢/🔴) 的专业级人类友好排版！
         status: Some(ServiceCommand {

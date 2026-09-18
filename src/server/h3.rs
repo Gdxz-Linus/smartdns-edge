@@ -66,7 +66,8 @@ pub fn serve(
         crate::api::routes()
     } else {
         crate::api::dns_only_routes()
-    }).with_state(state.clone());
+    })
+    .with_state(state.clone());
     let router = H3Router::new(router);
 
     let acceptor = QuinnPeerAcceptor::new(endpoint, listener_limiter);
@@ -114,9 +115,7 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
     type RS = h3_quinn::RecvStream;
     type BS = h3_quinn::BidiStream<axum::body::Bytes>;
 
-    async fn accept(
-        &mut self,
-    ) -> Result<Option<(Self::CONN, Option<SocketAddr>)>, h3_util::Error> {
+    async fn accept(&mut self) -> Result<Option<(Self::CONN, Option<SocketAddr>)>, h3_util::Error> {
         loop {
             let Some(incoming) = self.endpoint.accept().await else {
                 // endpoint 已关闭

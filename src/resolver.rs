@@ -20,7 +20,7 @@ impl ResolveCommand {
     pub fn execute(self) {
         let is_json = self.json;
         let is_short = self.short;
-        
+
         let proto = self.proto();
         // 如果没写 -s，就必须老老实实去读网卡的系统 DNS！
         let mut server = match self.global_server() {
@@ -32,7 +32,9 @@ impl ResolveCommand {
                     crate::libdns::resolver::system_conf::read_system_conf()
                         .ok()
                         // 🌟 修复报错：适配最新版本 hickory-resolver 的 API 变更，直接读取 ns.ip
-                        .and_then(|(conf, _)| conf.name_servers.first().map(|ns| DnsUrl::from(ns.ip)))
+                        .and_then(|(conf, _)| {
+                            conf.name_servers.first().map(|ns| DnsUrl::from(ns.ip))
+                        })
                 } else {
                     // 什么都没指定，返回 None。
                     // 底层会自动调用我们前几天写好的 BootstrapResolver，完美联动红字高亮报警！
@@ -41,9 +43,10 @@ impl ResolveCommand {
             }
         };
         if let Some(proto) = proto
-            && let Some(s) = server.as_mut() {
-                s.set_proto(proto)
-            }
+            && let Some(s) = server.as_mut()
+        {
+            s.set_proto(proto)
+        }
         let domains = self.domains();
         // 🌟 核心修复 1：如果解析出来的类型是空的，强制兜底注入 A 记录！
         let mut query_types = self.q_type().to_vec();
@@ -99,7 +102,7 @@ impl ResolveCommand {
                             }
                             Err(err) => {
                                 let query = crate::libdns::proto::op::Query::query(domain.clone(), *query_type);
-                                
+
                                 if is_json {
                                     if let Some(soa_res) = err.as_soa(&query) {
                                         print_json(&soa_res, Some(&err.to_string()));
@@ -221,16 +224,20 @@ impl ResolveCommand {
         let mut proto = None;
         let mut q_types = Vec::new();
         let mut q_class = None;
-        
+
         // 🌟 修复暗坑 1：将单变量改为数组，容量无限，绝不覆盖！
-        let mut domains = Vec::new(); 
+        let mut domains = Vec::new();
         let mut global_server = None;
-        
+
         // 🌟 修复暗坑 2：让自定义解析器也认识这俩参数
         let mut is_json = false;
         let mut is_short = false;
 
-        let mut iter = itr.into_iter().skip(1).map(|a| a.into().into_string().expect("Failed to convert OsString to String"));
+        let mut iter = itr.into_iter().skip(1).map(|a| {
+            a.into()
+                .into_string()
+                .expect("Failed to convert OsString to String")
+        });
 
         while let Some(arg) = iter.next() {
             if arg == "resolve" {
@@ -248,16 +255,40 @@ impl ResolveCommand {
 
             if arg.starts_with('-') && proto.is_none() {
                 match arg.as_str() {
-                    "-U" | "--udp" => { proto = Some(Udp); continue; }
-                    "-T" | "--tcp" => { proto = Some(Tcp); continue; }
-                    "-S" | "--tls" => { proto = Some(Tls); continue; }
-                    "-Q" | "--quic" => { proto = Some(Quic); continue; }
-                    "-H" | "--https" => { proto = Some(Https); continue; }
-                    "-H3" | "--h3" => { proto = Some(H3); continue; }
-                    
+                    "-U" | "--udp" => {
+                        proto = Some(Udp);
+                        continue;
+                    }
+                    "-T" | "--tcp" => {
+                        proto = Some(Tcp);
+                        continue;
+                    }
+                    "-S" | "--tls" => {
+                        proto = Some(Tls);
+                        continue;
+                    }
+                    "-Q" | "--quic" => {
+                        proto = Some(Quic);
+                        continue;
+                    }
+                    "-H" | "--https" => {
+                        proto = Some(Https);
+                        continue;
+                    }
+                    "-H3" | "--h3" => {
+                        proto = Some(H3);
+                        continue;
+                    }
+
                     // 🌟 拦截短格式与 JSON 参数
-                    "-J" | "--json" => { is_json = true; continue; }
-                    "-1" | "--short" => { is_short = true; continue; }
+                    "-J" | "--json" => {
+                        is_json = true;
+                        continue;
+                    }
+                    "-1" | "--short" => {
+                        is_short = true;
+                        continue;
+                    }
                     _ => (),
                 }
             }
@@ -283,7 +314,7 @@ impl ResolveCommand {
                 match v {
                     Variant::Domain(d) => {
                         // 🌟 核心修复：来多少个域名就存多少个，绝不覆盖！
-                        domains.push(d); 
+                        domains.push(d);
                     }
                     Variant::RecordType(t) => {
                         q_types.push(t);
@@ -467,7 +498,14 @@ fn print(message: &Message, palette: &Colours) {
             let ttl_str = r.ttl().to_string();
             let sec_str = sec.to_string();
             let data_str = r.data().to_string();
-            rows.push((r.record_type(), name_str, type_str, ttl_str, sec_str, data_str));
+            rows.push((
+                r.record_type(),
+                name_str,
+                type_str,
+                ttl_str,
+                sec_str,
+                data_str,
+            ));
         }
     };
 
@@ -475,15 +513,17 @@ fn print(message: &Message, palette: &Colours) {
     process_records(message.authorities(), "Authority");
     process_records(message.additionals(), "Additional");
 
-    if rows.is_empty() { return; }
+    if rows.is_empty() {
+        return;
+    }
 
     // 🌟 列宽与视觉边界控制
-    const W_NAME: usize = 40;        // Name 列总物理宽度
-    const MAX_NAME_LEN: usize = 37;  // Name 切片最大长度（强制预留至少 3 个视觉空格！）
-    const W_TYPE: usize = 10;        // Type 列宽度
-    const W_TTL: usize = 8;          // TTL 列宽度
-    const W_SEC: usize = 12;         // Section 列宽度
-    
+    const W_NAME: usize = 40; // Name 列总物理宽度
+    const MAX_NAME_LEN: usize = 37; // Name 切片最大长度（强制预留至少 3 个视觉空格！）
+    const W_TYPE: usize = 10; // Type 列宽度
+    const W_TTL: usize = 8; // TTL 列宽度
+    const W_SEC: usize = 12; // Section 列宽度
+
     // 🌟 核心修复：动态获取终端物理宽度，精准计算 Data 列的最大安全宽度
     // 彻底杜绝由于终端硬回车导致的“孤儿字符”错位现象！
     let term_cols = console::Term::stdout().size().1 as usize;
@@ -495,7 +535,7 @@ fn print(message: &Message, palette: &Colours) {
     };
 
     let header_style = Style::new().green().bold();
-    
+
     // 1. 打印表头
     println!(
         "{}{}{}{}{}",
@@ -534,7 +574,7 @@ fn print(message: &Message, palette: &Colours) {
         // 严格按照对应的限制长度进行切片
         let name_chunks = chunk_string(&name, MAX_NAME_LEN);
         let data_chunks = chunk_string(&data, max_data_len);
-        
+
         let max_lines = std::cmp::max(name_chunks.len(), data_chunks.len());
 
         for i in 0..max_lines {
@@ -755,14 +795,14 @@ fn print_json(message: &Message, error: Option<&str>) {
 
     let mut json = String::new();
     json.push('{');
-    
+
     if let Some(e) = error {
         json.push_str(&format!(r#""error":"{}","#, escape_json(e)));
     }
-    
+
     json.push_str(&format!(r#""status":"{}","#, message.response_code()));
     json.push_str(&format!(r#""tc":{},"#, message.truncated()));
-    
+
     // 零依赖宏，手动高效组装 JSON 数组
     macro_rules! format_section {
         ($records:expr) => {{
@@ -778,13 +818,22 @@ fn print_json(message: &Message, error: Option<&str>) {
                 ));
             }
             vec.join(",")
-        }}
+        }};
     }
-    
-    json.push_str(&format!(r#""answers":[{}],"#, format_section!(message.answers())));
-    json.push_str(&format!(r#""authorities":[{}],"#, format_section!(message.authorities())));
-    json.push_str(&format!(r#""additionals":[{}]"#, format_section!(message.additionals())));
-    
+
+    json.push_str(&format!(
+        r#""answers":[{}],"#,
+        format_section!(message.answers())
+    ));
+    json.push_str(&format!(
+        r#""authorities":[{}],"#,
+        format_section!(message.authorities())
+    ));
+    json.push_str(&format!(
+        r#""additionals":[{}]"#,
+        format_section!(message.additionals())
+    ));
+
     json.push('}');
     println!("{}", json);
 }

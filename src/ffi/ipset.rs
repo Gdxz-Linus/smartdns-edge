@@ -126,11 +126,7 @@ fn encode_add(setname: &str, addr: IpAddr, timeout: u64, seq: u32) -> io::Result
     //     └── attr IP（嵌套）──
     let ip_start = buf.len();
     push_attr_header(&mut buf, NLA_F_NESTED | IPSET_ATTR_IP);
-    push_attr(
-        &mut buf,
-        addr_attr_type | NLA_F_NET_BYTEORDER,
-        &addr_bytes,
-    );
+    push_attr(&mut buf, addr_attr_type | NLA_F_NET_BYTEORDER, &addr_bytes);
     close_nested_attr(&mut buf, ip_start);
 
     if timeout > 0 {
@@ -235,10 +231,10 @@ mod imp {
     use std::mem::size_of;
     use std::net::IpAddr;
     use std::os::fd::RawFd;
-    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-    use super::{encode_add, NFNL_SUBSYS_IPSET};
+    use super::{NFNL_SUBSYS_IPSET, encode_add};
 
     /// 复用一个 netlink 套接字（C 版也是全局复用一个 fd）
     static IPSET_FD: AtomicI32 = AtomicI32::new(-1);
@@ -258,7 +254,8 @@ mod imp {
         }
 
         // AF_NETLINK / SOCK_RAW / NETLINK_NETFILTER(12)
-        let new_fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 12) };
+        let new_fd =
+            unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 12) };
         if new_fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -510,13 +507,22 @@ mod tests {
             ("dns4", IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)), 0u64),
             ("a", IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 60),
             ("dns6", IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
-            ("a-very-long-set-name-31chars-ab", IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 300),
+            (
+                "a-very-long-set-name-31chars-ab",
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                300,
+            ),
         ] {
             let buf = encode_add(setname, addr, timeout, 1).unwrap();
 
             // 报头声明的长度必须等于实际字节数
             let declared = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            assert_eq!(declared, buf.len(), "报文头声明 {declared}，实际 {}", buf.len());
+            assert_eq!(
+                declared,
+                buf.len(),
+                "报文头声明 {declared}，实际 {}",
+                buf.len()
+            );
             assert_eq!(buf.len() % 4, 0, "报文总长要 4 字节对齐");
 
             // 从第一个属性开始走：每个属性的长度都必须"含头、且落在 4 字节边界上"
@@ -558,8 +564,7 @@ mod tests {
             // 否则会走进属性中间的字节，读出 0 长度然后死循环（本测试踩过这个坑）
             off += align(len);
         };
-        let data_len =
-            u16::from_ne_bytes([buf[data_off], buf[data_off + 1]]) as usize;
+        let data_len = u16::from_ne_bytes([buf[data_off], buf[data_off + 1]]) as usize;
 
         // DATA 里：IP 块 + TIMEOUT
         let p = data_off + 4;
@@ -584,18 +589,30 @@ mod tests {
         assert_ne!(to_ty & NLA_F_NET_BYTEORDER, 0, "超时要网络字节序");
         assert_eq!(to_len, 8);
         assert_eq!(
-            u32::from_be_bytes([buf[after_ip + 4], buf[after_ip + 5], buf[after_ip + 6], buf[after_ip + 7]]),
+            u32::from_be_bytes([
+                buf[after_ip + 4],
+                buf[after_ip + 5],
+                buf[after_ip + 6],
+                buf[after_ip + 7]
+            ]),
             90
         );
 
-        assert_eq!(after_ip + to_len, data_off + data_len, "DATA 的长度要正好包住里面两个属性");
+        assert_eq!(
+            after_ip + to_len,
+            data_off + data_len,
+            "DATA 的长度要正好包住里面两个属性"
+        );
     }
 
     /// 集合名长度按内核上限卡住，并且**说明白**为什么被拒（不是静默失败）
     #[test]
     fn setname_length_is_checked() {
         let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        assert!(encode_add(&"a".repeat(31), addr, 0, 1).is_ok(), "31 字符可以");
+        assert!(
+            encode_add(&"a".repeat(31), addr, 0, 1).is_ok(),
+            "31 字符可以"
+        );
 
         let err = encode_add(&"a".repeat(32), addr, 0, 1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);

@@ -86,9 +86,7 @@ impl TlsClientConfigBundle {
                 Arc::new(rustls::crypto::ring::default_provider()),
             )
             .build()
-            .map_err(|err| {
-                rustls::Error::General(format!("构建证书链校验器失败：{err}"))
-            })?
+            .map_err(|err| rustls::Error::General(format!("构建证书链校验器失败：{err}")))?
         } else {
             Arc::new(NoCertificateVerification)
         };
@@ -221,14 +219,17 @@ impl rustls::client::danger::ServerCertVerifier for SpkiPinVerifier {
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         // ① 先按原有规矩验（这一步保证"配了 pin"不等于"放开了证书链校验"）
-        self.inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
 
         // ② 再核对公钥
         let spki = extract_spki(end_entity.as_ref()).ok_or_else(|| {
-            rustls::Error::General(
-                "读不出对端证书的公钥（SPKI），无法核对 spki-pin".to_string(),
-            )
+            rustls::Error::General("读不出对端证书的公钥（SPKI），无法核对 spki-pin".to_string())
         })?;
 
         let hash = digest(&SHA256, &spki);
@@ -598,8 +599,16 @@ mod spki_pin_tests {
     fn extract_spki_returns_none_on_garbage() {
         assert_eq!(extract_spki(&[]), None);
         assert_eq!(extract_spki(&[0x30]), None);
-        assert_eq!(extract_spki(&[0x30, 0x05, 0x01]), None, "长度声明的比实际长");
+        assert_eq!(
+            extract_spki(&[0x30, 0x05, 0x01]),
+            None,
+            "长度声明的比实际长"
+        );
         assert_eq!(extract_spki(&[0x31, 0x00]), None, "顶层不是 SEQUENCE");
-        assert_eq!(extract_spki(&[0x30, 0x02, 0x31, 0x00]), None, "里面第一个不是 SEQUENCE");
+        assert_eq!(
+            extract_spki(&[0x30, 0x02, 0x31, 0x00]),
+            None,
+            "里面第一个不是 SEQUENCE"
+        );
     }
 }

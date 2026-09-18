@@ -44,11 +44,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsmasqMiddle
                 .map(|rdata| Record::from_rdata(name.clone(), local_ttl as u32, rdata))
                 .collect();
 
-            let mut lookup = DnsResponse::new_with_deadline(
-                query,
-                records,
-                valid_until,
-            );
+            let mut lookup = DnsResponse::new_with_deadline(query, records, valid_until);
 
             // 🌟 终极修复：如果是空包（如查 AAAA 但设备只有 IPv4），
             // 必须在权威区盖上 SOA 戳！否则苹果/Windows 设备会拒绝缓存并疯狂发起重试风暴！
@@ -57,7 +53,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsmasqMiddle
                 let soa = crate::dns::Record::from_rdata(
                     crate::dns::Name::root(),
                     local_ttl as u32,
-                    crate::dns::RData::default_soa()
+                    crate::dns::RData::default_soa(),
                 );
                 lookup.add_authority(soa);
             }

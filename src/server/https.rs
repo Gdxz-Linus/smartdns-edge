@@ -33,7 +33,10 @@ pub fn serve(
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
 
-    log::debug!("HTTPS listener successfully registered on {}", listener.local_addr().unwrap());
+    log::debug!(
+        "HTTPS listener successfully registered on {}",
+        listener.local_addr().unwrap()
+    );
 
     let tls_config = tls_server_config(b"h2", server_cert_resolver)
         .map_err(|e| io::Error::other(format!("error creating TLS acceptor: {e}")))?;
@@ -55,9 +58,9 @@ pub fn serve(
     } else {
         crate::api::dns_only_routes()
     })
-        .layer(service_builder)
-        .with_state(state.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
+    .layer(service_builder)
+    .with_state(state.clone())
+    .into_make_service_with_connect_info::<SocketAddr>();
 
     tokio::spawn(async move {
         // 🔐 逐监听连接上限（若该监听单独配了 max-connections*，与全局限额同时生效）
@@ -109,7 +112,7 @@ pub fn serve(
                     }
                 },
                 None => None,
-};
+            };
 
             let tls_acceptor = tls_acceptor.clone();
 
@@ -117,15 +120,16 @@ pub fn serve(
             let mut make_service = make_service.clone();
             inner_join_set.spawn(async move {
                 let _conn_guard = conn_guard; // 连接结束时自动归还配额
-                    let _listener_guard = listener_guard;
+                let _listener_guard = listener_guard;
                 log::debug!("starting HTTPS request from: {}", src_addr);
 
                 // perform the TLS
                 // 🌟 核心修复：同理，防 DoH 的慢速连接死锁
                 let tls_stream = tokio::time::timeout(
-                    std::time::Duration::from_secs(5), 
-                    tls_acceptor.accept(tcp_stream)
-                ).await;
+                    std::time::Duration::from_secs(5),
+                    tls_acceptor.accept(tcp_stream),
+                )
+                .await;
 
                 let socket = match tls_stream {
                     Ok(Ok(tls_stream)) => tls_stream,

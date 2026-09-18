@@ -215,7 +215,14 @@ pub fn serve(
                 .filter(|c| matches!(c, BindAddrConfig::H3(_)))
                 .map(|c| c.port())
                 .next();
-            https::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api(), server_cert_resolver, h3_port)?
+            https::serve(
+                app,
+                listener,
+                dns_handle,
+                !bind_addr_config.opts.no_api(),
+                server_cert_resolver,
+                h3_port,
+            )?
         }
         #[cfg(feature = "dns-over-h3")]
         BindAddrConfig::H3(bind_addr_config) => {
@@ -237,7 +244,13 @@ pub fn serve(
             )?;
 
             let app = app.clone();
-            h3::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api(), server_cert_resolver)?
+            h3::serve(
+                app,
+                listener,
+                dns_handle,
+                !bind_addr_config.opts.no_api(),
+                server_cert_resolver,
+            )?
         }
         #[cfg(feature = "dns-over-quic")]
         BindAddrConfig::Quic(bind_addr_config) => {
@@ -348,8 +361,11 @@ impl DnsHandle {
                 tokio::sync::mpsc::error::TrySendError::Full((msg, _, _)) => msg,
                 tokio::sync::mpsc::error::TrySendError::Closed((msg, _, _)) => msg,
             };
-            crate::log::trace!("System overloaded or closed, dropped DNS request from {}", addr);
-            
+            crate::log::trace!(
+                "System overloaded or closed, dropped DNS request from {}",
+                addr
+            );
+
             if protocol == crate::libdns::Protocol::Udp {
                 // 🌟 核心修复 1：在 UDP 协议下，遇到超载直接生成空字节包！
                 // 这将通知外层 Socket 触发沉默丢包（Silent Drop），彻底防止沦为 DDoS 反射放大器！
@@ -520,11 +536,12 @@ mod oversized_datagram_tests {
             is_oversized_datagram(&std::io::Error::from_raw_os_error(10040)),
             "WSAEMSGSIZE(10040) 必须被识别为报文过大"
         );
-        assert!(!is_oversized_datagram(&std::io::Error::from_raw_os_error(0)));
+        assert!(!is_oversized_datagram(&std::io::Error::from_raw_os_error(
+            0
+        )));
         assert!(!is_oversized_datagram(&std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "test"
         )));
     }
 }
-

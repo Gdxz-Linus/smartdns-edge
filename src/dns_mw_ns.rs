@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::{borrow::Borrow, net::IpAddr, time::Duration};
 use std::sync::LazyLock;
+use std::{borrow::Borrow, net::IpAddr, time::Duration};
 use tokio::sync::Semaphore;
 
 // 🌟 全局测速限流关卡：最多并发 1500 个测速任务！
@@ -24,9 +24,9 @@ use crate::libdns::proto::rr::domain::usage::LOCAL;
 use crate::libdns::proto::{op::ResponseCode, rr::rdata::opt::EdnsCode};
 use futures::FutureExt;
 use rr::rdata::opt::EdnsOption;
-use tokio::time::sleep;
+use std::sync::Mutex;
 use tokio::sync::broadcast; // 🌟 引入广播频道
-use std::sync::Mutex;       // 🌟 引入互斥锁
+use tokio::time::sleep; // 🌟 引入互斥锁
 
 pub struct NameServerMiddleware {
     client: DnsClient,
@@ -36,7 +36,7 @@ pub struct NameServerMiddleware {
 
 impl NameServerMiddleware {
     pub fn new(client: DnsClient) -> Self {
-        Self { 
+        Self {
             client,
             inflight: Arc::new(Mutex::new(HashMap::new())), // 🌟 初始化
         }
@@ -58,20 +58,21 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         let client = &self.client;
 
         if rtype.is_ip_addr()
-            && let Some(lookup) = client.lookup_nameserver(name.clone(), rtype).await {
-                debug!(
-                    "lookup nameserver {} {} ip {:?}",
-                    name,
-                    rtype,
-                    lookup
-                        .answers()
-                        .iter()
-                        .filter_map(|record| record.data().ip_addr())
-                        .collect::<Vec<_>>()
-                );
-                ctx.no_cache = true;
-                return Ok(lookup);
-            }
+            && let Some(lookup) = client.lookup_nameserver(name.clone(), rtype).await
+        {
+            debug!(
+                "lookup nameserver {} {} ip {:?}",
+                name,
+                rtype,
+                lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| record.data().ip_addr())
+                    .collect::<Vec<_>>()
+            );
+            ctx.no_cache = true;
+            return Ok(lookup);
+        }
 
         let lookup_options = LookupOptions {
             // 无论客户端带不带 DO 标志，向外网查询时一律填 false，拒绝向上游索要加密签名！
@@ -224,7 +225,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             }
             hasher.finish()
         };
-        let cache_key = format!("{}:{}:{}:{}:{:x}", name, rtype, group_name, fold_ecs, fold_proc);
+        let cache_key = format!(
+            "{}:{}:{}:{}:{:x}",
+            name, rtype, group_name, fold_ecs, fold_proc
+        );
 
         let rx = {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
@@ -281,34 +285,50 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
 
         // 🌟 核心保护（定时炸弹）：强制 5 秒超时！哪怕底层网络黑洞、UDP丢包或死锁，
         // 只要 5 秒一到，立刻砍断执行权！触发大哥的异常，从而拯救所有在等候室无限挂起的小弟！
-        let mut actual_result = match tokio::time::timeout(Duration::from_secs(5), lookup_future).await {
-            Ok(result) => result, // 5秒内回来了，正常交差
-            Err(_) => {
-                // 超时触发！操作系统强杀！
-                crate::log::debug!("Global timeout (5s) triggered for query: {} {}", name, rtype);
-                Err(DnsError::Io(Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "upstream request timeout (5s)",
-                ))))
-            }
-        };
-		
-		// 🌟 【终极修复：初始 TTL 限制器】：在刚拿到上游包裹时，立刻用配置的界限去约束它！
+        let mut actual_result =
+            match tokio::time::timeout(Duration::from_secs(5), lookup_future).await {
+                Ok(result) => result, // 5秒内回来了，正常交差
+                Err(_) => {
+                    // 超时触发！操作系统强杀！
+                    crate::log::debug!(
+                        "Global timeout (5s) triggered for query: {} {}",
+                        name,
+                        rtype
+                    );
+                    Err(DnsError::Io(Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream request timeout (5s)",
+                    ))))
+                }
+            };
+
+        // 🌟 【终极修复：初始 TTL 限制器】：在刚拿到上游包裹时，立刻用配置的界限去约束它！
         // 这样 Dualstack 和 Cache 拿到的就是天然合规的包裹，倒计时完美生效！
         if let Ok(ref mut res) = actual_result {
             // 🌟 提取 rr-ttl (如果配置了，它拥有最高统治权)
-            let rr_ttl = ctx.domain_rule.as_ref().and_then(|r| r.rr_ttl).map(|i| i as u32)
+            let rr_ttl = ctx
+                .domain_rule
+                .as_ref()
+                .and_then(|r| r.rr_ttl)
+                .map(|i| i as u32)
                 .or_else(|| ctx.cfg().rr_ttl().map(|i| i as u32));
 
-            let rr_ttl_min = ctx.domain_rule.as_ref().and_then(|r| r.rr_ttl_min).map(|i| i as u32)
+            let rr_ttl_min = ctx
+                .domain_rule
+                .as_ref()
+                .and_then(|r| r.rr_ttl_min)
+                .map(|i| i as u32)
                 .unwrap_or_else(|| ctx.cfg().rr_ttl_min().unwrap_or(0) as u32);
-            let rr_ttl_max = ctx.domain_rule.as_ref().and_then(|r| r.rr_ttl_max).map(|i| i as u32)
+            let rr_ttl_max = ctx
+                .domain_rule
+                .as_ref()
+                .and_then(|r| r.rr_ttl_max)
+                .map(|i| i as u32)
                 .unwrap_or_else(|| ctx.cfg().rr_ttl_max().unwrap_or(86400) as u32);
-            
+
             // 裁剪逻辑抽成独立函数 clamp_record_ttl（见本文件末尾），便于单元测试直接覆盖。
-            let clamp_ttl = |record: &mut Record| {
-                clamp_record_ttl(record, rr_ttl, rr_ttl_min, rr_ttl_max)
-            };
+            let clamp_ttl =
+                |record: &mut Record| clamp_record_ttl(record, rr_ttl, rr_ttl_min, rr_ttl_max);
 
             res.answers_mut().iter_mut().for_each(&clamp_ttl);
             res.authorities_mut().iter_mut().for_each(&clamp_ttl);
@@ -368,10 +388,8 @@ async fn lookup_ip(
     name: Name,
     options: &LookupIpOptions,
 ) -> Result<DnsResponse, LookupError> {
-    let (primary, fallback): (Vec<_>, Vec<_>) = server
-        .iter()
-        .cloned()
-        .partition(|ns| !ns.is_fallback());
+    let (primary, fallback): (Vec<_>, Vec<_>) =
+        server.iter().cloned().partition(|ns| !ns.is_fallback());
 
     // 组里全是后备服务器：那就照旧一起用，别把查询搞成失败
     if primary.is_empty() {
@@ -482,13 +500,14 @@ async fn lookup_ip_with(
 
                 // 1. 处理测速结果：谁现实里第一个冲过终点线拿到真实 IP，谁就赢！
                 if let Some(ping_result) = ping_res
-                    && let Some(ip) = ping_result {
-                        // 只要有任何一个模式（如 TCP 或降级的 ICMP）测通了，瞬间结束！
-                        fastest_ip = Some(ip);
-                        break;
-                    }
-                    // 如果这个 IP 的所有模式都失败了（ping_result 为 None）
-                    // 绝对不 break！什么都不做，继续等其他还在查询或测速的任务！
+                    && let Some(ip) = ping_result
+                {
+                    // 只要有任何一个模式（如 TCP 或降级的 ICMP）测通了，瞬间结束！
+                    fastest_ip = Some(ip);
+                    break;
+                }
+                // 如果这个 IP 的所有模式都失败了（ping_result 为 None）
+                // 绝对不 break！什么都不做，继续等其他还在查询或测速的任务！
 
                 // 2. 处理上游查询结果：滚动发车！
                 if let Some(q_res) = query_res {
@@ -496,7 +515,7 @@ async fn lookup_ip_with(
                         Ok(lookup) => {
                             let ip_addrs = lookup.ip_addrs();
                             ok_tasks.push(lookup);
-                            
+
                             // 【修复漏洞】：哪怕上游只返回了 1 个 IP，也必须乖乖去测速！绝不开后门！
                             if !ip_addrs.is_empty() {
                                 ping_tasks.push(
@@ -553,7 +572,7 @@ async fn lookup_ip_with(
                     Either::Left(((res, _idx, rest), pending_timeout)) => {
                         query_tasks = rest; // 剩下的上游继续等
                         gather_timeout = pending_timeout; // 继承剩下的超时时间
-                        
+
                         match res {
                             Ok(lookup) => {
                                 ok_tasks.push(lookup); // 成功收集
@@ -581,11 +600,8 @@ async fn lookup_ip_with(
             // 霸气地一次性塞给通用测速大引擎，不再做拆分单兵作战！
             let all_ips: Vec<IpAddr> = ip_addr_stats.keys().copied().collect();
             if !all_ips.is_empty() {
-                fastest_ip = multi_mode_ping_fastest(
-                    name.clone(), 
-                    all_ips, 
-                    speed_check_mode.to_vec()
-                ).await;
+                fastest_ip =
+                    multi_mode_ping_fastest(name.clone(), all_ips, speed_check_mode.to_vec()).await;
             }
 
             match fastest_ip {
@@ -603,7 +619,7 @@ async fn lookup_ip_with(
                 }
                 let (res, _idx, rest) = select_all(query_tasks).await;
                 query_tasks = rest;
-                
+
                 match res {
                     Ok(response) => {
                         let code = response.response_code();
@@ -667,16 +683,25 @@ async fn lookup_ip_with(
     let best_fallback = ok_tasks.into_iter().min_by_key(|res| {
         let code = res.response_code();
         let has_answers = !res.answers().is_empty();
-        
+
         // 🌟 提取包裹中是否携带了珍贵的 SOA 权威记录
-        let has_soa = res.authorities().iter().any(|r| r.record_type() == RecordType::SOA) ||
-                      res.answers().iter().any(|r| r.record_type() == RecordType::SOA) ||
-                      res.additionals().iter().any(|r| r.record_type() == RecordType::SOA);
-        
+        let has_soa = res
+            .authorities()
+            .iter()
+            .any(|r| r.record_type() == RecordType::SOA)
+            || res
+                .answers()
+                .iter()
+                .any(|r| r.record_type() == RecordType::SOA)
+            || res
+                .additionals()
+                .iter()
+                .any(|r| r.record_type() == RecordType::SOA);
+
         // 🌟 优先级降维打击排序：
         match (code, has_answers, has_soa) {
-            (ResponseCode::NoError, true, _) => 0,      // 0级：有 Answer 的完美合法包
-            (ResponseCode::NoError, false, true) => 1,  // 🌟 1级：【极品空包】带有真实 SOA 的合法 NoData，无情碾压太监包！
+            (ResponseCode::NoError, true, _) => 0, // 0级：有 Answer 的完美合法包
+            (ResponseCode::NoError, false, true) => 1, // 🌟 1级：【极品空包】带有真实 SOA 的合法 NoData，无情碾压太监包！
             (ResponseCode::NoError, false, false) => 2, // 🌟 2级：【太监空包】没有 SOA 的残缺空包（如本地代理抢答的阉割包）。
             (ResponseCode::NXDomain, _, true) => 3,     // 3级：带有 SOA 的规范 NXDOMAIN
             (ResponseCode::NXDomain, _, false) => 4,    // 4级：光秃秃的虚假 NXDOMAIN
@@ -708,7 +733,10 @@ async fn multi_mode_ping_fastest(
 ) -> Option<IpAddr> {
     let domain_str = name.to_string(); // 🌟 转为字符串
     for mode in &modes {
-        debug!("Dynamic Tier Speed test {} {:?} ping {:?}", name, mode, ip_addrs);
+        debug!(
+            "Dynamic Tier Speed test {} {:?} ping {:?}",
+            name, mode, ip_addrs
+        );
         // 🌟 透传 domain
         if let Some((ip, _)) = dynamic_tier_ping(&domain_str, &ip_addrs, mode).await {
             return Some(ip);
@@ -723,16 +751,20 @@ async fn dynamic_tier_ping(
     ip_addrs: &[IpAddr],
     mode: &SpeedCheckMode,
 ) -> Option<(IpAddr, Duration)> {
-    if ip_addrs.is_empty() { return None; }
+    if ip_addrs.is_empty() {
+        return None;
+    }
     let dests = mode.to_ping_addrs(ip_addrs);
-    if dests.is_empty() { return None; }
+    if dests.is_empty() {
+        return None;
+    }
 
+    use crate::infra::ping::{PingAddr, PingOptions, ping};
     use futures_util::stream::{FuturesUnordered, StreamExt};
-    use crate::infra::ping::{ping, PingOptions, PingAddr};
 
     const PINGS_PER_IP: u8 = 3; // 同一 IP 并发探测次数
     // 🌟 核心修复：同理，将这里的内核并发发包超时严格对齐到底部的 timeout(600ms) 绝对死线！
-    let ping_ops = PingOptions::default().with_timeout(Duration::from_millis(600)); 
+    let ping_ops = PingOptions::default().with_timeout(Duration::from_millis(600));
     let mut futures = FuturesUnordered::new();
 
     // 1. 错峰齐发：将所有 IP 的并发测速包以 25ms 间隔投入网络，打破微突发关联丢包！
@@ -740,7 +772,7 @@ async fn dynamic_tier_ping(
         for i in 0..PINGS_PER_IP {
             // 🌟 核心改良：引入 25ms 的发包阶梯错峰 (Micro-Staggering)
             let stagger_delay = Duration::from_millis((i as u64) * 25);
-            
+
             futures.push(async move {
                 let _permit = match PING_SEMAPHORE.acquire().await {
                     Ok(p) => p,
@@ -753,7 +785,7 @@ async fn dynamic_tier_ping(
 
                 // 🌟 将 domain 喂给底层核心引擎！
                 let res = ping(dest, Some(domain), ping_ops).await;
-                
+
                 (dest, res.map(|o| o.elapsed()).map_err(|_| ()))
             });
         }
@@ -773,25 +805,28 @@ async fn dynamic_tier_ping(
             if self.successes == 0 {
                 return Duration::from_secs(60); // 0分直接出局
             }
-            
+
             let avg = self.sum_latency / (self.successes as u32);
             // 🌟 最小延时补偿：将平均值和历史最佳成绩按 1:1 混合，平滑抖动
             let base_score = (avg + self.min_latency) / 2;
-            
+
             // 丢 1 个包罚 50ms。容忍极速节点轻微丢包，同时拦截高丢包死节点。
             let penalty = Duration::from_millis(50) * (3 - self.successes as u32);
-            
+
             base_score + penalty
         }
     }
 
-    let mut states: Vec<IpState> = dests.iter().map(|&d| IpState {
-        dest: d, 
-        successes: 0, 
-        failures: 0, 
-        sum_latency: Duration::ZERO,
-        min_latency: Duration::MAX, // 初始化为最大值，方便后续取小
-    }).collect();
+    let mut states: Vec<IpState> = dests
+        .iter()
+        .map(|&d| IpState {
+            dest: d,
+            successes: 0,
+            failures: 0,
+            sum_latency: Duration::ZERO,
+            min_latency: Duration::MAX, // 初始化为最大值，方便后续取小
+        })
+        .collect();
 
     let mut target_score = PINGS_PER_IP; // 初始最高期望值：满分 3 次全通
 
@@ -803,17 +838,18 @@ async fn dynamic_tier_ping(
             match result {
                 Ok(latency) => {
                     state.successes += 1;
-                    state.sum_latency += latency; 
+                    state.sum_latency += latency;
                     state.min_latency = state.min_latency.min(latency); // 🌟 刷新该 IP 的物理极限纪录
 
                     // 🏁 终点线触发：只要有任何 1 个 IP 拿到了最高目标分，立刻敲钟结算！
                     if state.successes == target_score {
                         // 比赛结束，不用等后面的烂包了！按照“加权公式”核算全场成绩
-                        let winner = states.iter()
+                        let winner = states
+                            .iter()
                             .filter(|s| s.successes > 0)
                             .min_by_key(|s| s.score())
                             .unwrap();
-                        
+
                         // 返回时，告诉上层它真实的平均体感延迟（不带罚时，仅供外部日志打印或参考）
                         let winner_avg = winner.sum_latency / (winner.successes as u32);
                         return Some((winner.dest, winner_avg));
@@ -821,9 +857,10 @@ async fn dynamic_tier_ping(
                 }
                 Err(_) => {
                     state.failures += 1;
-                    
+
                     // 3. 动态降级：如果有包丢了，评估全局理论最高期望值是否需要下调
-                    let new_target = states.iter()
+                    let new_target = states
+                        .iter()
                         .map(|s| PINGS_PER_IP - s.failures)
                         .max()
                         .unwrap_or(0);
@@ -831,18 +868,19 @@ async fn dynamic_tier_ping(
                     // 期望值发生实质跌落（比如全场都没人能拿 3 分了，降级到 2 分）
                     if new_target < target_score {
                         target_score = new_target;
-                        
+
                         if target_score == 0 {
                             return None; // 全员得 0 分，本协议彻底死局，退出去降级 TCP
                         }
 
                         // 🏁 降级撞线触发：既然目标降低了，看看是不是已经有人达到新目标了？立刻敲钟！
                         if states.iter().any(|s| s.successes >= target_score) {
-                            let winner = states.iter()
+                            let winner = states
+                                .iter()
                                 .filter(|s| s.successes > 0)
                                 .min_by_key(|s| s.score())
                                 .unwrap();
-                                
+
                             let winner_avg = winner.sum_latency / (winner.successes as u32);
                             return Some((winner.dest, winner_avg));
                         }
@@ -856,13 +894,14 @@ async fn dynamic_tier_ping(
     // 5. 绝对死线：600ms 兜底 (包含高延时节点，并防止黑洞无限期挂起)
     match tokio::time::timeout(Duration::from_millis(600), race_logic).await {
         Ok(Some((dest, latency))) => Some((dest.ip_addr(), latency)), // 正常决出胜负
-        Ok(None) => None, // 确认全部失败
+        Ok(None) => None,                                             // 确认全部失败
         Err(_) => {
             // 600ms 超时触发：强行按照统一的评分公式，结算当前场上的最好成绩！
-            let winner = states.iter()
+            let winner = states
+                .iter()
                 .filter(|s| s.successes > 0) // 必须至少成功 1 次
                 .min_by_key(|s| s.score());
-                
+
             winner.map(|s| (s.dest.ip_addr(), s.sum_latency / (s.successes as u32)))
         }
     }
@@ -879,7 +918,10 @@ async fn per_nameserver_lookup_ip(
     let res = match server.lookup(name.clone(), options).await {
         Ok(r) => Ok(r),
         Err(e) => {
-            let q = crate::libdns::proto::op::Query::query(name.clone(), options.lookup_options.record_type);
+            let q = crate::libdns::proto::op::Query::query(
+                name.clone(),
+                options.lookup_options.record_type,
+            );
             // 如果这个 Error 兜里揣着 SOA 证书，说明它是合法的空包/NXDOMAIN，立刻赦免为 Ok！
             if let Some(soa_resp) = e.as_soa(&q) {
                 Ok(soa_resp)
@@ -927,7 +969,7 @@ async fn per_nameserver_lookup_ip(
                 for record in answers {
                     // 🌟 【重大修复】：不能粗暴使用 filter 绞碎非 IP 记录！
                     let ip_opt = record.data().ip_addr();
-                    
+
                     // 如果这条记录根本不是 IP（比如是 CNAME 别名记录），必须原封不动地保留！
                     if ip_opt.is_none() {
                         new_ans.push(record);
@@ -1052,10 +1094,10 @@ mod tests {
     use super::*;
     use crate::{dns_conf::RuntimeConfig, third_ext::FutureJoinAllExt};
 
-        #[test]
+    #[test]
     fn test_edns_client_subnet() {
         async fn inner_test(i: usize) -> bool {
-            let servers =[
+            let servers = [
                 "server https://120.53.53.53/dns-query",
                 "server https://223.5.5.5/dns-query",
             ];
@@ -1068,7 +1110,7 @@ mod tests {
 
             let client = cfg.create_dns_client().await;
 
-            let subnets =["113.65.29.0/24", "103.225.87.0/24", "113.65.29.0/24"];
+            let subnets = ["113.65.29.0/24", "103.225.87.0/24", "113.65.29.0/24"];
 
             let results = subnets
                 .into_iter()

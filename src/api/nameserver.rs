@@ -12,7 +12,9 @@ pub fn routes() -> StatefulRouter {
 }
 
 #[utoipa::path(get, path = "/nameservers")]
-async fn nameservers(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<NameServerInfo>> {
+async fn nameservers(
+    State(state): State<Arc<ServeState>>,
+) -> Json<DataListPayload<NameServerInfo>> {
     let servers = state.app.cfg().await.servers().to_vec();
 
     Json(servers.into())

@@ -33,7 +33,7 @@ pub struct DnsContext {
     pub source: LookupFrom,
     pub no_cache: bool,
     // 🌟 补上这个被遗漏的货厢：用来运送双栈优选中被淘汰的附属记录
-    pub extra_cache_records: Vec<(crate::libdns::proto::op::Query, DnsResponse)>, 
+    pub extra_cache_records: Vec<(crate::libdns::proto::op::Query, DnsResponse)>,
 }
 
 impl DnsContext {
@@ -43,7 +43,8 @@ impl DnsContext {
         // 🔐 P2（用户定策）：规则组不存在 → 走默认组（下面 find_domain_rule 本来就会回退到
         // default 组找域规则），但必须**点名告警一次** —— 否则用户拼错组名 / 改名后忘了同步，
         // 永远不知道自己其实没在用那套规则（只报一次，别在热路径上刷屏）。
-        if !cfg.has_rule_group(group_name) && crate::log::warn_once(&format!("rule-group:{group_name}"))
+        if !cfg.has_rule_group(group_name)
+            && crate::log::warn_once(&format!("rule-group:{group_name}"))
         {
             crate::log::warn!(
                 "配置里没有名为 \"{}\" 的规则组（查询 {} 命中了它）：已改用默认组的规则。\
@@ -145,7 +146,11 @@ mod serial_message {
 
     impl SerialMessage {
         // 🌟 巧用 impl Into 泛型，向下完美兼容其余所有还在传 Vec<u8> 的协议，避免改动全局产生连锁报错！
-        pub fn binary(bytes: impl Into<bytes::Bytes>, addr: SocketAddr, protocol: Protocol) -> Self {
+        pub fn binary(
+            bytes: impl Into<bytes::Bytes>,
+            addr: SocketAddr,
+            protocol: Protocol,
+        ) -> Self {
             Self::Bytes(bytes.into(), addr, protocol)
         }
         pub fn raw(message: Message, addr: SocketAddr, protocol: Protocol) -> Self {
@@ -542,15 +547,15 @@ mod response {
         }
 
         // 🌟 核心修复（治理影响 B）：在报文最终出站的必经之路上，严格核对实际装箱数量。
-        // 无论外部传入了什么 Header，都将其 QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT 
+        // 无论外部传入了什么 Header，都将其 QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT
         // 严格同步为当前报文体内真正携带的记录数！
         pub fn into_message(self, header: Option<Header>) -> Message {
             use op::message::{HeaderCounts, update_header_counts};
             let mut message = self.message;
-            
+
             // 提取基准 Header（若有外部传入的新 Header 则以它为准，否则使用自身 Header）
             let base_header = header.as_ref().unwrap_or(message.header());
-            
+
             // 统计当前报文体内实际装载的真实记录数量
             let actual_counts = HeaderCounts {
                 query_count: message.queries().len(),
@@ -558,11 +563,12 @@ mod response {
                 authority_count: message.authorities().len(), // 👈 准确获取实际塞入的 SOA 权威记录数
                 additional_count: message.additionals().len(),
             };
-            
+
             // 生成数量严格对齐的新 Header 并覆写
-            let synced_header = update_header_counts(base_header, message.truncated(), actual_counts);
+            let synced_header =
+                update_header_counts(base_header, message.truncated(), actual_counts);
             message.set_header(synced_header);
-            
+
             message
         }
 
@@ -585,7 +591,8 @@ mod response {
                 authority_count: self.message.authorities().len(),
                 additional_count: self.message.additionals().len(),
             };
-            let header = update_header_counts(self.message.header(), self.message.truncated(), counts);
+            let header =
+                update_header_counts(self.message.header(), self.message.truncated(), counts);
             self.message.set_header(header);
         }
     }
@@ -626,40 +633,58 @@ mod response {
     impl DnsResponse {
         // 🌟 终极全景雷达：找寿命时，绝不放过包裹的任何一个角落！
         pub fn max_ttl(&self) -> Option<u32> {
-        let ans = self.answers().iter().map(|r| r.ttl()).max();
-        let auth = self.authorities().iter().map(|r| r.ttl()).max();
-        let add = self.additionals().iter().map(|r| r.ttl()).max();
-        
-        // 将三个区的最大值放在一起，再求一个最终的最大值
-        [ans, auth, add].into_iter().flatten().max()
+            let ans = self.answers().iter().map(|r| r.ttl()).max();
+            let auth = self.authorities().iter().map(|r| r.ttl()).max();
+            let add = self.additionals().iter().map(|r| r.ttl()).max();
+
+            // 将三个区的最大值放在一起，再求一个最终的最大值
+            [ans, auth, add].into_iter().flatten().max()
         }
 
         pub fn min_ttl(&self) -> Option<u32> {
             let ans = self.answers().iter().map(|r| r.ttl()).min();
             let auth = self.authorities().iter().map(|r| r.ttl()).min();
             let add = self.additionals().iter().map(|r| r.ttl()).min();
-        
+
             // 将三个区的最小值放在一起，再求一个最终的最小值
             [ans, auth, add].into_iter().flatten().min()
         }
 
         // 🌟 终极修复：让 TTL 涂改覆盖所有的三个区域，彻底解决 SOA 倒计时冻结！
         pub fn set_new_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() { record.set_ttl(ttl); }
-            for record in self.authorities_mut() { record.set_ttl(ttl); } // 👈 换成了正确的 authorities_mut
-            for record in self.additionals_mut() { record.set_ttl(ttl); }
+            for record in self.answers_mut() {
+                record.set_ttl(ttl);
+            }
+            for record in self.authorities_mut() {
+                record.set_ttl(ttl);
+            } // 👈 换成了正确的 authorities_mut
+            for record in self.additionals_mut() {
+                record.set_ttl(ttl);
+            }
         }
 
         pub fn set_max_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() { record.set_max_ttl(ttl); }
-            for record in self.authorities_mut() { record.set_max_ttl(ttl); }
-            for record in self.additionals_mut() { record.set_max_ttl(ttl); }
+            for record in self.answers_mut() {
+                record.set_max_ttl(ttl);
+            }
+            for record in self.authorities_mut() {
+                record.set_max_ttl(ttl);
+            }
+            for record in self.additionals_mut() {
+                record.set_max_ttl(ttl);
+            }
         }
 
         pub fn set_min_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() { record.set_min_ttl(ttl); }
-            for record in self.authorities_mut() { record.set_min_ttl(ttl); }
-            for record in self.additionals_mut() { record.set_min_ttl(ttl); }
+            for record in self.answers_mut() {
+                record.set_min_ttl(ttl);
+            }
+            for record in self.authorities_mut() {
+                record.set_min_ttl(ttl);
+            }
+            for record in self.additionals_mut() {
+                record.set_min_ttl(ttl);
+            }
         }
     }
 }
@@ -712,9 +737,7 @@ pub fn forge_soa_record(name: Name, ttl: u32) -> Record {
 
     // 构造合法的 SOA 证书内容，核心是将 ttl 同步写入最小缓存时间字段！
     let soa_data = RData::SOA(crate::libdns::proto::rr::rdata::SOA::new(
-        mname,
-        rname,
-        2026032400, // 序列号
+        mname, rname, 2026032400, // 序列号
         1800,       // 刷新时间
         900,        // 重试时间
         259200,     // 极限过期时间

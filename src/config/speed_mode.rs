@@ -99,7 +99,6 @@ impl std::ops::DerefMut for SpeedCheckModeList {
     }
 }
 
-
 impl std::default::Default for SpeedCheckModeList {
     fn default() -> Self {
         Self(vec![

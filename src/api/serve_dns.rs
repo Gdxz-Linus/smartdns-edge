@@ -100,15 +100,12 @@ async fn process(
             // 早先内嵌 hickory 的 `RecordType::from_str` 里有 `debug_assert!(不含小写)`，
             // 小写输入在 debug 构建下 panic、release 下退化成 400；该断言已在**内嵌副本里改掉**，
             // 所以这里不再需要转大写（改动登记在 `hickory-dns/VENDORED.md`）。
-            let query_type: RecordType = query_param
-                .query_type
-                .parse()
-                .map_err(|_| {
-                    ApiError::BadRequest(format!(
-                        "invalid `type` parameter: {}",
-                        query_param.query_type
-                    ))
-                })?;
+            let query_type: RecordType = query_param.query_type.parse().map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "invalid `type` parameter: {}",
+                    query_param.query_type
+                ))
+            })?;
 
             let dnssec = query_param.dnssec;
             let checking_disabled = query_param.checking_disabled;

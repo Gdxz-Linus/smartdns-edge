@@ -26,7 +26,10 @@ impl NomParser for DomainRule {
             ),
             map(
                 // 🌟 修复：放宽限制，允许破折号、下划线等所有非空白字符作为组名
-                parse_value(alt((tag_no_case("nameserver"), tag("n"))), is_not(" \t\r\n")),
+                parse_value(
+                    alt((tag_no_case("nameserver"), tag("n"))),
+                    is_not(" \t\r\n"),
+                ),
                 |v| {
                     rule.nameserver = Some(v.to_string());
                 },

@@ -84,14 +84,17 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-	// 🌟 新增：专门用于清洗输出文件（日志/缓存/审计）的绝对路径锚定器！
+    // 🌟 新增：专门用于清洗输出文件（日志/缓存/审计）的绝对路径锚定器！
     #[inline]
     fn anchor_path(&self, raw_path: PathBuf) -> PathBuf {
         // 1. 绝对路径保持原样，相对路径基于配置文件所在目录拼接
         let joined = if raw_path.is_absolute() {
             raw_path // 👈 请放心，绝对路径就在这里安全着陆，绝无错误拼接！
         } else {
-            let base_dir = self.conf_file.as_ref().and_then(|f| f.parent())
+            let base_dir = self
+                .conf_file
+                .as_ref()
+                .and_then(|f| f.parent())
                 .or(self.conf_dir.as_deref())
                 .unwrap_or_else(|| std::path::Path::new("."));
             base_dir.join(&raw_path)
@@ -104,7 +107,9 @@ impl RuntimeConfig {
                 std::path::Component::CurDir => continue, // 遇到 '.' 直接丢弃
                 std::path::Component::ParentDir => {
                     // 遇到 '..' 时，只有上一级是普通文件夹才安全退格（防误删盘符或根目录）
-                    if let Some(std::path::Component::Normal(_)) = normalized.components().next_back() {
+                    if let Some(std::path::Component::Normal(_)) =
+                        normalized.components().next_back()
+                    {
                         normalized.pop();
                     } else {
                         normalized.push(comp);
@@ -116,8 +121,7 @@ impl RuntimeConfig {
 
         normalized
     }
-    
-	
+
     pub fn load<P: AsRef<Path>>(conf_dir: Option<PathBuf>, path: Option<P>) -> Arc<Self> {
         let mut builder = Self::builder();
 
@@ -174,7 +178,9 @@ impl RuntimeConfig {
                 // 服务方式运行时 stderr 不可见，只剩退出码可被服务管理器记录，
                 // 因此这里改用专门的“配置错误”退出码，让"配置没找到"可被区分出来。
                 eprintln!("\n❌ [ERROR] Configuration file not found!");
-                eprintln!("💡 Hint: Please specify the config file using '-c' (e.g., smartdns run -c ./smartdns.conf).");
+                eprintln!(
+                    "💡 Hint: Please specify the config file using '-c' (e.g., smartdns run -c ./smartdns.conf)."
+                );
                 eprintln!("   Or use 'smartdns service install' to generate a default config.");
                 eprintln!(
                     "   Searched the following locations: {}",
@@ -250,7 +256,9 @@ impl RuntimeConfig {
 
         // 🔐 Q8：审计改送系统日志后**不再写审计文件**，这点要说清楚（否则用户会去找文件）
         if self.audit_syslog() {
-            log::info!("审计已改为送系统日志（`audit-syslog yes`）：不再写审计文件，行首也不带时间戳（系统日志自带）。");
+            log::info!(
+                "审计已改为送系统日志（`audit-syslog yes`）：不再写审计文件，行首也不带时间戳（系统日志自带）。"
+            );
         }
 
         // 🔐 Q11：配了 `local-domain` 却把 `mdns-lookup` 关着 —— 这些域名不会走 mDNS，
@@ -271,7 +279,10 @@ impl RuntimeConfig {
             );
         }
 
-        info!("DNS Engine activated {} concurrent worker threads.", self.num_workers());
+        info!(
+            "DNS Engine activated {} concurrent worker threads.",
+            self.num_workers()
+        );
 
         for server in self.nameservers.iter() {
             if !server.exclude_default_group && server.group.is_empty() {
@@ -474,7 +485,8 @@ impl RuntimeConfig {
     /// cache persist file
     #[inline]
     pub fn cache_file(&self) -> PathBuf {
-        let f = self.cache
+        let f = self
+            .cache
             .file
             .to_owned()
             .unwrap_or_else(|| std::env::temp_dir().join("smartdns.cache"));
@@ -509,8 +521,8 @@ impl RuntimeConfig {
     pub fn serve_expired_reply_ttl(&self) -> u64 {
         self.cache.serve_expired_reply_ttl.unwrap_or(5)
     }
-	
-	// 👇 【新增这一段】：提供读取接口，官方默认值为 21600 秒 (6小时)
+
+    // 👇 【新增这一段】：提供读取接口，官方默认值为 21600 秒 (6小时)
     #[inline]
     pub fn serve_expired_prefetch_time(&self) -> u64 {
         self.cache.serve_expired_prefetch_time.unwrap_or(21600)
@@ -759,7 +771,10 @@ impl RuntimeConfig {
 
     #[inline]
     pub fn audit_file(&self) -> Option<PathBuf> {
-        self.audit.file.as_ref().map(|f| self.anchor_path(f.clone())) // 🌟 套上盾牌！
+        self.audit
+            .file
+            .as_ref()
+            .map(|f| self.anchor_path(f.clone())) // 🌟 套上盾牌！
     }
 
     #[inline]
@@ -1291,7 +1306,9 @@ impl RuntimeConfigBuilder {
                 let detail = if item.is_none() {
                     format!("未识别的配置行（已原样忽略）：{shown_line:?}，请检查关键字拼写")
                 } else {
-                    format!("配置行尾部有无法识别的内容（已忽略）：{shown_rest:?} —— 整行：{shown_line:?}")
+                    format!(
+                        "配置行尾部有无法识别的内容（已忽略）：{shown_rest:?} —— 整行：{shown_line:?}"
+                    )
                 };
                 match lineno {
                     Some(no) => warn!("配置文件第 {no} 行：{detail}"),
@@ -1440,7 +1457,7 @@ impl RuntimeConfigBuilder {
                 SpeedMode(v) => self.speed_check_mode = v,
                 ServeExpiredTtl(v) => self.cache.serve_expired_ttl = Some(v),
                 ServeExpiredReplyTtl(v) => self.cache.serve_expired_reply_ttl = Some(v),
-				// 【新增这一行】：将解析器翻译出来的值装入容器
+                // 【新增这一行】：将解析器翻译出来的值装入容器
                 ServeExpiredPrefetchTime(v) => self.cache.serve_expired_prefetch_time = Some(v),
                 CacheSize(v) => self.cache.size = Some(v),
                 ForceQtypeSoa(v) => {
@@ -1530,10 +1547,7 @@ impl RuntimeConfigBuilder {
                         if v.group.is_some()
                             && let Some((name, rule_group)) = self.rule_group_stack.pop()
                         {
-                            self.rule_groups
-                                .entry(name)
-                                .or_default()
-                                .merge(rule_group);
+                            self.rule_groups.entry(name).or_default().merge(rule_group);
                         }
 
                         if let Some(dir) = file.parent() {
@@ -1740,35 +1754,38 @@ fn resolve_filepath<P: AsRef<Path>>(filepath: P, base_file: Option<&PathBuf>) ->
 
     if !filepath.is_absolute()
         && let Some(base_conf_file) = base_file
-            && let Some(dir) = base_conf_file.parent() {
-                let new_path = dir.join(filepath);
+        && let Some(dir) = base_conf_file.parent()
+    {
+        let new_path = dir.join(filepath);
 
-                if new_path.is_file() {
-                    return new_path;
-                }
+        if new_path.is_file() {
+            return new_path;
+        }
 
-                if matches!(base_conf_file.file_name(), Some(file_name) if file_name == OsStr::new("smartdns.conf"))
-                {
-                    // eg: /etc/smartdns.d/custom.conf
-                    let new_path = dir.join("smartdns.d").join(filepath);
+        if matches!(base_conf_file.file_name(), Some(file_name) if file_name == OsStr::new("smartdns.conf"))
+        {
+            // eg: /etc/smartdns.d/custom.conf
+            let new_path = dir.join("smartdns.d").join(filepath);
 
-                    if new_path.is_file() {
-                        return new_path;
-                    }
-                }
-
-                if let Ok(new_path) = std::env::current_dir().map(|dir| dir.join(filepath))
-                    && new_path.is_file() {
-                        return new_path;
-                    }
-
-                if let Some(new_path) = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(|dir| dir.join(filepath)))
-                    && new_path.is_file() {
-                        return new_path;
-                    }
+            if new_path.is_file() {
+                return new_path;
             }
+        }
+
+        if let Ok(new_path) = std::env::current_dir().map(|dir| dir.join(filepath))
+            && new_path.is_file()
+        {
+            return new_path;
+        }
+
+        if let Some(new_path) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(filepath)))
+            && new_path.is_file()
+        {
+            return new_path;
+        }
+    }
 
     // try to resolve absolute path by extracting its file_name
     match filepath.file_name().map(Path::new) {
@@ -1917,7 +1934,10 @@ mod tests {
         assert!(cfg.log_syslog());
         assert!(cfg.audit_syslog());
 
-        let cfg = RuntimeConfig::builder().with("log-syslog no").build().unwrap();
+        let cfg = RuntimeConfig::builder()
+            .with("log-syslog no")
+            .build()
+            .unwrap();
         assert!(!cfg.log_syslog(), "写 no 就是关");
         assert!(!cfg.audit_syslog(), "没写默认关");
     }
@@ -1950,12 +1970,14 @@ mod tests {
             .find_domain_rule(&Name::from_utf8("rule.test").unwrap(), "")
             .expect("应有 rule.test 的规则");
         assert_eq!(
-            rule.get(|n| n.nftset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            rule.get(|n| n.nftset.as_ref().map(|v| v.len()))
+                .unwrap_or_default(),
             1,
             "domain-rules 里的 -nftset 要落到规则上"
         );
         assert_eq!(
-            rule.get(|n| n.ipset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            rule.get(|n| n.ipset.as_ref().map(|v| v.len()))
+                .unwrap_or_default(),
             1,
             "domain-rules 里的 -ipset 要落到规则上"
         );
@@ -1965,7 +1987,9 @@ mod tests {
             .find_domain_rule(&Name::from_utf8("directive.test").unwrap(), "")
             .expect("应有 directive.test 的规则");
         assert_eq!(
-            direct.get(|n| n.nftset.as_ref().map(|v| v.len())).unwrap_or_default(),
+            direct
+                .get(|n| n.nftset.as_ref().map(|v| v.len()))
+                .unwrap_or_default(),
             1
         );
     }
@@ -2004,7 +2028,10 @@ mod tests {
         assert!(local("nas.lan"), "子域名算");
         assert!(local("a.b.lan"), "多级子域名也算");
         assert!(local("home.test"), "第二条也生效（C 版只记得住一条）");
-        assert!(!local("lanx"), "lanx 不是 lan 的子域名（别按字符串前缀乱匹配）");
+        assert!(
+            !local("lanx"),
+            "lanx 不是 lan 的子域名（别按字符串前缀乱匹配）"
+        );
         assert!(!local("example.com"));
     }
 
@@ -2036,7 +2063,10 @@ mod tests {
             .unwrap();
 
         // 服务器组：`server ... -group office` 声明过的算存在；默认组/空名恒存在
-        assert!(cfg.has_server_group("office"), "office 是 server 行上声明过的组");
+        assert!(
+            cfg.has_server_group("office"),
+            "office 是 server 行上声明过的组"
+        );
         assert!(cfg.has_server_group("default"));
         assert!(cfg.has_server_group(""));
         assert!(cfg.has_server_group("DEFAULT"), "default 的大小写不敏感");
@@ -3054,10 +3084,16 @@ mod tests {
         );
 
         assert_eq!(rules[1].group, "group-b");
-        assert_eq!(rules[1].client, Client::IpAddr("10.0.0.1/32".parse().unwrap()));
+        assert_eq!(
+            rules[1].client,
+            Client::IpAddr("10.0.0.1/32".parse().unwrap())
+        );
 
         assert_eq!(rules[2].group, "group-a");
-        assert_eq!(rules[2].client, Client::Mac("01:02:03:04:05:06".to_string()));
+        assert_eq!(
+            rules[2].client,
+            Client::Mac("01:02:03:04:05:06".to_string())
+        );
     }
 
     #[test]
@@ -3121,7 +3157,10 @@ mod tests {
         // 相对通配符 → 相对"当前配置文件所在目录"
         let base = dir.join("smartdns.conf");
         assert_eq!(
-            names(expand_conf_pattern(std::path::Path::new("conf.d/*.conf"), Some(&base))),
+            names(expand_conf_pattern(
+                std::path::Path::new("conf.d/*.conf"),
+                Some(&base)
+            )),
             ["05-先.conf", "10-a.conf", "20-b.conf"]
         );
 
@@ -3189,18 +3228,33 @@ mod config_line_redact_tests {
     fn sensitive_config_lines_never_leak_secrets() {
         // 代理密码：整行被隐藏
         let masked = redact_config_line("proxy-server socks5://alice:s3cr3t@1.2.3.4:1080 多写的字");
-        assert!(!masked.contains("s3cr3t"), "代理密码不得出现在日志里：{masked}");
-        assert!(masked.contains("proxy-server"), "仍要报出是哪个关键字：{masked}");
+        assert!(
+            !masked.contains("s3cr3t"),
+            "代理密码不得出现在日志里：{masked}"
+        );
+        assert!(
+            masked.contains("proxy-server"),
+            "仍要报出是哪个关键字：{masked}"
+        );
 
         // 管理口令与私钥口令
         let masked = redact_config_line("api-token MyS3cretToken 多写的字");
-        assert!(!masked.contains("MyS3cretToken"), "管理口令不得出现在日志里：{masked}");
+        assert!(
+            !masked.contains("MyS3cretToken"),
+            "管理口令不得出现在日志里：{masked}"
+        );
         let masked = redact_config_line("bind-cert-key-pass MyKeyPass 多写的字");
-        assert!(!masked.contains("MyKeyPass"), "私钥口令不得出现在日志里：{masked}");
+        assert!(
+            !masked.contains("MyKeyPass"),
+            "私钥口令不得出现在日志里：{masked}"
+        );
 
         // 关键字本身写错（整行谁都不认）也要脱敏
         let masked = redact_config_line("  PROXY-SERVER socks5://u:p@h:1080 拼错了");
-        assert!(!masked.contains(":p@"), "大小写不同的关键字也要挡住：{masked}");
+        assert!(
+            !masked.contains(":p@"),
+            "大小写不同的关键字也要挡住：{masked}"
+        );
 
         // 非敏感行：保留原文，用户才看得出拼写错在哪
         let plain = "addres /typo.test/1.2.3.4";
@@ -3208,9 +3262,18 @@ mod config_line_redact_tests {
 
         // 行尾粘了带口令的 URL：只打码 user:pass，其余照旧
         let masked = redact_config_line("address /x.test/1.2.3.4 socks5://bob:hunter2@h:1080");
-        assert!(!masked.contains("hunter2"), "URL 里的口令必须打码：{masked}");
-        assert!(masked.contains("address /x.test/1.2.3.4"), "无关部分照旧显示：{masked}");
-        assert!(masked.contains("socks5://***@h:1080"), "打码形态要能看出是个代理 URL：{masked}");
+        assert!(
+            !masked.contains("hunter2"),
+            "URL 里的口令必须打码：{masked}"
+        );
+        assert!(
+            masked.contains("address /x.test/1.2.3.4"),
+            "无关部分照旧显示：{masked}"
+        );
+        assert!(
+            masked.contains("socks5://***@h:1080"),
+            "打码形态要能看出是个代理 URL：{masked}"
+        );
     }
 }
 
@@ -3232,7 +3295,11 @@ mod ttl_clamp_tests {
             .unwrap();
 
         assert_eq!(cfg.local_ttl(), TTL_MAX, "local-ttl 必须夹到上限");
-        assert_eq!(cfg.serve_expired_ttl(), TTL_MAX, "serve-expired-ttl 必须夹到上限");
+        assert_eq!(
+            cfg.serve_expired_ttl(),
+            TTL_MAX,
+            "serve-expired-ttl 必须夹到上限"
+        );
         assert_eq!(
             cfg.serve_expired_reply_ttl(),
             TTL_MAX,
@@ -3254,5 +3321,3 @@ mod ttl_clamp_tests {
         assert_eq!(cfg.serve_expired_reply_ttl(), 7);
     }
 }
-
-

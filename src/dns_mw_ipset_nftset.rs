@@ -92,11 +92,19 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsIpsetNftse
         }
 
         // 🔐 Q2/Q4：写进集合的条目带不带过期时间（`ipset-timeout` / `nftset-timeout`）
-        let ipset_expiry = set_expiry_seconds(lookup, ctx.cfg().ipset_timeout(), ctx.cfg().rr_ttl());
+        let ipset_expiry =
+            set_expiry_seconds(lookup, ctx.cfg().ipset_timeout(), ctx.cfg().rr_ttl());
         // 非 Linux 或不带 nft 特性的构建里，下面那两个写入块不参与编译，这个值也就没人用
-        #[cfg_attr(not(all(feature = "nft", target_os = "linux")), allow(unused_variables))]
-        let nftset_expiry = set_expiry_seconds(lookup, ctx.cfg().nftset_timeout(), ctx.cfg().rr_ttl());
-        #[cfg_attr(not(all(feature = "nft", target_os = "linux")), allow(unused_variables))]
+        #[cfg_attr(
+            not(all(feature = "nft", target_os = "linux")),
+            allow(unused_variables)
+        )]
+        let nftset_expiry =
+            set_expiry_seconds(lookup, ctx.cfg().nftset_timeout(), ctx.cfg().rr_ttl());
+        #[cfg_attr(
+            not(all(feature = "nft", target_os = "linux")),
+            allow(unused_variables)
+        )]
         let debug = ctx.cfg().nftset_debug();
 
         // 🌟 尝试获取通行证，获取不到说明内核那一侧已经严重拥堵！
@@ -231,7 +239,10 @@ fn merge_kernel_sets(
     mut rule_nftsets: Vec<ConfigForIP<NFTsetConfig>>,
     mut rule_ipsets: Vec<ConfigForIP<IpsetConfig>>,
     server_opts: &ServerOpts,
-) -> (Vec<ConfigForIP<NFTsetConfig>>, Vec<ConfigForIP<IpsetConfig>>) {
+) -> (
+    Vec<ConfigForIP<NFTsetConfig>>,
+    Vec<ConfigForIP<IpsetConfig>>,
+) {
     rule_nftsets.extend(server_opts.nftset.clone().unwrap_or_default());
     rule_ipsets.extend(server_opts.ipset.clone().unwrap_or_default());
 
@@ -310,7 +321,10 @@ mod tests {
 
     use super::*;
     use crate::config::parser::NomParser;
-    use crate::libdns::proto::{op::Query, rr::{Name, RData, Record}};
+    use crate::libdns::proto::{
+        op::Query,
+        rr::{Name, RData, Record},
+    };
 
     fn lookup_with_ttls(ttls: &[u32]) -> DnsResponse {
         let name = Name::from_str("ips.example.com.").unwrap();
@@ -363,7 +377,11 @@ mod tests {
     #[test]
     fn listener_sets_apply_without_any_domain_rule() {
         let mut opts = ServerOpts::default();
-        opts.nftset = Some(Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4").unwrap().1);
+        opts.nftset = Some(
+            Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
+                .unwrap()
+                .1,
+        );
         opts.ipset = Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1);
 
         let (nft, ip) = merge_kernel_sets(Vec::new(), Vec::new(), &opts);
@@ -381,7 +399,11 @@ mod tests {
         let rule_ip = Vec::<ConfigForIP<IpsetConfig>>::parse("#6:dns6").unwrap().1;
 
         let mut opts = ServerOpts::default();
-        opts.nftset = Some(Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4").unwrap().1);
+        opts.nftset = Some(
+            Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
+                .unwrap()
+                .1,
+        );
         opts.ipset = Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1);
 
         let (nft, ip) = merge_kernel_sets(rule_nft, rule_ip, &opts);

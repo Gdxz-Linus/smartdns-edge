@@ -22,9 +22,7 @@ impl NomParser for Client {
     fn parse(input: &str) -> IResult<&str, Self> {
         alt((
             map(NomParser::parse, Client::IpAddr),
-            map(nom_recipes::mac_addr, |mac| {
-                Client::Mac(mac.to_string())
-            }),
+            map(nom_recipes::mac_addr, |mac| Client::Mac(mac.to_string())),
         ))
         .parse(input)
     }

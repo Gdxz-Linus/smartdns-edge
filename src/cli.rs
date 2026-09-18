@@ -37,10 +37,14 @@ impl Cli {
             // 🌟 核心修复 3：强行拦截 smartdns resolve 命令，让它走原作者写的“高级解析器”，
             // 否则 clap 遇到 @8.8.8.8 这种 dig 语法会直接报错崩溃！
             let args: Vec<String> = std::env::args().collect();
-            if args.len() >= 2 && args[1] == "resolve" && !args.contains(&"--help".to_string()) && !args.contains(&"-h".to_string())
-                && let Ok(resolve_command) = ResolveCommand::try_parse_from(args) {
-                    return resolve_command.into();
-                }
+            if args.len() >= 2
+                && args[1] == "resolve"
+                && !args.contains(&"--help".to_string())
+                && !args.contains(&"-h".to_string())
+                && let Ok(resolve_command) = ResolveCommand::try_parse_from(args)
+            {
+                return resolve_command.into();
+            }
         }
 
         match Self::try_parse() {

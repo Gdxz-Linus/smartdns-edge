@@ -270,7 +270,10 @@ mod tests {
 
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
         assert!(limiter.acquire(lo).is_some(), "环回应始终放行");
-        assert!(limiter.acquire(lo).is_some(), "环回应始终放行（且不占配额）");
+        assert!(
+            limiter.acquire(lo).is_some(),
+            "环回应始终放行（且不占配额）"
+        );
         assert_eq!(limiter.stats().0, 1, "环回不应计入当前连接数");
     }
 
@@ -278,7 +281,10 @@ mod tests {
     fn test_per_listener_limits_registry() {
         // 逐监听限额：只有配置过覆盖选项的监听才会登记
         let addr: std::net::SocketAddr = "127.0.0.1:65533".parse().unwrap();
-        assert!(for_listener(addr).is_none(), "未登记时应返回 None（只受全局限制）");
+        assert!(
+            for_listener(addr).is_none(),
+            "未登记时应返回 None（只受全局限制）"
+        );
 
         register_listener(addr, Some(1), Some(1));
         let l = for_listener(addr).expect("登记后应能取到");
@@ -293,7 +299,10 @@ mod tests {
         // 自动推算必须落在"家庭够小、企业够大"的区间内，且不能是 0
         let limiter = ConnectionLimiter::new(None, None);
         let (_, _, max) = limiter.stats();
-        assert!((512..=16384).contains(&max), "自动上限应在 512~16384，实际 {max}");
+        assert!(
+            (512..=16384).contains(&max),
+            "自动上限应在 512~16384，实际 {max}"
+        );
         assert!(limiter.max_per_source >= 64);
     }
 }
@@ -473,9 +482,17 @@ mod query_limit_tests {
         assert_eq!(l.last_warn.load(Ordering::Relaxed), 1000, "第一次要记下来");
 
         l.warn_once_in_window(1100);
-        assert_eq!(l.last_warn.load(Ordering::Relaxed), 1000, "120 秒内不重复告警");
+        assert_eq!(
+            l.last_warn.load(Ordering::Relaxed),
+            1000,
+            "120 秒内不重复告警"
+        );
 
         l.warn_once_in_window(1121);
-        assert_eq!(l.last_warn.load(Ordering::Relaxed), 1121, "过了 120 秒可以再告警");
+        assert_eq!(
+            l.last_warn.load(Ordering::Relaxed),
+            1121,
+            "过了 120 秒可以再告警"
+        );
     }
 }

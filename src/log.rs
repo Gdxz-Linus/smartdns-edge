@@ -12,10 +12,10 @@ pub fn warn_once(key: &str) -> bool {
     warned.insert(key.to_string())
 }
 
-pub use tracing::*;
 pub use tracing::dispatcher::set_default;
-use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
 use tracing::field::{Field, Visit};
+pub use tracing::*;
+use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
 use tracing_subscriber::{
     EnvFilter, Layer,
     fmt::{
@@ -65,12 +65,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
     // 排障时最要命。这里用 eprintln!（此刻 tracing 还没装好，日志宏发不出去），
     // 且只在用户确实配了文件日志（enabled）时才抱怨。
     let file_open_err: Option<String> = if enabled {
-        match file
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .touch()
-        {
+        match file.inner.lock().unwrap_or_else(|e| e.into_inner()).touch() {
             Ok(_) => None,
             Err(err) => Some(err.to_string()),
         }
@@ -99,19 +94,18 @@ pub fn make_dispatch<P: AsRef<Path>>(
         crate::log::warn_once("log-syslog-non-linux");
 
         #[cfg(not(target_os = "linux"))]
-        eprintln!(
-            "⚠️ `log-syslog` 只在 Linux 上有效（其它平台没有系统日志），本次已忽略。"
-        );
+        eprintln!("⚠️ `log-syslog` 只在 Linux 上有效（其它平台没有系统日志），本次已忽略。");
     }
 
     if writable {
         // 🌟 1. 手动将横幅瞬间写入文件，弥补配置解析的时间差
         use std::io::Write;
         let now = chrono::Local::now();
-        let msg = format!("{}.{:03}:INFO: {} 🐋 {} starting\n", 
+        let msg = format!(
+            "{}.{:03}:INFO: {} 🐋 {} starting\n",
             now.format("%Y-%m-%d %H:%M:%S"),
             now.timestamp_millis() % 1000,
-            crate::NAME, 
+            crate::NAME,
             crate::BUILD_VERSION
         );
         let mut writer = &file;
@@ -282,11 +276,7 @@ fn syslog_write(level: &tracing::Level, message: &str) {
 
     static OPENLOG: std::sync::Once = std::sync::Once::new();
     OPENLOG.call_once(|| unsafe {
-        libc::openlog(
-            c"smartdns".as_ptr(),
-            libc::LOG_CONS,
-            libc::LOG_USER,
-        );
+        libc::openlog(c"smartdns".as_ptr(), libc::LOG_CONS, libc::LOG_USER);
     });
 
     if let Ok(message) = CString::new(message) {
@@ -347,13 +337,7 @@ where
         if metadata.level() == &tracing::Level::INFO {
             write!(&mut writer, "{}.{}:{}", date, now_msecs, metadata.level())?;
         } else {
-            write!(
-                &mut writer,
-                "{}.{}:{}",
-                date,
-                now_msecs,
-                metadata.level()
-            )?;
+            write!(&mut writer, "{}.{}:{}", date, now_msecs, metadata.level())?;
             if let Some(line) = metadata.line() {
                 write!(&mut writer, ":{line}")?;
             }

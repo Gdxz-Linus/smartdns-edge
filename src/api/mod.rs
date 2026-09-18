@@ -1,10 +1,10 @@
 use axum::{
     Json,
+    extract::Request,
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
-	extract::Request,
-    middleware::{self, Next},
 };
 use cfg_if::cfg_if;
 use http::{HeaderValue, header};
@@ -78,12 +78,9 @@ where
 pub fn dns_only_routes() -> axum::Router<Arc<ServeState>> {
     let (router, _openapi) = Router::new().merge(serve_dns::routes()).split_for_parts();
 
-    with_security_headers(router).layer(
-        ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
-            header::SERVER,
-            HeaderValue::from_static(crate::NAME),
-        )),
-    )
+    with_security_headers(router).layer(ServiceBuilder::new().layer(
+        SetResponseHeaderLayer::overriding(header::SERVER, HeaderValue::from_static(crate::NAME)),
+    ))
 }
 
 pub fn routes() -> axum::Router<Arc<ServeState>> {
@@ -127,12 +124,9 @@ pub fn routes() -> axum::Router<Arc<ServeState>> {
     };
 
     // 🔐 P3：安全响应头（CSP / X-Frame-Options / X-Content-Type-Options / Referrer-Policy）
-    with_security_headers(router).layer(
-        ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
-            header::SERVER,
-            HeaderValue::from_static(crate::NAME),
-        )),
-    )
+    with_security_headers(router).layer(ServiceBuilder::new().layer(
+        SetResponseHeaderLayer::overriding(header::SERVER, HeaderValue::from_static(crate::NAME)),
+    ))
 }
 
 fn api_routes() -> StatefulRouter {
@@ -443,4 +437,3 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
     }
     Err(StatusCode::UNAUTHORIZED)
 }
-

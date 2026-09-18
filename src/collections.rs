@@ -1,11 +1,11 @@
-use std::{collections::HashMap, ops::Deref};
 use crate::{config::WildcardName, libdns::proto::rr::Name};
+use std::{collections::HashMap, ops::Deref};
 
 pub struct DomainMap<T> {
     // 🌟 核心修复 1：抛弃危险的 u64 hash，使用绝对安全的 WildcardName 内存比对！
     map: HashMap<WildcardName, T>,
     // 🌟 对于通配符索引，使用真实的 Name 作为 Key
-    wildcards: HashMap<Name, Vec<WildcardName>>, 
+    wildcards: HashMap<Name, Vec<WildcardName>>,
 }
 
 impl<T> DomainMap<T> {
@@ -39,9 +39,10 @@ impl<T> DomainMap<T> {
                 if let Some(wildcards) = self.wildcards.get(&name) {
                     for w in wildcards.iter() {
                         if w.is_match(&last)
-                            && let Some(v) = self.map.get(w) {
-                                return Some(v);
-                            }
+                            && let Some(v) = self.map.get(w)
+                        {
+                            return Some(v);
+                        }
                     }
                 }
             }
@@ -94,7 +95,7 @@ impl<T> DomainMap<T> {
     pub fn insert(&mut self, name: impl Into<WildcardName>, value: T) -> Option<T> {
         let mut name: WildcardName = name.into();
         name.set_fqdn(true);
-        
+
         if name.is_sub() {
             self.wildcards
                 .entry(name.deref().clone())
@@ -133,7 +134,10 @@ impl<T> FromIterator<(WildcardName, T)> for DomainMap<T> {
         let mut wildcards: HashMap<Name, Vec<WildcardName>> = Default::default();
         for (n, v) in iter.into_iter() {
             if n.is_sub() {
-                wildcards.entry(n.deref().clone()).or_default().push(n.clone());
+                wildcards
+                    .entry(n.deref().clone())
+                    .or_default()
+                    .push(n.clone());
             }
             map.insert(n, v);
         }
@@ -564,11 +568,13 @@ mod benchmark {
     fn get_domain_list() -> Vec<Name> {
         let mut domains = vec![];
 
-        let text =
-            http_client::get("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", None)
-                .unwrap()
-                .text()
-                .unwrap();
+        let text = http_client::get(
+            "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+            None,
+        )
+        .unwrap()
+        .text()
+        .unwrap();
 
         for mut line in text.lines() {
             line = line.trim_start();

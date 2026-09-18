@@ -109,12 +109,7 @@ fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
     // 动态链接 Windows 的 IP 助手 API
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
-        fn SendARP(
-            dest_ip: u32,
-            src_ip: u32,
-            p_mac_addr: *mut u8,
-            phy_addr_len: *mut u32,
-        ) -> u32;
+        fn SendARP(dest_ip: u32, src_ip: u32, p_mac_addr: *mut u8, phy_addr_len: *mut u32) -> u32;
     }
 
     // 🌟 P1-2 修复：SendARP 的 DestIP 参数与 C 的 inet_addr() 返回值同序
@@ -255,26 +250,29 @@ mod tests {
     }
 }
 
-    /// 真机验证 SendARP 真的能取到 MAC（需要同网段、可 ARP 解析的目标，通常是默认网关）。
-    /// 与其它环境相关测试一致：环境变量缺失就打印说明并跳过，不硬编码任何地址。
-    #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
-    #[test]
-    fn test_sendarp_real_lookup() {
-        let target = match std::env::var("SMARTDNS_TEST_ARP_TARGET") {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                println!(
-                    "跳过 test_sendarp_real_lookup：未设置 SMARTDNS_TEST_ARP_TARGET \
+/// 真机验证 SendARP 真的能取到 MAC（需要同网段、可 ARP 解析的目标，通常是默认网关）。
+/// 与其它环境相关测试一致：环境变量缺失就打印说明并跳过，不硬编码任何地址。
+#[cfg(all(not(target_os = "linux"), target_os = "windows"))]
+#[test]
+fn test_sendarp_real_lookup() {
+    let target = match std::env::var("SMARTDNS_TEST_ARP_TARGET") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            println!(
+                "跳过 test_sendarp_real_lookup：未设置 SMARTDNS_TEST_ARP_TARGET \
                      （可设为本机默认网关，例如 172.20.10.1）"
-                );
-                return;
-            }
-        };
-        let ip: Ipv4Addr = target.trim().parse().expect("SMARTDNS_TEST_ARP_TARGET 要是 IPv4 地址");
-        match lookup_client_mac_from_arp_v4(ip) {
-            Some(mac) => println!("SendARP 取到 {ip} 的 MAC = {mac} ✓（字节序正确）"),
-            None => panic!(
-                "SendARP 取不到 {ip} 的 MAC —— 字节序可能仍然不对（只发 2 字节前缀那种静默失败）"
-            ),
+            );
+            return;
         }
+    };
+    let ip: Ipv4Addr = target
+        .trim()
+        .parse()
+        .expect("SMARTDNS_TEST_ARP_TARGET 要是 IPv4 地址");
+    match lookup_client_mac_from_arp_v4(ip) {
+        Some(mac) => println!("SendARP 取到 {ip} 的 MAC = {mac} ✓（字节序正确）"),
+        None => panic!(
+            "SendARP 取不到 {ip} 的 MAC —— 字节序可能仍然不对（只发 2 字节前缀那种静默失败）"
+        ),
     }
+}

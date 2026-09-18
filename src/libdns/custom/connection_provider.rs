@@ -247,7 +247,7 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
                                 Some(Err(err)) => {
                                     last_err = Some(err);
                                     // 🌟 如果某个 IP 彻底连不上，立即启动下一个 IP 的并发，不浪费 250ms！
-                                    needs_spawn = true; 
+                                    needs_spawn = true;
                                 }
                                 None => {
                                     needs_spawn = true; // 队列空了，必须派发新的
@@ -282,7 +282,7 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
                         let options = options.clone();
                         let runtime_proviver = runtime_proviver.clone();
                         let server_addr_val = *server_addr;
-                        
+
                         // 🌟 核心修复：将 Cow 转换为 Owned 彻底切断生命周期借用链！
                         // 满足 BoxFuture 要求的 Send + 'static 线程安全闭环。
                         let server_owned = server_cow.into_owned();
@@ -335,12 +335,18 @@ async fn new_connection(
         match effective_proto {
             #[cfg(all(feature = "dns-over-quic", feature = "dns-over-tls"))]
             ProtocolConfig::Quic => {
-                crate::log::warn!("QUIC over proxy is not supported, downgrading to DoT (TLS) for {}", server.host());
+                crate::log::warn!(
+                    "QUIC over proxy is not supported, downgrading to DoT (TLS) for {}",
+                    server.host()
+                );
                 effective_proto = ProtocolConfig::Tls;
             }
             #[cfg(all(feature = "dns-over-h3", feature = "dns-over-https"))]
             ProtocolConfig::H3 { ref path, .. } => {
-                crate::log::warn!("HTTP/3 over proxy is not supported, downgrading to DoH (HTTPS/2) for {}", server.host());
+                crate::log::warn!(
+                    "HTTP/3 over proxy is not supported, downgrading to DoH (HTTPS/2) for {}",
+                    server.host()
+                );
                 effective_proto = ProtocolConfig::Https {
                     path: path.clone(),
                     prefer: crate::dns_url::HttpsPrefer::H2,
@@ -565,7 +571,11 @@ async fn new_connection(
                     .crypto_config(options.tls_config.clone())
                     .disable_grease(*disable_grease)
                     // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
-                    .http_host_opt(Some(http_authority(&server, &server_name, server_addr.port())))
+                    .http_host_opt(Some(http_authority(
+                        &server,
+                        &server_name,
+                        server_addr.port(),
+                    )))
                     .build_with_future(
                         binder.bind_quic(bind_addr, server_addr)?,
                         server_addr,
@@ -698,11 +708,11 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                 if let Some(addr) = bind_addr {
                     let _ = socket.bind(addr);
                 }
-                
+
                 // 🌟 核心修复 1：建立 TCP 连接前，提前打上防火墙 SO_MARK 和网卡标签！
                 // 彻底堵死 Linux 内核偷偷利用默认网卡发送 SYN 握手包导致漏流的物理可能。
                 setup_socket(&socket, None, so_mark, device);
-                
+
                 let stream = socket.connect(target_addr).await?;
 
                 proxy::handshake_tcp(stream, server_addr, proxy_config.as_ref())
@@ -734,7 +744,7 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                 SocketAddr::V4(_) => tokio::net::UdpSocket::bind(local_addr).await?,
                 SocketAddr::V6(_) => tokio::net::UdpSocket::bind(local_addr).await?,
             };
-            
+
             // UDP 是无连接的，在首个发包前设置即可立刻生效
             setup_socket(&udp_socket, None, so_mark, device.clone());
 
@@ -753,7 +763,7 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                     SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
                     SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
                 };
-                
+
                 // 🌟 核心修复 2：为了进行 SOCKS5 代理产生的辅助 TCP 控制流，
                 // 也必须严格遵守用户的防火墙与策略路由标记，绝不允许代理链路漏出！
                 setup_socket(&tcp_socket, None, so_mark, device);
@@ -762,7 +772,8 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                 None
             };
 
-            let socket = proxy::handshake_udp(tcp_stream, udp_socket, proxy_config.as_ref()).await?;
+            let socket =
+                proxy::handshake_udp(tcp_stream, udp_socket, proxy_config.as_ref()).await?;
 
             // 🌟 P1-9 修复（代理路径的补充防护）：SOCKS5 数据报头部带着应答来源地址
             // （RFC 1928 §7）。握手已经把 UDP 套接字 connect 到中继地址（内核挡掉非中继来源），
@@ -778,7 +789,7 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
     #[cfg(any(feature = "dns-over-quic", feature = "dns-over-h3"))]
     fn quic_binder(&self) -> Option<&dyn QuicSocketBinder> {
         // 🌟 将提供者自身作为 Binder 传递出去，从而携带路由配置信息
-        Some(self) 
+        Some(self)
     }
 }
 
@@ -791,7 +802,8 @@ impl QuicSocketBinder for TokioRuntimeProvider {
         server_addr: SocketAddr,
     ) -> Result<Arc<dyn quinn::AsyncUdpSocket>, io::Error> {
         use quinn::Runtime;
-        let socket = prepare_quic_socket(local_addr, server_addr, self.so_mark, self.device.clone())?;
+        let socket =
+            prepare_quic_socket(local_addr, server_addr, self.so_mark, self.device.clone())?;
         quinn::TokioRuntime.wrap_udp_socket(socket)
     }
 }
@@ -864,9 +876,8 @@ mod p1_9_quic_source_filter_tests {
         let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
 
-        let socket =
-            prepare_quic_socket("0.0.0.0:0".parse().unwrap(), upstream_addr, None, None)
-                .expect("prepare_quic_socket 应成功");
+        let socket = prepare_quic_socket("0.0.0.0:0".parse().unwrap(), upstream_addr, None, None)
+            .expect("prepare_quic_socket 应成功");
 
         // ① 机制：确实连到了上游（未连接的套接字 peer_addr() 会报错）
         assert_eq!(
@@ -912,7 +923,10 @@ mod p1_9_quic_source_filter_tests {
                 Err(e) => panic!("收包异常：{e}"),
             }
         }
-        assert!(!leaked, "来源不符的报文必须被内核丢弃（这就是本项要的效果）");
+        assert!(
+            !leaked,
+            "来源不符的报文必须被内核丢弃（这就是本项要的效果）"
+        );
     }
 }
 
@@ -1026,7 +1040,6 @@ fn next_random_udp(bind_addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
     std::net::UdpSocket::bind(bind_addr)
 }
 
-
 /// 🔐 Q15：DoH（https / h3）请求头里的 Host（`:authority`）。
 ///
 /// 规则与 C 版一致（`src/utils/misc.c:274` 的 `set_http_host` +
@@ -1088,7 +1101,10 @@ mod p1_9_direct_udp_tests {
 
         // ① 机制：已连接到上游（未连接的套接字 peer_addr 会报错）
         assert_eq!(
-            socket.deref().peer_addr().expect("直连上游套接字必须已 connect"),
+            socket
+                .deref()
+                .peer_addr()
+                .expect("直连上游套接字必须已 connect"),
             upstream_addr,
             "P1-9：直连 UDP 上游套接字必须 connect 到该上游"
         );

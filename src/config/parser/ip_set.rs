@@ -26,17 +26,11 @@ impl NomParser for IpSetFileProvider {
         let one = alt((
             map(
                 // 显式写 `String::parse`：靠推断的话，下面 `&name`（要 `&str`）会把推断带偏
-                options::parse_value(
-                    alt((tag_no_case("name"), tag_no_case("n"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("name"), tag_no_case("n"))), String::parse),
                 |v| name = Some(v),
             ),
             map(
-                options::parse_value(
-                    alt((tag_no_case("file"), tag_no_case("f"))),
-                    PathBuf::parse,
-                ),
+                options::parse_value(alt((tag_no_case("file"), tag_no_case("f"))), PathBuf::parse),
                 |v| file = Some(v),
             ),
             // 本地文件名单同样支持 `-interval`：文件内容也是在构建配置时展开进规则树的
@@ -58,11 +52,14 @@ impl NomParser for IpSetFileProvider {
         if let (Some(name), Some(file)) = (name, file) {
             super::warn_if_interval_too_short("ip-set", &name, interval);
 
-            return Ok((rest_input, IpSetFileProvider {
-                name,
-                file,
-                interval,
-            }));
+            return Ok((
+                rest_input,
+                IpSetFileProvider {
+                    name,
+                    file,
+                    interval,
+                },
+            ));
         }
 
         Err(nom::Err::Error(nom::error::Error::new(
@@ -83,10 +80,7 @@ impl NomParser for IpSetHttpProvider {
 
         let one = alt((
             map(
-                options::parse_value(
-                    alt((tag_no_case("name"), tag_no_case("n"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("name"), tag_no_case("n"))), String::parse),
                 |v| name = Some(v),
             ),
             map(
@@ -104,10 +98,7 @@ impl NomParser for IpSetHttpProvider {
                 |v: usize| interval = Some(v),
             ),
             map(
-                options::parse_value(
-                    alt((tag_no_case("proxy"), tag_no_case("p"))),
-                    String::parse,
-                ),
+                options::parse_value(alt((tag_no_case("proxy"), tag_no_case("p"))), String::parse),
                 |v| proxy = Some(v),
             ),
             options::parse_value(
@@ -121,12 +112,15 @@ impl NomParser for IpSetHttpProvider {
         if let (Some(name), Some(url)) = (name, url) {
             super::warn_if_interval_too_short("ip-set", &name, interval);
 
-            return Ok((rest_input, IpSetHttpProvider {
-                name,
-                url,
-                interval,
-                proxy,
-            }));
+            return Ok((
+                rest_input,
+                IpSetHttpProvider {
+                    name,
+                    url,
+                    interval,
+                    proxy,
+                },
+            ));
         }
 
         Err(nom::Err::Error(nom::error::Error::new(
@@ -148,7 +142,12 @@ mod tests {
         })
     }
 
-    fn http_provider(name: &str, url: &str, interval: Option<usize>, proxy: Option<&str>) -> IpSetProvider {
+    fn http_provider(
+        name: &str,
+        url: &str,
+        interval: Option<usize>,
+        proxy: Option<&str>,
+    ) -> IpSetProvider {
         IpSetProvider::Http(IpSetHttpProvider {
             name: name.to_string(),
             url: Url::parse(url).unwrap(),
@@ -204,7 +203,10 @@ mod tests {
     fn test_parse_http_provider() {
         assert_eq!(
             IpSetProvider::parse("-name set -url https://example.com/list"),
-            Ok(("", http_provider("set", "https://example.com/list", None, None)))
+            Ok((
+                "",
+                http_provider("set", "https://example.com/list", None, None)
+            ))
         );
         assert_eq!(
             IpSetProvider::parse("-n set -u http://example.com/list -i 3600 -p clash"),
@@ -221,6 +223,12 @@ mod tests {
             ))
         );
         // 远程名单必须给 URL（只有 -file 的行走不到这个分支）
-        assert!(IpSetProvider::parse("-name set -file /path/to/list").unwrap().1.name() == "set");
+        assert!(
+            IpSetProvider::parse("-name set -file /path/to/list")
+                .unwrap()
+                .1
+                .name()
+                == "set"
+        );
     }
 }

@@ -57,12 +57,13 @@ impl LookupError {
     #[inline]
     pub fn is_soa(&self) -> bool {
         if let Self::Proto(err) = self
-            && let ProtoErrorKind::NoRecordsFound(NoRecords { soa: Some(_), .. }) = err.kind() {
-                return true;
-            }
+            && let ProtoErrorKind::NoRecordsFound(NoRecords { soa: Some(_), .. }) = err.kind()
+        {
+            return true;
+        }
         false
     }
-	
+
     /// 🔐 第三部分第 1 条（`acl-enable`）：取出"我们主动给出的明确响应码"。
     ///
     /// 例：ACL 拒绝时中间件直接产出 `REFUSED`（"服务器拒绝为你服务"）—— 这与"解析出错"
@@ -77,7 +78,7 @@ impl LookupError {
         }
     }
 
-	// 🌟 核心修复 3：精准探查彻底空包（无数据也无SOA），替代脆弱的字符串匹配
+    // 🌟 核心修复 3：精准探查彻底空包（无数据也无SOA），替代脆弱的字符串匹配
     pub fn is_no_records_found(&self) -> bool {
         if let Self::Proto(err) = self {
             matches!(err.kind(), ProtoErrorKind::NoRecordsFound(_))

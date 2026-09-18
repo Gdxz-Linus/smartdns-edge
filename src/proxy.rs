@@ -79,7 +79,12 @@ pub async fn handshake_udp(
         Some(proxy) => match proxy.proto {
             ProxyProtocol::Socks5 => {
                 use crate::async_socks5::{AddrKind, Auth};
-                let stream = stream.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TCP stream required for SOCKS5 UDP associate"))?;
+                let stream = stream.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TCP stream required for SOCKS5 UDP associate",
+                    )
+                })?;
 
                 let auth = if proxy.username.is_some() {
                     let username = proxy.username.as_deref().unwrap_or_default();
@@ -99,9 +104,10 @@ pub async fn handshake_udp(
 
                 Ok(UdpSocket::Proxy(socket))
             }
-            ProxyProtocol::Http => {
-                Err(io::Error::new(io::ErrorKind::InvalidInput, "HTTP proxy does not support UDP"))
-            }
+            ProxyProtocol::Http => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP proxy does not support UDP",
+            )),
         },
         None => Ok(UdpSocket::Tokio(socket)),
     }

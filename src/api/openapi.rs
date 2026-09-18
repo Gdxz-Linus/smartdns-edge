@@ -48,10 +48,8 @@ pub fn swagger_cdn<S: Clone + Send + Sync + 'static>(
     //
     // 用户自己传了 cdn（完整 URL 前缀）时不做校验 —— 那是他自己的来源，我们没法替他钉。
     const PINNED_CDN: &str = "https://unpkg.com/swagger-ui-dist@5.33.0";
-    const PINNED_CSS_SRI: &str =
-        "integrity=\"sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW\" crossorigin=\"anonymous\"";
-    const PINNED_JS_SRI: &str =
-        "integrity=\"sha384-YDALVcy8kj8yltLBVi1vBiBAUqdxvus673gM8XKwiy6aDUJFXivF/KCufekjYbVf\" crossorigin=\"anonymous\"";
+    const PINNED_CSS_SRI: &str = "integrity=\"sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW\" crossorigin=\"anonymous\"";
+    const PINNED_JS_SRI: &str = "integrity=\"sha384-YDALVcy8kj8yltLBVi1vBiBAUqdxvus673gM8XKwiy6aDUJFXivF/KCufekjYbVf\" crossorigin=\"anonymous\"";
 
     let (cdn, css_sri, js_sri) = match cdn {
         Some(custom) => (custom, "", ""),

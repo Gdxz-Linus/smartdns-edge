@@ -43,9 +43,10 @@ impl DnsHostsMiddleware {
         {
             let cache = self.0.read().await;
             if let Some(cache) = cache.as_ref()
-                && now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL {
-                    return cache.hosts.clone();
-                }
+                && now.duration_since(cache.checked_at) < HOSTS_FILE_STAT_INTERVAL
+            {
+                return cache.hosts.clone();
+            }
         }
 
         // 把 pattern 转换为字符串，用于跨线程传递
@@ -55,7 +56,9 @@ impl DnsHostsMiddleware {
         let signature = tokio::task::spawn_blocking({
             let p_str = pattern_str.clone();
             move || collect_hosts_signature(p_str.as_deref())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         {
             let mut cache = self.0.write().await;
@@ -74,12 +77,7 @@ impl DnsHostsMiddleware {
         // 原实现直接拿它覆盖缓存 → 内网域名突然全部转去公网解析。
         // 现在的处理（同目录 dnsmasq 的实现也是保守的）：读到空内容而旧缓存是有内容的，
         // 就稍等 200ms 再读一次；两次都空才认账 —— 这样"用户真的清空了 hosts"依然能生效。
-        let prev_has_content = self
-            .0
-            .read()
-            .await
-            .as_ref()
-            .is_some_and(|c| c.has_content);
+        let prev_has_content = self.0.read().await.as_ref().is_some_and(|c| c.has_content);
 
         let (mut refreshed, mut has_content) = read_hosts_blocking(pattern_str.clone()).await;
 
@@ -282,7 +280,10 @@ mod tests {
         let empty = dir.path.join("empty.hosts");
         std::fs::write(&empty, b"\n   \n")?;
         let (_, has_content) = read_hosts(empty.to_str().unwrap());
-        assert!(!has_content, "只有空白的 hosts 文件应报告 has_content=false");
+        assert!(
+            !has_content,
+            "只有空白的 hosts 文件应报告 has_content=false"
+        );
 
         let filled = dir.path.join("filled.hosts");
         std::fs::write(&filled, b"127.0.0.1  p2-test.local\n")?;

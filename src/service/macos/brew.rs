@@ -40,7 +40,7 @@ pub fn create_service_definition() -> ServiceDefinition {
                 format!(
                     r#"
                     O=$(brew services info {}) && echo "$O" | grep -q "Running: true" &&
-                    (echo "$O" && exit 0) || (echo "$O" && exit 1) 
+                    (echo "$O" && exit 0) || (echo "$O" && exit 1)
                     "#,
                     SERVICE_NAME
                 )

@@ -65,7 +65,9 @@ impl NomParser for NameServerInfo {
                                 Err(_) => log::error!("Invalid set-mark value: '{}', ignored!", m), // 🌟 拒绝静默吞错
                             }
                         }
-                        None => { log::warn!("expect mark") }
+                        None => {
+                            log::warn!("expect mark")
+                        }
                     },
                     "g" | "group" => match v {
                         Some(g) => nameserver.group.push(g.to_string()),
@@ -86,7 +88,9 @@ impl NomParser for NameServerInfo {
                                 Err(_) => log::error!("Invalid subnet value: '{}', ignored!", s), // 🌟 拒绝静默吞错
                             }
                         }
-                        None => { log::warn!("expect edns client subnet") }
+                        None => {
+                            log::warn!("expect edns client subnet")
+                        }
                     },
                     "host-name" => match v {
                         Some(host_name) => {
@@ -125,11 +129,9 @@ impl NomParser for NameServerInfo {
                     "spki-pin" => match v {
                         Some(pin) => match crate::dns_url::decode_spki_pin(pin) {
                             Ok(_) => nameserver.server.set_spki_pin(pin),
-                            Err(err) => log::error!(
-                                "Invalid spki-pin value: '{}', ignored! ({})",
-                                pin,
-                                err
-                            ), // 🌟 拒绝静默吞错
+                            Err(err) => {
+                                log::error!("Invalid spki-pin value: '{}', ignored! ({})", pin, err)
+                            } // 🌟 拒绝静默吞错
                         },
                         None => {
                             log::warn!("expect spki-pin")
@@ -180,11 +182,9 @@ impl NomParser for NameServerInfo {
                                     "`-host-ip` 只对「地址写的是域名」的上游有意义：这条上游本身就写的 IP，已忽略"
                                 ),
                             },
-                            Err(err) => log::error!(
-                                "Invalid host-ip value: '{}', ignored! ({})",
-                                ip,
-                                err
-                            ), // 🌟 与 spki-pin 一样：拒绝静默吞错
+                            Err(err) => {
+                                log::error!("Invalid host-ip value: '{}', ignored! ({})", ip, err)
+                            } // 🌟 与 spki-pin 一样：拒绝静默吞错
                         },
                         None => {
                             log::warn!("expect host-ip")
@@ -225,10 +225,7 @@ mod tests {
         );
 
         assert!(
-            !NameServerInfo::parse("server 8.8.8.8")
-                .unwrap()
-                .1
-                .fallback,
+            !NameServerInfo::parse("server 8.8.8.8").unwrap().1.fallback,
             "不写 -fallback 就是普通上游（默认 false）"
         );
     }
@@ -245,27 +242,31 @@ mod tests {
         assert_eq!(server.server.host().to_string(), "doh.example.com");
 
         // 非 DoH 上游上写了要忽略（不能"配了像没配"）
-        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -http-host gw.example.com").unwrap();
+        let (_, server) =
+            NameServerInfo::parse("server udp://1.1.1.1 -http-host gw.example.com").unwrap();
         assert_eq!(server.server.http_host(), None);
 
         // 没配就是 None（原行为：Host 与 SNI 一致）
-        let (_, server) = NameServerInfo::parse("server-https https://doh.example.com/dns-query").unwrap();
+        let (_, server) =
+            NameServerInfo::parse("server-https https://doh.example.com/dns-query").unwrap();
         assert_eq!(server.server.http_host(), None);
     }
 
     /// 🔐 Q16/Q17：两个上游选项要能解析进 NameServerInfo
     #[test]
     fn test_parse_tcp_keepalive_and_subnet_all_query_types() {
-        let (_, server) =
-            NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive 300").unwrap();
+        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive 300").unwrap();
         assert_eq!(server.tcp_keepalive, Some(300));
 
         let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive 0").unwrap();
-        assert_eq!(server.tcp_keepalive, Some(0), "0 是合法值（空选项 = 问上游）");
+        assert_eq!(
+            server.tcp_keepalive,
+            Some(0),
+            "0 是合法值（空选项 = 问上游）"
+        );
 
         // 写错的值 → 忽略，不改变默认
-        let (_, server) =
-            NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive abc").unwrap();
+        let (_, server) = NameServerInfo::parse("server udp://1.1.1.1 -tcp-keepalive abc").unwrap();
         assert_eq!(server.tcp_keepalive, None);
 
         let (_, server) =
@@ -280,10 +281,17 @@ mod tests {
     /// 🔐 Q14 `-host-ip`：地址写域名时，连接改用指定的 IP，域名照旧（TLS 校验/SNI 用域名）
     #[test]
     fn test_parse_server_host_ip() {
-        let (_, server) = NameServerInfo::parse("server tls://dot.example.com -host-ip 1.2.3.4").unwrap();
+        let (_, server) =
+            NameServerInfo::parse("server tls://dot.example.com -host-ip 1.2.3.4").unwrap();
 
-        assert_eq!(server.server.ip(), Some("1.2.3.4".parse::<IpAddr>().unwrap()));
-        assert!(server.server.has_ip(), "配了 host-ip 就算\"有地址\"，不该再要求 bootstrap 解析");
+        assert_eq!(
+            server.server.ip(),
+            Some("1.2.3.4".parse::<IpAddr>().unwrap())
+        );
+        assert!(
+            server.server.has_ip(),
+            "配了 host-ip 就算\"有地址\"，不该再要求 bootstrap 解析"
+        );
         assert_eq!(
             server.server.host().to_string(),
             "dot.example.com",
@@ -294,7 +302,8 @@ mod tests {
     /// `-host-ip` 写错（不是 IP）→ 忽略并告警，不改变原行为
     #[test]
     fn test_parse_server_host_ip_invalid() {
-        let (_, server) = NameServerInfo::parse("server tls://dot.example.com -host-ip 不是IP").unwrap();
+        let (_, server) =
+            NameServerInfo::parse("server tls://dot.example.com -host-ip 不是IP").unwrap();
         assert_eq!(server.server.ip(), None);
     }
 
@@ -302,7 +311,10 @@ mod tests {
     #[test]
     fn test_parse_server_host_ip_ignored_when_host_is_ip() {
         let (_, server) = NameServerInfo::parse("server tls://9.9.9.9 -host-ip 1.2.3.4").unwrap();
-        assert_eq!(server.server.ip(), Some("9.9.9.9".parse::<IpAddr>().unwrap()));
+        assert_eq!(
+            server.server.ip(),
+            Some("9.9.9.9".parse::<IpAddr>().unwrap())
+        );
     }
 
     #[test]

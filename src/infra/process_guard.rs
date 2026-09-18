@@ -170,10 +170,7 @@ mod tests {
             Some(std::process::id()),
             "PID 文件必须能被读出来（Windows 上锁在 .lock 文件上，不挡读）"
         );
-        assert!(
-            guard.lock_path().exists(),
-            "锁应该加在同名的 .lock 文件上"
-        );
+        assert!(guard.lock_path().exists(), "锁应该加在同名的 .lock 文件上");
     }
 
     /// 第二个实例拿到 AlreadyRunning，并且能报出真正的 PID（不是 0）
@@ -188,7 +185,11 @@ mod tests {
         // 同一个进程内再建一个守卫：锁是自己持有的 → 一定失败
         match create(&pid_path) {
             Err(ProcessGuardError::AlreadyRunning(pid)) => {
-                assert_eq!(pid, Some(std::process::id()), "要报出真正的 PID，不能是 0 或 None");
+                assert_eq!(
+                    pid,
+                    Some(std::process::id()),
+                    "要报出真正的 PID，不能是 0 或 None"
+                );
             }
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }
@@ -211,7 +212,10 @@ mod tests {
         };
 
         let content = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        assert!(content.trim().is_empty(), "退出后 PID 内容应清空，实际是 {content:?}");
+        assert!(
+            content.trim().is_empty(),
+            "退出后 PID 内容应清空，实际是 {content:?}"
+        );
         assert!(
             read_pid(&pid_path).is_err(),
             "空文件要按\"读不到\"处理，不能解析成 0"

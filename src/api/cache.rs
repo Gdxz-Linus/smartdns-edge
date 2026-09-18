@@ -3,7 +3,11 @@ use std::sync::Arc;
 use super::openapi::{IntoParams, IntoRouter, routes};
 use super::{ServeState, StatefulRouter};
 use crate::{config::CacheConfig, dns_mw_cache::CachedQueryRecord, log};
-use axum::{Json, extract::{State, Query}, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+};
 use serde::{Deserialize, Serialize};
 
 pub fn routes() -> StatefulRouter {
@@ -20,7 +24,9 @@ pub struct CachePagination {
     #[serde(default = "default_limit")]
     limit: usize,
 }
-fn default_limit() -> usize { 100 } // 默认最多只返回 100 条，守住内存底线
+fn default_limit() -> usize {
+    100
+} // 默认最多只返回 100 条，守住内存底线
 
 /// 🔐 P2：单页硬上限。显式传入的 `?limit=` 也必须受它约束 ——
 /// 原实现只在参数缺省时兜底，`?limit=1000000000` 能强制克隆并序列化整个缓存（内存与响应体双爆）。
@@ -34,7 +40,13 @@ struct CacheListPayload<T> {
     data: Vec<T>,
 }
 
-#[utoipa::path(get, path = "/caches", tag = "Caches", operation_id = "list_caches", params(CachePagination))]
+#[utoipa::path(
+    get,
+    path = "/caches",
+    tag = "Caches",
+    operation_id = "list_caches",
+    params(CachePagination)
+)]
 async fn caches(
     State(state): State<Arc<ServeState>>,
     Query(page): Query<CachePagination>,
@@ -61,7 +73,12 @@ async fn caches(
     })
 }
 
-#[utoipa::path(post, path = "/caches/flush", tag = "Caches", operation_id = "flush_caches")]
+#[utoipa::path(
+    post,
+    path = "/caches/flush",
+    tag = "Caches",
+    operation_id = "flush_caches"
+)]
 async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
     if let Some(c) = state.app.cache().await {
         c.clear().await;
@@ -70,7 +87,12 @@ async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-#[utoipa::path(get, path = "/caches/config", tag = "Caches", operation_id = "get_cache_config")]
+#[utoipa::path(
+    get,
+    path = "/caches/config",
+    tag = "Caches",
+    operation_id = "get_cache_config"
+)]
 async fn config(State(state): State<Arc<ServeState>>) -> Json<CacheConfig> {
     let config = state.app.cfg().await.cache_config().clone();
     Json(config)

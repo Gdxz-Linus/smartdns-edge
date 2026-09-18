@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{third_ext::PathBufAddExtensionExt};
+use crate::third_ext::PathBufAddExtensionExt;
 
 pub struct InstallerBuilder {
     items: Vec<InstallItem>,
@@ -437,10 +437,13 @@ impl Installer {
                     }
                     Err(_) => dest_path.to_string_lossy().into_owned(),
                 };
-                
+
                 if is_conf {
                     // 只在初次真正生成文件时才高亮提示
-                    println!("💡 Generated default config file at \"{}\". Please edit before starting.", display_path);
+                    println!(
+                        "💡 Generated default config file at \"{}\". Please edit before starting.",
+                        display_path
+                    );
                 } else {
                     crate::log::info!("Installed file to \"{}\"", display_path);
                 }
@@ -474,7 +477,11 @@ impl Installer {
                 if path.is_file() {
                     // 🌟 核心拆弹：容错删除！遇到占用报错只打印日志，绝不中断后续清理！
                     if let Err(err) = fs::remove_file(path) {
-                        crate::log::warn!("Failed to remove file {:?} (maybe locked): {}", path, err);
+                        crate::log::warn!(
+                            "Failed to remove file {:?} (maybe locked): {}",
+                            path,
+                            err
+                        );
                     } else {
                         crate::log::info!("File {:?} removed", path);
                         n += 1;

@@ -21,9 +21,15 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
             let local_ttl = ctx.cfg().local_ttl() as u32;
 
             // 🌟 提取 rr-ttl 和 rr-ttl-min，为合成否定缓存 (SOA 拦截) 提供规范的兜底寿命
-            let rr_ttl = ctx.domain_rule.get(|r| r.rr_ttl).map(|i| i as u32)
+            let rr_ttl = ctx
+                .domain_rule
+                .get(|r| r.rr_ttl)
+                .map(|i| i as u32)
                 .or_else(|| ctx.cfg().rr_ttl().map(|i| i as u32));
-            let rr_ttl_min = ctx.domain_rule.get(|r| r.rr_ttl_min).map(|i| i as u32)
+            let rr_ttl_min = ctx
+                .domain_rule
+                .get(|r| r.rr_ttl_min)
+                .map(|i| i as u32)
                 .unwrap_or_else(|| ctx.cfg().rr_ttl_min().unwrap_or(300) as u32);
             // 如果没配 rr_ttl，就用 min 兜底
             let intercept_soa_ttl = rr_ttl.unwrap_or(rr_ttl_min);
@@ -40,7 +46,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 match d {
                     RData::SOA(_) => {
                         // 🌟 使用全局统一兵工厂，配上受外网规则管控的拦截 TTL
-                        let soa_record = crate::dns::forge_soa_record(name.clone(), intercept_soa_ttl);
+                        let soa_record =
+                            crate::dns::forge_soa_record(name.clone(), intercept_soa_ttl);
                         authorities.push(soa_record);
                     }
                     _ => {
@@ -80,24 +87,26 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 // 1) max-reply-ip-num：截断 Answer 区的 IP 记录
                 if query_type.is_ip_addr()
                     && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
-                        && max_reply_ip_num > 0 {
-                            let mut truncate = None;
-                            for (i, r) in lookup.answers().iter().enumerate() {
-                                if matches!(r.data(), RData::A(_) | RData::AAAA(_)) {
-                                    max_reply_ip_num -= 1;
-                                    if max_reply_ip_num == 0 {
-                                        truncate = Some(i + 1);
-                                        break;
-                                    }
-                                }
+                    && max_reply_ip_num > 0
+                {
+                    let mut truncate = None;
+                    for (i, r) in lookup.answers().iter().enumerate() {
+                        if matches!(r.data(), RData::A(_) | RData::AAAA(_)) {
+                            max_reply_ip_num -= 1;
+                            if max_reply_ip_num == 0 {
+                                truncate = Some(i + 1);
+                                break;
                             }
-
-                            if let Some(truncate) = truncate
-                                && lookup.answers().len() > truncate {
-                                    lookup.answers_mut().truncate(truncate);
-                                    lookup.sync_header_counts();
-                                }
                         }
+                    }
+
+                    if let Some(truncate) = truncate
+                        && lookup.answers().len() > truncate
+                    {
+                        lookup.answers_mut().truncate(truncate);
+                        lookup.sync_header_counts();
+                    }
+                }
 
                 // 2) rr-ttl-reply-max：把"给客户端看的 TTL"统一压到上限以内（B3：三个区都压）。
                 if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
@@ -498,7 +507,6 @@ mod tests {
     // 已删除 test_ttl_clip_ttl_max_reply_ip_num_2：
     // 它的正文与 test_ttl_clip_ttl_max_reply_ip_num 逐字节相同（只有函数名不同），
     // 是纯粹的重复，删掉不损失任何覆盖。
-
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ttl_clip_ttl_cname_max_reply_ip_num_2() -> Result<(), DnsError> {

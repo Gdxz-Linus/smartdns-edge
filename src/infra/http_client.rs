@@ -30,7 +30,10 @@ fn read_capped<R: Read>(reader: R) -> anyhow::Result<String> {
 }
 
 #[cfg(feature = "ureq")]
-pub fn get<T>(uri: T, proxy_url: Option<&str>) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
+pub fn get<T>(
+    uri: T,
+    proxy_url: Option<&str>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
 where
     http::Uri: TryFrom<T>,
     <http::Uri as TryFrom<T>>::Error: Into<http::Error>,

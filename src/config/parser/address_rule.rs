@@ -140,8 +140,8 @@ mod tests {
     /// 旧行为：`"1.2.3.4 后面的字"` 被静默截断成 `1.2.3.4` 写进配置。
     #[test]
     fn test_from_str_must_consume_all_input() {
-        use std::str::FromStr;
         use AddressRuleValue::*;
+        use std::str::FromStr;
 
         // 合法写法照旧接受（含首尾空白、逗号多值）
         assert_eq!(AddressRuleValue::from_str("#").unwrap(), SOA);

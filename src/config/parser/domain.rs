@@ -148,7 +148,10 @@ mod test {
             "www.baidu.com<-x",
             "www.baidu.com|随便写点什么",
         ] {
-            assert!(Domain::from_str(bad).is_err(), "{bad:?} 应被拒绝，不能被截断");
+            assert!(
+                Domain::from_str(bad).is_err(),
+                "{bad:?} 应被拒绝，不能被截断"
+            );
         }
 
         // 注意：nom 那一层（`Domain::parse`）的语义**不变**，仍然只吃到停止符为止；

@@ -32,7 +32,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                 // 🌟 修复：无论上游是返回 NXDOMAIN(Err) 还是返回了纯 IPv4 的空包(Ok但没AAAA记录)，都必须启动 DNS64 合成！
                 let fallback_needed = match &res {
                     Err(_) => true,
-                    Ok(lookup) => !lookup.records().iter().any(|r| r.record_type() == RecordType::AAAA),
+                    Ok(lookup) => !lookup
+                        .records()
+                        .iter()
+                        .any(|r| r.record_type() == RecordType::AAAA),
                 };
 
                 if !fallback_needed {
@@ -59,7 +62,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                         continue;
                     };
                     // 🌟 核心修复：不能只改数据，我们直接用原域名和寿命生成一条全新的 AAAA 记录，整体覆盖旧的 A 记录，从根本上保证包头类型与数据绝对匹配！
-                    *record = Record::from_rdata(record.name().clone(), record.ttl(), RData::AAAA(ipv6.into()));
+                    *record = Record::from_rdata(
+                        record.name().clone(),
+                        record.ttl(),
+                        RData::AAAA(ipv6.into()),
+                    );
                 }
                 if let Some(q) = lookup.queries_mut().first_mut() {
                     q.set_query_type(query_type);

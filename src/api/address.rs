@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use serde::Deserialize;
+use std::sync::Arc;
 // 🌟 修复：引入读写锁，细化并发粒度
-use tokio::sync::RwLock;
 use std::sync::LazyLock;
+use tokio::sync::RwLock;
 
 use crate::{
     config::{
@@ -59,7 +59,7 @@ async fn create(
         tokio::fs::create_dir_all(&managed_dir).await?;
     }
     let file = managed_dir.join("address.conf");
-    
+
     if file.exists() {
         let text = tokio::fs::read_to_string(&file).await?;
         let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
@@ -120,7 +120,10 @@ async fn update(
 
     let file = managed_dir.join("address.conf");
     if !file.exists() {
-        return Err(ApiError::NotFound(format!("Domain {} not found", rule.domain)));
+        return Err(ApiError::NotFound(format!(
+            "Domain {} not found",
+            rule.domain
+        )));
     }
 
     let text = tokio::fs::read_to_string(&file).await?;
@@ -140,7 +143,10 @@ async fn update(
     }
 
     if replaced == 0 {
-        return Err(ApiError::NotFound(format!("Domain {} not found", rule.domain)));
+        return Err(ApiError::NotFound(format!(
+            "Domain {} not found",
+            rule.domain
+        )));
     }
 
     safe_write_config(&file, format!("{config}")).await?;
@@ -205,7 +211,7 @@ async fn safe_write_config(file: &std::path::Path, content: String) -> std::io::
     // 先写到临时的 .tmp 文件中
     let tmp_file = file.with_extension("tmp");
     tokio::fs::write(&tmp_file, content).await?;
-        
+
     // 操作系统级原子重命名，只有写入完全成功后才会瞬间覆盖原文件
     tokio::fs::rename(&tmp_file, file).await?;
     Ok(())

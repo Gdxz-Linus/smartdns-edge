@@ -54,8 +54,8 @@ pub struct CacheConfig {
     ///   serve-expired-reply-ttl 30
     /// ```
     pub serve_expired_reply_ttl: Option<u64>,
-	
-	// 👇 【新增这一行】：过期缓存预取闲置超时
+
+    // 👇 【新增这一行】：过期缓存预取闲置超时
     pub serve_expired_prefetch_time: Option<u64>,
 
     /// cache save interval

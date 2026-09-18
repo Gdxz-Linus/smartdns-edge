@@ -66,7 +66,9 @@ impl ServiceManager {
             Ok(ServiceStatus::Dead(_)) => {
                 // 已安装但没在跑：继续走安装流程（幂等重写文件 + 启动），
                 // 这样"换了新二进制以后再 install 一次"也能真正生效。
-                println!("ℹ️ SmartDNS service is installed but not running; reinstalling and starting it.");
+                println!(
+                    "ℹ️ SmartDNS service is installed but not running; reinstalling and starting it."
+                );
             }
             Ok(ServiceStatus::NotInstalled) => {
                 println!("ℹ️ SmartDNS service is not installed yet; installing now.");
@@ -178,7 +180,7 @@ impl ServiceManager {
         }
         Ok(())
     }
-	
+
     pub fn status(&self) -> io::Result<ServiceStatus> {
         let status = match self.definition.commands.status.as_ref() {
             Some(cmd) => {
@@ -256,13 +258,15 @@ impl ServiceCommand {
                 msg.push_str(stdout.trim());
             }
             if !stderr.trim().is_empty() {
-                if !msg.is_empty() { msg.push('\n'); }
+                if !msg.is_empty() {
+                    msg.push('\n');
+                }
                 msg.push_str(stderr.trim());
             }
             if msg.trim().is_empty() {
                 msg = "Failed".to_string();
             }
-            
+
             // 🌟 核心修复 3：彻底拔除那个丑陋的 ❌ Error executing ... 前缀！
             // 让终端直接原汁原味地输出我们在 PowerShell 里精心排版的指导语！
             eprintln!("{}", msg);
@@ -424,10 +428,21 @@ mod status_tests {
 
     #[test]
     fn windows_script_codes_keep_working() {
-        assert_eq!(classify_status(WIN, Some(0), true, ""), ServiceStatusKind::Running);
-        assert_eq!(classify_status(WIN, Some(1), false, ""), ServiceStatusKind::Dead);
         assert_eq!(
-            classify_status(WIN, Some(2), false, "\n❌ SmartDNS service is NOT installed."),
+            classify_status(WIN, Some(0), true, ""),
+            ServiceStatusKind::Running
+        );
+        assert_eq!(
+            classify_status(WIN, Some(1), false, ""),
+            ServiceStatusKind::Dead
+        );
+        assert_eq!(
+            classify_status(
+                WIN,
+                Some(2),
+                false,
+                "\n❌ SmartDNS service is NOT installed."
+            ),
             ServiceStatusKind::NotInstalled
         );
     }
@@ -467,7 +482,12 @@ mod status_tests {
     #[test]
     fn lsb_initd_codes() {
         assert_eq!(
-            classify_status(SD, Some(1), false, "smartdns-rs is dead but pid file exists"),
+            classify_status(
+                SD,
+                Some(1),
+                false,
+                "smartdns-rs is dead but pid file exists"
+            ),
             ServiceStatusKind::Dead
         );
         assert_eq!(
@@ -515,8 +535,14 @@ mod status_tests {
 
     #[test]
     fn unknown_codes_fall_back_to_exit_status() {
-        assert_eq!(classify_status(SD, Some(7), true, "weird"), ServiceStatusKind::Running);
-        assert_eq!(classify_status(WIN, None, false, "killed by signal"), ServiceStatusKind::Dead);
+        assert_eq!(
+            classify_status(SD, Some(7), true, "weird"),
+            ServiceStatusKind::Running
+        );
+        assert_eq!(
+            classify_status(WIN, None, false, "killed by signal"),
+            ServiceStatusKind::Dead
+        );
     }
 
     #[test]
