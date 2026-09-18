@@ -25,7 +25,12 @@ const NFNL_SUBSYS_IPSET: u16 = 6;
 /// 加元素（`IPSET_CMD_ADD`）
 const IPSET_CMD_ADD: u16 = 9;
 /// ipset 协议版本（`IPSET_PROTOCOL`）
-const IPSET_PROTOCOL: u8 = 6;
+///
+/// 🌟 2026-09-18（WSL 真内核上跑通才敢定）：**必须是 7**。写 6 时新内核直接回
+/// "集合不存在"（`No such file or directory`），日志里只会看到一条"写入失败" ——
+/// 表现是"配置了像没配"，而集合其实建得好好的。老内核（协议 6）会写不进去，
+/// 那种情况下我们的失败告警会明确报出来（每次启动只提示一次），不会静默。
+const IPSET_PROTOCOL: u8 = 7;
 
 const IPSET_ATTR_PROTOCOL: u16 = 1;
 const IPSET_ATTR_SETNAME: u16 = 2;
@@ -61,7 +66,7 @@ fn align(len: usize) -> usize {
 /// nlmsghdr { len, type = IPSET_CMD_ADD | (NFNL_SUBSYS_IPSET << 8),
 ///            flags = REQUEST | REPLACE (我们再加 ACK), seq, pid = 0 }
 /// nfgenmsg { family = AF_INET/AF_INET6, version = 0, res_id = htons(NFNL_SUBSYS_IPSET) }
-/// attr PROTOCOL  = u8 6
+/// attr PROTOCOL  = u8 7
 /// attr SETNAME   = 集合名 + '\0'
 /// attr DATA (nested) {
 ///     attr IP (nested) { attr IPADDR_IPV4|NET_BYTEORDER(4B) 或 IPADDR_IPV6|NET_BYTEORDER(16B) }
@@ -330,12 +335,12 @@ mod imp {
         let _guard = SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fd = socket_or_init()?;
 
-        let dst = libc::sockaddr_nl {
-            nl_family: libc::AF_NETLINK as u16,
-            nl_pad: 0,
-            nl_pid: 0,
-            nl_groups: 0,
-        };
+        // 🌟 2026-09-18（WSL 真机首编暴露）：`sockaddr_nl` 的 `nl_pad` 是给编译器看的填充字节，
+        // 新版 libc 把它收成了**私有字段**，直接写 `nl_pad: 0` 在 Linux 上编不过（E0451）。
+        // 它本来就该是 0，改用"整块清零 + 只填 family"，既不依赖 libc 的字段可见性，
+        // 行为也和原来逐字节一致。
+        let mut dst: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        dst.nl_family = libc::AF_NETLINK as u16;
 
         let sent = unsafe {
             libc::sendto(
@@ -421,7 +426,7 @@ mod tests {
             buf.resize(align(buf.len()), 0);
         };
 
-        attr(&mut buf, 1, &[6u8]); // PROTOCOL
+        attr(&mut buf, 1, &[7u8]); // PROTOCOL
         let mut name = setname.as_bytes().to_vec();
         name.push(0);
         attr(&mut buf, 2, &name); // SETNAME

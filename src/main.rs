@@ -296,6 +296,8 @@ impl Cli {
                 command.execute();
             }
             #[cfg(all(feature = "resolve-cli", any(unix, windows)))]
+            // `link` 只在 Windows 分支里会被改（补 .exe 后缀），Linux 上用不到 mut
+            #[cfg_attr(not(windows), allow(unused_mut))]
             Commands::Symlink { mut link } => {
                 let original = std::env::current_exe().expect("failed to get current exe path");
 
