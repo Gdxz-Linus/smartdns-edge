@@ -634,6 +634,31 @@ fn persist_action(current: Option<(&Path, u64)>, want: Option<(&Path, u64)>) -> 
 ///
 /// 与周期落盘任务一样，任务句柄要挂在 `DnsCache` 上 —— 热重载会重建中间件、复用同一个
 /// `Arc<DnsCache>`，挂中间件上就找不回来了。
+/// 🔐 预取组包：刷新必须按**原记录的口径**去问，关键是 ECS。
+///
+/// 不带 ECS 的后果（2026-09-18 定的）：这条刷新会被算成"不带 ECS"那份答案，
+/// 回来后自然写进**另一条缓存记录** —— 于是客户端发过 ECS 的那些域名，过期条目
+/// 永远刷不到（不会答错，只是"后台帮忙刷"对它们不生效）。
+///
+/// 出站 ECS 的来源见 `src/dns_mw_ns.rs` 的 `LookupOptions.client_subnet`：它读的是
+/// **请求里的 EDNS Subnet 选项**，所以只要把原记录的 ECS 原样装回查询里，
+/// 出站 ECS 与回来时的缓存记录就都对得上。
+fn prefetch_query_for(key: &CacheKey) -> Message {
+    let mut msg = Message::query();
+    msg.add_query(key.query.clone());
+    if let Some(subnet) = key
+        .ecs
+        .as_deref()
+        .and_then(|s| s.parse::<crate::libdns::proto::rr::rdata::opt::ClientSubnet>().ok())
+    {
+        msg.extensions_mut()
+            .get_or_insert_with(crate::libdns::proto::op::Edns::new)
+            .options_mut()
+            .insert(crate::libdns::proto::rr::rdata::opt::EdnsOption::Subnet(subnet));
+    }
+    msg
+}
+
 fn spawn_prefetch_task(cache: &Arc<DnsCache>, client_handle: DnsHandle) -> CancellationToken {
     let cancel = CancellationToken::new();
     let cancel_in_task = cancel.clone();
@@ -692,10 +717,9 @@ fn spawn_prefetch_task(cache: &Arc<DnsCache>, client_handle: DnsHandle) -> Cance
                         let req_client = client.with_new_opt(opts);
                         let cache_clone = cache_arc.clone();
 
+                        let msg = prefetch_query_for(&cache_key);
                         tokio::spawn(async move {
                             let _guard = PrefetchGuard { cache: cache_clone, key: cache_key.clone() };
-                            let mut msg = Message::query();
-                            msg.add_query(cache_key.query.clone());
                             req_client.send(msg).await;
                         });
                     }
@@ -2221,5 +2245,50 @@ mod archive_naming_tests {
                 "{user_file} 不该被当成我们的存档"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prefetch_query_tests {
+    //! 预取组包的口径：带 ECS 的记录，刷新必须把同一段 ECS 带上；
+    //! 不带 ECS 的记录，刷新也不该凭空多带一段（成对检查 —— 只查一半会漏掉"一刀切全带"这种改法）。
+
+    use super::*;
+
+    fn key(ecs: Option<&str>) -> CacheKey {
+        CacheKey {
+            query: Query::query(Name::from_ascii("ecs-prefetch.test.").unwrap(), RecordType::A),
+            group: String::new(),
+            ecs: ecs.map(str::to_string),
+            opts: AnswerAffectingOpts::default(),
+        }
+    }
+
+    fn ecs_of(msg: &Message) -> Option<String> {
+        use crate::libdns::proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+        msg.extensions()
+            .as_ref()
+            .and_then(|edns| edns.option(EdnsCode::Subnet))
+            .and_then(|opt| match opt {
+                EdnsOption::Subnet(subnet) => {
+                    Some(format!("{}/{}", subnet.addr(), subnet.source_prefix()))
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn refresh_carries_the_records_ecs() {
+        let msg = prefetch_query_for(&key(Some("203.0.113.0/24")));
+        assert_eq!(ecs_of(&msg).as_deref(), Some("203.0.113.0/24"));
+        // 查询本身照旧（别只顾着装 ECS 把域名/类型弄丢）
+        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.queries()[0].name().to_ascii(), "ecs-prefetch.test.");
+    }
+
+    #[test]
+    fn refresh_without_ecs_stays_without_ecs() {
+        let msg = prefetch_query_for(&key(None));
+        assert_eq!(ecs_of(&msg), None, "原记录不带 ECS 时，刷新不该凭空带上一段");
     }
 }

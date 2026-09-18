@@ -92,7 +92,7 @@
 | ip-set | collection of IPs | None | ip-set [options...]<br />[-n\|-name]: name of ip set <br />[-t\|-type]: list <br />[-f\|-file]: file path of the IP set (local file)<br />[-u\|-url]: remote URL of the IP set (http/https)<br />[-p\|-proxy]: name of the proxy used to download a remote set (defined by `proxy-server ... -name xxx`)<br />[-i\|-interval]: auto refresh interval in seconds (no refresh when omitted)<br />Exactly one of `-file` / `-url` must be given | ip-set -name set -file /path/to/list <br /> ip-set -name set -url https://example.com/ip.list -interval 86400 |
 | force-AAAA-SOA | force AAAA query return SOA | no | [yes\|no] | force-AAAA-SOA yes |
 | force-no-CNAME | force No CNAME record | no | [yes\|no] | force-no-CNAME yes |
-| prefetch-domain | domain prefetch feature | no | [yes\|no] | prefetch-domain yes |
+| prefetch-domain | domain prefetch feature(entries carrying ECS are refreshed with the same ECS) | no | [yes\|no] | prefetch-domain yes |
 | serve-expired | Cache serve expired feature | yes | [yes\|no], Serve stale responses instantly without waiting for resolution. | serve-expired yes |
 | serve-expired-ttl | Cache serve expired limit TTL | 86400 | seconds | serve-expired-ttl 604800 |
 | serve-expired-reply-ttl | TTL value to use when replying with expired data | 3 | seconds | serve-expired-reply-ttl 3 |

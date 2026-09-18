@@ -92,7 +92,7 @@
 | ip-set | 设置 IP 地址集合 | 无 | ip-set [options...]<br />[-n\|-name]：IP地址集合名称 <br />[-t\|-type]：仅支持list<br />[-f\|-file]：IP 地址集合文件路径（本地）<br />[-u\|-url]：远程 IP 地址集合 URL（http/https）<br />[-p\|-proxy]：下载远程集合时使用的代理名称（指向 `proxy-server` 定义好的代理）<br />[-i\|-interval]：自动刷新周期（秒），不写则不自动刷新<br />`-file` 与 `-url` 二选一、必须给其一 | ip-set -name set -file /path/to/list <br /> ip-set -name set -url https://example.com/ip.list -interval 86400 <br /> ip-rules ip-set:set -whitelist-ip|
 | force-AAAA-SOA | 强制 AAAA 地址返回 SOA | no | [yes\|no] | force-AAAA-SOA yes |
 | force-no-CNAME | 强制 不返回 CNAME | no | [yes\|no] | force-no-CNAME yes |
-| prefetch-domain | 域名预先获取功能 | no | [yes\|no] | prefetch-domain yes |
+| prefetch-domain | 域名预先获取功能（带 ECS 的域名，刷新也按原记录的 ECS 去问） | no | [yes\|no] | prefetch-domain yes |
 | serve-expired | 过期缓存服务功能 | yes | [yes\|no]，开启后响应TTL为0的旧记录以避免查询等待 | serve-expired yes |
 | serve-expired-ttl | 过期缓存服务最长超时时间 | 86400 | 秒，0 表示停用超时，大于 0 表示指定的超时的秒数 | serve-expired-ttl 604800 |
 | serve-expired-reply-ttl | 回应的过期缓存 TTL | 3 | 秒，过期缓存记录回复的TTL时间 | serve-expired-reply-ttl 3 |
