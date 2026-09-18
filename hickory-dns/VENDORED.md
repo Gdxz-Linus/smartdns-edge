@@ -131,6 +131,22 @@
   `critical-section`，需要平台实现 `critical_section_1_0_acquire/release` 符号
   （嵌入式目标由对应的 impl crate 提供）。这是 no_std 的固有要求，不是本缺陷，**本项目不使用 no_std**。
 
+### 4.7 `crates/proto/src/rr/record_type.rs`、`crates/proto/src/rr/dns_class.rs`（文本写法不区分大小写）
+
+- **问题**（2026-09-14 审计报告的 P2 条目，编号见复核报告 B8/B10 一带）：
+  两个 `FromStr` 开头都有 `debug_assert!(str.chars().all(|x| !char::is_ascii_lowercase(&x)))`，
+  即"输入里不许有小写字母"。而 Dns-json 风格的管理查询（`?type=aaaa`）传小写是最自然的写法：
+  **同一个请求在 debug 构建下直接 panic（连接被断、客户端拿不到应答），在 release 构建下
+  则退化成 400** —— 两种构建行为不一致，且用户侧表现为"功能是坏的"。
+- **改动**：去掉该断言，改为 `let normalized = str.to_ascii_uppercase(); match normalized.as_str() { .. }`。
+  依据 RFC 1035 —— 记录类型/类别的**文本写法不区分大小写**（`aaaa` 与 `AAAA` 等价）。
+  未命中的分支仍用**原始输入**构造错误信息（错误信息里保留用户原样输入）。
+- **连带**：调用点 `src/api/serve_dns.rs` 里原先为绕开该断言而做的 `to_ascii_uppercase()` 已移除
+  （根上修好了就不需要；`src/resolver.rs` 的那处转换保持原样，无害）。
+- **验证**：`src/api/serve_dns.rs` 末尾 `mod tests` 覆盖 `aaaa/Aaaa/AAAA` 与 `in/In/IN`
+  三种写法，并确认不认识的名字仍然报错（不会被静默当成 A）。
+- 本节编号排在 4.6 之后只是**为了不动既有编号**（4.6 有两处交叉引用）；性质上它属于"我们改的"。
+
 ### 4.6 拷进来时就带着的改动（**不是我们改的**，内容已无法追溯）
 
 这份副本**不是干净的上游快照**（第 2 节已证明）。除了我们改的那几处之外，还有一批文件在**拷贝进来的时候就已经被人改过**了 —— 我们没有它们的原始版本可比对，也没法说清"改了哪些、为什么改"。所以这一节只做一件事：**把范围写清楚**，免得以后有人误以为"这个目录就等于上游原版"。

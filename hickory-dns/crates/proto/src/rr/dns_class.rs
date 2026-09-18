@@ -56,8 +56,9 @@ impl FromStr for DNSClass {
     /// assert_eq!(DNSClass::IN, var);
     /// ```
     fn from_str(str: &str) -> ProtoResult<Self> {
-        debug_assert!(str.chars().all(|x| !char::is_ascii_lowercase(&x)));
-        match str {
+        // 本地改动（2026-09-18）：不区分大小写（与 record_type.rs 同一处改动的理由相同）。
+        let normalized = str.to_ascii_uppercase();
+        match normalized.as_str() {
             "IN" => Ok(Self::IN),
             "CH" => Ok(Self::CH),
             "HS" => Ok(Self::HS),

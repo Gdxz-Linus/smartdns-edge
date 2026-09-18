@@ -96,13 +96,12 @@ async fn process(
             // 🔐 B8：`?type=` 写错以前被**静默**当成 A 查询（与 `name` 写错回 400 的口径不一致），
             // 用户会拿到一份"看起来正常但答的是另一回事"的结果。
             //
-            // ⚠️ 必须先转大写：内嵌 hickory 的 `RecordType::from_str` 里有一条
-            // `debug_assert!(输入不含小写字母)` —— 小写输入（`?type=aaaa` 是最常见的写法）
-            // 在 **debug 构建下会直接 panic**（连接被断开、客户端拿不到任何应答），
-            // release 构建下则退化成 400。仓库里其它解析点（`src/resolver.rs`）本来就先 `to_uppercase`。
+            // `?type=` 的文本写法不区分大小写（`aaaa` / `AAAA` 等价，RFC 1035）。
+            // 早先内嵌 hickory 的 `RecordType::from_str` 里有 `debug_assert!(不含小写)`，
+            // 小写输入在 debug 构建下 panic、release 下退化成 400；该断言已在**内嵌副本里改掉**，
+            // 所以这里不再需要转大写（改动登记在 `hickory-dns/VENDORED.md`）。
             let query_type: RecordType = query_param
                 .query_type
-                .to_ascii_uppercase()
                 .parse()
                 .map_err(|_| {
                     ApiError::BadRequest(format!(
@@ -257,5 +256,34 @@ impl From<&crate::libdns::proto::op::Message> for DnsResponse {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 内嵌 hickory 的本地改动：记录类型 / 类别的**文本写法不区分大小写**。
+    //!
+    //! 背景：`?type=aaaa` 这种小写写法在管理接口里最自然，而内嵌副本原先的
+    //! `debug_assert!` 只在 debug 构建下拦它 —— 同一个请求 debug 下 panic、release 下 400。
+    //! 现在按 RFC 1035 处理（文本写法不区分大小写）。改动登记在 `hickory-dns/VENDORED.md` 4.7 节。
+    use crate::libdns::proto::rr::{DNSClass, RecordType};
+
+    #[test]
+    fn record_type_text_is_case_insensitive() {
+        for text in ["aaaa", "Aaaa", "AAAA"] {
+            let parsed: RecordType = text.parse().expect("小写也应当认得");
+            assert_eq!(parsed, RecordType::AAAA, "{text} 应解析为 AAAA");
+        }
+        // 不认识的名字必须报错 —— 不能被静默当成 A（那是复核报告 B8 修掉的毛病）
+        assert!("aaaaa".parse::<RecordType>().is_err());
+    }
+
+    #[test]
+    fn dns_class_text_is_case_insensitive() {
+        for text in ["in", "In", "IN"] {
+            let parsed: DNSClass = text.parse().expect("小写也应当认得");
+            assert_eq!(parsed, DNSClass::IN, "{text} 应解析为 IN");
+        }
+        assert!("qq".parse::<DNSClass>().is_err());
     }
 }

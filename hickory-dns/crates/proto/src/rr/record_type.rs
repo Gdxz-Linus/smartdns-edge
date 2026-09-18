@@ -211,8 +211,14 @@ impl FromStr for RecordType {
     /// ```
     fn from_str(str: &str) -> ProtoResult<Self> {
         // TODO missing stuff?
-        debug_assert!(str.chars().all(|x| !char::is_ascii_lowercase(&x)));
-        match str {
+        //
+        // 本地改动（2026-09-18）：不再要求调用方先转大写。
+        // 记录类型的文本写法按 RFC 1035 不区分大小写（"aaaa" 与 "AAAA" 等价），而调用方
+        // （管理接口的查询参数等）天然可能传小写；原来那句 `debug_assert!` 只在 debug 构建里
+        // 生效，会让同一个请求在 debug 下 panic、在 release 下返回 400，两种构建行为不一致。
+        // 这里统一转成大写后匹配；未命中的分支仍用**原始输入**构造错误信息。
+        let normalized = str.to_ascii_uppercase();
+        match normalized.as_str() {
             "A" => Ok(Self::A),
             "AAAA" => Ok(Self::AAAA),
             "ANAME" => Ok(Self::ANAME),
