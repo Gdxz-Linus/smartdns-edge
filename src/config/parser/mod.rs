@@ -27,7 +27,6 @@ mod ip_rules;
 mod ip_set;
 mod iporset;
 mod ipset;
-// mod line;
 mod log_level;
 mod nameserver;
 mod nftset;
