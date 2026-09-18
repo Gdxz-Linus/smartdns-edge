@@ -77,48 +77,60 @@ docker run -d \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
+## 🖥️ Web Console (management UI)
 
-## Upgrading from an older version: the one thing you need to know
+The web console is **not container-specific**: it is mounted on the `bind-http` / `bind-https` / `bind-h3`
+listeners — whichever of those you configure also serves the DNS service (DoH) and the management console
+on that port (the `/api` endpoints for config, upstreams, address rules, cache and logs, plus `/api/docs`
+for the API reference).
 
-The management console no longer ships a default password (the old default no longer works). After upgrading:
+To keep a listener DNS-only (for example "this port should only serve DoH"), add `-no-api` to it:
 
-1. **Console not enabled** (no `bind-http` / `bind-https` / `bind-h3`) → nothing to do; DNS service is unaffected.
-2. **Console bound to localhost only** (e.g. `bind-http 127.0.0.1:6080`) → a random token is printed in the
-   startup log; use it to log in. To pin it, add `api-token <your-token>` to the configuration.
-3. **Console bound to a public address** (e.g. `bind-http 0.0.0.0:6080`) → without an `api-token` in the
-   configuration the service **refuses to start** (with a clear message). This is deliberate: the console can
-   rewrite resolution rules, so it must never be exposed without a token. Set `api-token`, or use an SSH tunnel.
+```
+bind-https 0.0.0.0:8000 -ssl-certificate cert.pem -ssl-certificate-key key.pem -no-api
+```
 
-**Recommended**: keep the console port off the public network and use an SSH tunnel:
-`ssh -L 6080:127.0.0.1:6080 your-server`, then open `http://127.0.0.1:6080` locally.
+(`-ssl-certificate` / `-ssl-certificate-key` on a `bind*` line and the `bind-cert-file` /
+`bind-cert-key-file` options are two ways of saying the same thing: the former applies to that listener
+only, the latter is the global default.)
 
-### Containers (Docker / NAS) note
+### How to enable it per platform
 
-The behaviour inside a container is identical: if the mounted configuration binds the console to
-`0.0.0.0` without an `api-token`, the container **refuses to start** (exit code 2). Injecting the token
-through the environment is the easiest fix:
+| Platform | What to do |
+|---|---|
+| Windows (service mode) | Add `bind-http 127.0.0.1:6080` to the config, run `smartdns service restart`, open `http://127.0.0.1:6080` |
+| Linux / macOS (service mode) | Same: add `bind-http 127.0.0.1:6080`, `smartdns service restart`, open `http://127.0.0.1:6080` |
+| Docker / NAS | Besides that config line, **publish the port** in the run command (`-p 6080:6080`), then open `http://<host-ip>:6080` |
 
 ```bash
+# Docker example: publish the console port and inject a token
 docker run -d --name smartdns --restart always --network host \
+  -p 6080:6080 \
   -e SMARTDNS_API_TOKEN=your-token \
   -v /your/path/smartdns.conf:/etc/smartdns/smartdns.conf \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
-### Web console inside the container (off by default)
+### Token (must read)
 
-The image ships a web console but exposes no port for it by default. To use it, publish the port and
-make sure a token is set:
+The token is resolved in this order:
 
-```bash
-docker run -d --name smartdns --restart always --network host \
-  -p 8000:8000 \
-  -e SMARTDNS_API_TOKEN=your-token \
-  -v /your/path/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns-edge:latest
-```
+1. `api-token <token>` in the configuration file;
+2. the `SMARTDNS_API_TOKEN` environment variable;
+3. otherwise a random token is generated and printed to the console/log at startup,
+   as a ready-to-paste `api-token <token>` line.
 
-Then open `http://<host-ip>:8000`.
+There is **no hard-coded default password**. If the console is bound to a non-local address without a
+configured token, the daemon **refuses to start** (**exit code 2**, so service managers and scripts can
+tell it apart from other failures) — that would expose the console to the whole network.
 
-⚠️ The console is **plaintext HTTP**: the token travels unencrypted. Use it on a trusted LAN only;
-for remote access use a `bind-https` (TLS) listener or terminate TLS in a reverse proxy.
+### How to use it safely
+
+| Scenario | Recommendation |
+|---|---|
+| Local administration only | `bind-http 127.0.0.1:8000`, open `http://127.0.0.1:8000` |
+| Remote administration (recommended) | do **not** expose the port; use an SSH tunnel: `ssh -L 8000:127.0.0.1:8000 your-server`, then open `http://localhost:8000` |
+| Long-term remote access | use `bind-https 0.0.0.0:8000 -ssl-certificate ... -ssl-certificate-key ...` with a token you set yourself, and restrict the source network |
+
+⚠️ `bind-http` is plain HTTP: the token and content travel unencrypted. Unless you use an SSH tunnel,
+always use `bind-https`.

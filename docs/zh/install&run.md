@@ -77,54 +77,56 @@ docker run -d \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
+## 🖥️ 网页控制台（管理后台）
 
-## 从旧版本升级：一件你需要知道的事
+网页控制台**不是容器专有的**：它挂在 `bind-http` / `bind-https` / `bind-h3` 这三种监听上 ——
+配置里写了其中任意一个，对应端口上就同时提供 DNS 服务（DoH）与管理后台（`/api` 下的配置、上游、
+地址规则、缓存、日志等接口，以及 `/api/docs` 接口文档）。
 
-管理后台的访问口令**不再有默认值**（旧版本里那个默认口令已经作废，用不了）。升级后按你的配置分三种情况：
+不想在某个监听上暴露后台（例如"这个端口只想对外提供 DoH"），给它加 `-no-api` 即可：
 
-1. **没开管理后台**（配置里没有 `bind-http` / `bind-https` / `bind-h3`）
-   → 什么都不用做，DNS 解析服务不受任何影响。
-
-2. **开了管理后台，且只绑在本机**（例如 `bind-http 127.0.0.1:6080`）
-   → 启动后到日志里找一行随机口令，用它登录即可。
-   如果你希望口令固定下来，在配置里加一行：`api-token 你的口令`。
-
-3. **开了管理后台，且绑在对外地址**（例如 `bind-http 0.0.0.0:6080`）
-   → 如果你没有在配置里设置 `api-token`，**服务会拒绝启动**并给出中文提示。
-   这是有意为之：管理后台可以修改解析规则、增删自定义域名，绝不能在没有口令的情况下对全网开放。
-   解决办法：先设置 `api-token 你的口令`，或者按下面的方式用 SSH 隧道访问。
-
-**更安全的做法（推荐）**：不要把后台端口暴露到公网，改用 SSH 隧道：
-
-```bash
-ssh -L 6080:127.0.0.1:6080 你的服务器     # 然后本机浏览器访问 http://127.0.0.1:6080
+```
+bind-https 0.0.0.0:8000 -ssl-certificate cert.pem -ssl-certificate-key key.pem -no-api
 ```
 
-### 容器（Docker / NAS）部署注意
+（`bind` 行上的 `-ssl-certificate` / `-ssl-certificate-key` 与配置表里的 `bind-cert-file` /
+`bind-cert-key-file` 是同一件事的两种写法：前者写在 `bind*` 行上只对该监听生效，后者是全局默认。）
 
-容器里的行为跟上面完全一致：如果挂载进容器的配置把管理后台绑到了 `0.0.0.0` 却没有 `api-token`，
-容器会**拒绝启动**（退出码 2）。这种情况下用环境变量注入口令最方便：
+### 各平台怎么开
+
+| 平台 | 做法 |
+|---|---|
+| Windows（服务方式） | 配置文件里加一行 `bind-http 127.0.0.1:6080`，`smartdns service restart`，浏览器打开 `http://127.0.0.1:6080` |
+| Linux / macOS（服务方式） | 同上：配置里加 `bind-http 127.0.0.1:6080`，`smartdns service restart`，浏览器打开 `http://127.0.0.1:6080` |
+| Docker / NAS | 除了配置里那一行，还要在启动命令里**把端口映射出来**（`-p 6080:6080`），再访问 `http://容器所在机器的IP:6080` |
 
 ```bash
+# Docker 示例：映射控制台端口并注入口令
 docker run -d --name smartdns --restart always --network host \
+  -p 6080:6080 \
   -e SMARTDNS_API_TOKEN=你的口令 \
   -v /你的路径/smartdns.conf:/etc/smartdns/smartdns.conf \
   ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
-### 容器里的网页控制台（默认不开）
+### 口令（必读）
 
-镜像内置网页控制台，默认不暴露端口。要用就在启动命令里加上端口映射，并确保口令已设置：
+口令按以下顺序取用：
 
-```bash
-docker run -d --name smartdns --restart always --network host \
-  -p 8000:8000 \
-  -e SMARTDNS_API_TOKEN=你的口令 \
-  -v /你的路径/smartdns.conf:/etc/smartdns/smartdns.conf \
-  ghcr.io/gdxz-linus/smartdns-edge:latest
-```
+1. 配置里的 `api-token <口令>`；
+2. 环境变量 `SMARTDNS_API_TOKEN`；
+3. 都没有时：**随机生成一个并打印在启动日志里**，提示形如 `api-token 3f9c...`，
+   把它填进配置即可固定下来。
 
-然后浏览器打开 `http://容器所在机器的IP:8000`。
+程序里**没有任何写死的默认口令**。后台被绑到非本机地址（例如 `bind-http 0.0.0.0:8000`）却没有口令时，
+程序**直接拒绝启动**（**退出码 2**，便于服务管理器与脚本判断）——因为那等于把管理后台开放给整个网络。
 
-⚠️ 这个控制台是**明文 HTTP**：口令在网络上明文传输。请只在可信内网使用；
-需要跨网络访问时，请改用 `bind-https`（TLS）监听，或在前端加反向代理做 TLS 终结。
+### 怎么安全地用
+
+| 场景 | 建议做法 |
+|---|---|
+| 只在本机管理 | `bind-http 127.0.0.1:8000`，浏览器开 `http://127.0.0.1:8000` |
+| 远程管理（推荐） | **不要**对公网开放端口，用 SSH 隧道：`ssh -L 8000:127.0.0.1:8000 你的服务器`，然后本机浏览器开 `http://localhost:8000` |
+| 必须长期远程访问 | 用 `bind-https 0.0.0.0:8000 -ssl-certificate 证书 -ssl-certificate-key 私钥`（口令仍要自己设置），并把来源限制在内网 |
+
+⚠️ `bind-http` 是**明文 HTTP**：口令和内容在网络上不加密，因此除非走 SSH 隧道，否则请一律使用 `bind-https`。

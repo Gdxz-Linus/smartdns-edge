@@ -1,8 +1,10 @@
 # 配置选项说明
 
-## 配置建议：
+## 一、配置建议
 
 **smartdns 默认已设置为最优模式，适合大部分场景的 DNS 查询体验改善。一般情况只需要增加上游服务器地址即可，无需做其他配置修改；如有其他配置修改，请务必了解其用途，避免修改后起到反作用。**
+
+## 二、配置项总表
 
 | 键名 | 功能说明 | 默认值 | 可用值/要求 | 举例 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -57,9 +59,7 @@
 | group-end | 规则组结束 | 无 | 和group-begin搭配使用 | group-end |
 | group-match | 匹配组规则 | 无 | 当满足条件时使用对应的规则组<br />[-g\|group group-name]: 指定规则组，不指定时使用当前组。<br />[-client-ip ip-set\|ip/cidr\|mac address]: 匹配指定客户端 IP 或 MAC。<br />[-domain domain]: 匹配指定域名。 | group-match -client-ip 1.1.1.1 -domain a.com |
 | conf-file | 附加配置文件 | 无 | path [-g\|group group-name]<br />path: 配置文件路径，支持通配符（如 /etc/smartdns/conf.d/*.conf，命中多个时按文件名排序依次加载）；相对路径相对当前配置文件所在目录<br />[-g\|group]：把这一段被包含进来的配置整体挂到该规则组（写在前或写在后都认）<br />仅支持本地文件（不支持 HTTP/HTTPS 在线下载；远程规则集请用 domain-set 的 -url） | conf-file /etc/smartdns/more.conf <br /> conf-file /etc/smartdns/conf.d/*.conf <br /> conf-file /etc/smartdns/company.conf -g office <br />重复包含或循环包含会被自动去重，不会递归崩溃 |
-| proxy-server | 代理服务器 | 无 | 可重复。<br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]: 代理服务器名称。 |proxy-server socks5://user:pass@1.2.3.4:1080 -name proxy|
-> 日志与调试输出中的代理密码会自动打码，不会以明文出现。
-
+| proxy-server | 代理服务器 | 无 | 可重复。<br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]: 代理服务器名称。 | proxy-server socks5://user:pass@1.2.3.4:1080 -name proxy|
 | speed-check-mode | 测速模式选择 | ping,tcp:80,tcp:443 | [ping\|tcp:[80]\|none] | speed-check-mode ping,tcp:80,tcp:443 |
 | response-mode | 首次查询响应模式 | first-ping |模式：[first-ping\|fastest-ip\|fastest-response]<br /> [first-ping]: 最快ping响应地址模式，DNS等待与连接体验最佳;<br />[fastest-ip]: 最快IP地址模式，强制等待IP测速完毕; <br />[fastest-response]: 最快响应DNS结果，等待最短，但可能不是最快IP。| response-mode first-ping |
 | address | 指定域名 IP 地址 | 无 | address [/[*\|-.]domain/][ip1[,ip2,...]\|-\|-4\|-6\|#\|#4\|#6] <br />- 表示忽略此规则 <br /># 表示返回 SOA <br />4 表示 IPv4 <br />6 表示 IPv6 <br /> * 开头表示通配，- 开头表示主域名| address /www.example.com/1.2.3.4<br />address /example.com/1.2.3.4,5.6.7.8 |
@@ -103,100 +103,4 @@
 | ca-file | 证书文件 | /etc/ssl/.../ca-certificates.crt | 合法路径字符串 | ca-file /etc/ssl/certs/ca-certificates.crt |
 | ca-path | 证书文件路径 | /etc/ssl/certs | 合法路径字符串 | ca-path /etc/ssl/certs |
 
-
----
-
-## 管理后台（WebAPI / 网页控制台）
-
-配置 `bind-http` / `bind-https` / `bind-h3` 中的任意一个，就会在对应端口上同时提供
-DNS 服务（DoH）**和**管理后台（`/api` 下的配置、上游、地址规则、缓存、日志等接口，
-以及 `/api/docs` 接口文档）。
-
-不想在某个监听上暴露后台（例如"这个端口只想对外提供 DoH"），给它加 `-no-api` 即可：
-`bind-https 0.0.0.0:8000 -ssl-certificate cert.pem -ssl-certificate-key key.pem -no-api`
-
-（bind 行上的 `-ssl-certificate` / `-ssl-certificate-key` 与配置表里的 `bind-cert-file` / `bind-cert-key-file`
-是同一件事的两种写法：前者写在 `bind*` 行上只对该监听生效，后者是全局默认。）
-
-### 口令（必读）
-
-后台口令按以下顺序取用：
-
-1. 配置里的 `api-token <口令>`；
-2. 环境变量 `SMARTDNS_API_TOKEN`；
-3. 都没有时：**随机生成一个并打印在启动日志里**（控制台与日志文件都能看到），
-   提示形如 `api-token 3f9c...`，把它填进配置即可固定下来。
-
-程序里**没有任何写死的默认口令**。另外，如果后台被绑到了非本机地址（例如
-`bind-http 0.0.0.0:8000`）却没有配置口令，程序会**直接拒绝启动**并给出提示——
-因为那等于把管理后台开放给整个网络，谁都能改掉你的 DNS 解析结果。
-
-### 怎么安全地用
-
-| 场景 | 建议做法 |
-|---|---|
-| 只在本机管理 | `bind-http 127.0.0.1:8000`，浏览器开 `http://127.0.0.1:8000` |
-| 远程管理（推荐） | **不要**对公网开放端口，用 SSH 隧道：`ssh -L 8000:127.0.0.1:8000 你的服务器`，然后本机浏览器开 `http://localhost:8000` |
-| 必须长期远程访问 | 用 `bind-https 0.0.0.0:8000 -ssl-certificate 证书 -ssl-certificate-key 私钥`（口令仍要自己设置），并把来源限制在内网 |
-
-⚠️ `bind-http` 是**明文 HTTP**：口令和内容在网络上是裸奔的，因此除非走 SSH 隧道，
-否则请一律使用 `bind-https`。
-
-
----
-
-## 内存保护（连接数上限与慢速攻击防护）
-
-DNS over TCP / DoT / DoQ 的报文带 2 字节长度前缀（最大声明 65535 字节）。
-如果一收到长度就按声明大小分配内存，攻击者只发 2 个字节就能白占 64 KiB；
-再叠加"连接数无上限"，就可以用极小的成本把服务端内存耗尽。本项目对此做了三层防护：
-
-| 防护 | 说明 |
-|---|---|
-| **不信任长度前缀**（治本） | 读取时按 4 KiB 分块、按需增长，内存只与**实际收到的字节数**成正比。攻击者发 2 字节 ⇒ 只占 4 KiB（原来 64 KiB） |
-| **首包超时 `first-packet-timeout`**（默认 5 秒） | 连接建立后必须在 5 秒内发来第一个完整报文，否则断开；超时窗口从 120 秒压到 5 秒。长连接复用不受影响（后续仍按 `tcp-idle-time` 空闲超时） |
-| **连接数上限** | 同时连接总数与单一来源连接数都有上限，超限拒绝新连接（已有连接不受影响）。默认按物理内存自动推算：内存预算 = clamp(物理内存/8, 16 MiB, 512 MiB)，每连接按 32 KiB 保守估算 → 总上限 clamp(预算/32 KiB, 512, 16384)，单来源上限 = 总上限/8（下限 64、上限 2048） |
-
-**自动默认值举例**：
-
-| 机器 | 物理内存 | 自动总上限 | 单来源上限 |
-|---|---|---|---|
-| 家用软路由 / NAS | 256 MB | 1024 | 128 |
-| 家用服务器 | 8 GB | 16384 | 2048 |
-| 企业服务器 | 32 GB 以上 | 16384（可按需调高） | 2048 |
-
-**其它要点**：
-
-- 本机环回（127.0.0.1 / ::1）的连接**不占配额** —— 保证被人用连接洪泛打满时，
-  你仍然能通过本机或 SSH 隧道进管理后台查看情况。
-- 超限只拒绝**新连接**，不会断开已有连接；日志中会记录（同一来源限流输出）。
-- 当前连接数、被拒次数、总上限、以及 `panics_total`（崩溃次数，正常为 0）可通过
-  `GET /api/system/status` 查看。
-- **按监听单独设置**：`bind-tcp 0.0.0.0:53 -max-connections 20000` 可以给某个监听单独收紧或放宽，
-  与全局限额**同时**生效（例如"内网宽松、对公网的 DoH 端口收紧"）。
-- 想**几乎不限制**就填一个很大的数（没有"无上限"这个取值）；想收紧就填小值。
-- **出口经 NAT 的网络请调大单来源上限**：企业出口如果是一台 NAT 网关，几千台设备共用一个源 IP，
-  默认的"总上限 ÷ 8"有可能被**合法流量**顶到。先看 `GET /api/system/status` 里 `connections_rejected`
-  是否持续增长，再决定调大 `max-connections-per-ip`。
-- 建议先按默认值运行一段时间，用 `GET /api/system/status` 观察真实峰值，再决定是否调整上限。
-- 因配置不合规（例如后台绑对外地址却没设口令）而拒绝启动时，**退出码为 2**（2 = 配置错误），
-  便于服务管理器与脚本判断。
-
-
----
-
-## 协议健壮性与崩溃防护
-
-- **不支持的请求类型会明确应答**：收到 `IQUERY` / `STATUS` / `NOTIFY` / `UPDATE` 或其它未知
-  OpCode 时，按 RFC 1035 §4.1.1 回 **NotImp**（并回带原始 ID 与 Question 段），
-  而不是像过去那样不予响应、并在服务端留下一条 panic 记录。
-- **收到"响应包"（QR=1）时静默丢弃**：这类报文通常来自伪造/反射流量或配置错误；
-  对响应再作响应会形成回环，因此只记录、不回应。
-- **上游应答来源校验（防投毒）**：直连的 UDP 上游套接字会 `connect` 到该上游，由内核丢弃
-  来源 IP / 端口不符的应答；经 SOCKS5 代理时套接字已 `connect` 到中继，此外还会校验数据报头里的
-  来源地址是否等于所查询的上游，不符则丢弃并计数。计数见 `GET /api/system/status` 的
-  `udp_source_rejected`（只反映代理路径；直连路径由内核丢弃，应用侧看不到）。
-- **崩溃可观测**：进程内发生的任何 panic 都会写进应用日志（同一处限流输出）并计数，
-  可在 `GET /api/system/status` 的 `panics_total` 字段查看（正常应恒为 0）。
-- **兜底应答**：万一仍有未预期的 panic，该请求会尽量回一个 **SERVFAIL**，
-  而不是让客户端一直等到超时（便于排查，也避免被当成故障设备）。
+> 日志与调试输出中的代理密码会自动打码，不会以明文出现。

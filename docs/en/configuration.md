@@ -1,8 +1,10 @@
 # Configurations Parameters
 
-## Configuration Advice:
+## 1. Configuration Advice
 
 **By default, smartdns is set to the optimal mode, suitable for improving the DNS query experience in most scenarios. Generally, you only need to add upstream server addresses without making other configuration changes. If you need to make other configuration changes, be sure to understand their purpose to avoid counterproductive effects.**
+
+## 2. Parameter reference
 
 | parameter | Parameter function | Default value | Value type | Example |
 | :--- | :--- | :--- | :--- | :--- |
@@ -58,8 +60,6 @@
 | group-match | Match group rules | None | Use the corresponding rule group when conditions are met. <br />[-g\|group group-name]: Specify rule group.<br />[-client-ip ip-set\|ip/cidr\|mac address]: Match client.<br />[-domain domain]: Match domain name. | group-match -client-ip 1.1.1.1 -domain a.com |
 | conf-file | additional conf file | None | path [-g\|group group-name]<br />path: configuration file path, wildcards are supported (e.g. /etc/smartdns/conf.d/*.conf, multiple matches are loaded in sorted file-name order); a relative path is resolved against the directory of the current configuration file<br />[-g\|group]: attach the whole included section to that rule group (accepted before or after the path)<br />Local files only (HTTP/HTTPS download is not supported; use domain-set -url for remote rule lists) | conf-file /etc/smartdns/more.conf <br /> conf-file /etc/smartdns/conf.d/*.conf <br /> conf-file /etc/smartdns/company.conf -g office <br />Duplicate or circular includes are de-duplicated automatically and never recurse |
 | proxy-server | proxy server | None | Repeatable. <br />[URL]: [socks5\|http]://[username:password@]host:port<br />[-name]:  proxy server name. | proxy-server socks5://user:pass@127.0.0.1:1080 -name proxy |
-> Passwords in proxy URLs are masked automatically in logs and debug output.
-
 | speed-check-mode | Speed ​​mode | ping,tcp:80,tcp:443 | [ping\|tcp:[80]\|none] | speed-check-mode ping,tcp:80,tcp:443 |
 | response-mode | First query response mode | first-ping | Mode: [first-ping\|fastest-ip\|fastest-response]<br /> [first-ping]: Shortest DNS + ping delay;<br />[fastest-ip]: Fastest IP address mode, wait to test speed. <br />[fastest-response]: Fastest DNS response mode. | response-mode first-ping |
 | address | Domain IP address | None | address /[*\|-]domain/[ip1[,ip2,...]\|-\|-4\|-6\|#\|#4\|#6]<br />`-` for ignore this rule. <br />`#` for return SOA. <br />`*` at the beginning means wildcard. | address /www.example.com/1.2.3.4 |
@@ -103,97 +103,4 @@
 | ca-file | certificate file | /etc/ssl/certs/... | path | ca-file /etc/ssl/certs/ca-certificates.crt |
 | ca-path | certificates path | /etc/ssl/certs | path | ca-path /etc/ssl/certs |
 
----
-
-## Management console (WebAPI)
-
-Configuring any of `bind-http` / `bind-https` / `bind-h3` exposes both DNS service (DoH)
-and the management console on that port (the `/api` endpoints for config, upstreams,
-address rules, cache and logs, plus `/api/docs` for the API reference).
-The console can be turned off per listener with the `-no-api` option, e.g.
-`bind-https 0.0.0.0:8000 -ssl-certificate cert.pem -ssl-certificate-key key.pem -no-api`.
-
-### Token (must read)
-
-The token is resolved in this order:
-
-1. `api-token <token>` in the configuration file;
-2. the `SMARTDNS_API_TOKEN` environment variable;
-3. otherwise a random token is generated and printed to the console/log at startup
-   (a ready-to-paste `api-token <token>` line is printed as well).
-
-There is **no hard-coded default password**. If the console is bound to a non-local
-address without a configured token, the daemon (and `smartdns test`) **refuses to start**,
-because that would expose the console to the whole network.
-
-### How to use it safely
-
-| Scenario | Recommendation |
-|---|---|
-| Local administration only | `bind-http 127.0.0.1:8000`, open `http://127.0.0.1:8000` |
-| Remote administration (recommended) | do **not** expose the port; use an SSH tunnel: `ssh -L 8000:127.0.0.1:8000 your-server`, then open `http://localhost:8000` |
-| Long-term remote access | use `bind-https 0.0.0.0:8000 -ssl-certificate ... -ssl-certificate-key ...` with a token you set yourself, and restrict the source network |
-
-⚠️ `bind-http` is plain HTTP: the token travels unencrypted. Unless you are using an SSH
-tunnel, always use `bind-https`.
-
----
-
-## Memory protection (connection limits and slow-attack defence)
-
-DNS over TCP / DoT / DoQ messages carry a 2-byte length prefix (declaring up to 65535 bytes).
-Allocating the declared size up front means an attacker occupies 64 KiB by sending just 2 bytes;
-combined with unlimited connections that is enough to exhaust the server's memory. Three layers of
-protection are in place:
-
-| Protection | What it does |
-|---|---|
-| **The length prefix is not trusted** (root fix) | Reads are chunked at 4 KiB and grow on demand, so memory is proportional to the **bytes actually received**. 2 bytes sent ⇒ 4 KiB used (previously 64 KiB) |
-| **First-packet timeout `first-packet-timeout`** (default 5 s) | The first complete message must arrive within 5 s of connection setup, otherwise the connection is closed; the window shrinks from 120 s to 5 s. Long-lived connection reuse is unaffected (afterwards `tcp-idle-time` applies) |
-| **Connection limits** | Both the total number of simultaneous connections and the number per source are capped; over-limit connections are refused (existing ones are untouched). Defaults are derived from physical memory: budget = clamp(RAM/8, 16 MiB, 512 MiB), 32 KiB per connection → total = clamp(budget/32 KiB, 512, 16384), per source = total/8 (min 64, max 2048) |
-
-**Auto-derived defaults, for reference:**
-
-| Machine | Physical memory | Auto total | Per source |
-|---|---|---|---|
-| Home router / NAS | 256 MB | 1024 | 128 |
-| Home server | 8 GB | 16384 | 2048 |
-| Enterprise server | 32 GB+ | 16384 (raise as needed) | 2048 |
-
-**Other points:**
-
-- Connections from loopback (127.0.0.1 / ::1) **do not consume quota**, so you can always reach the
-  console locally or over an SSH tunnel even while a connection flood is going on.
-- Over-limit traffic is refused for **new** connections only; existing connections are never dropped,
-  and a rate-limited log line is written.
-- `GET /api/system/status` exposes the current connection count, the number refused, the limit, and
-  `panics_total` (should stay 0).
-- **Per-listener override**: `bind-tcp 0.0.0.0:53 -max-connections 20000` tightens or relaxes a single
-  listener; it applies **in addition to** the global limit (e.g. relaxed on the LAN, tight on a public DoH port).
-- There is no "unlimited" value: to lift the limit in practice, set a very large number.
-- **Networks behind NAT should raise the per-source limit**: if an enterprise egress is a single NAT
-  gateway, thousands of devices share one source IP and the default (total/8) can be reached by
-  **legitimate** traffic. Watch `connections_rejected` in `GET /api/system/status` and raise
-  `max-connections-per-ip` if it keeps growing.
-- It is advisable to run with the defaults for a while and watch the real peak before tuning.
-- When startup is refused because of an invalid configuration (e.g. the console bound to a public
-  address without a token), the process exits with **code 2** (2 = configuration error).
-
----
-
-## Protocol robustness
-
-- Requests with an unsupported `OpCode` (`IQUERY` / `STATUS` / `NOTIFY` / `UPDATE` / unknown)
-  are answered with **NotImp** (RFC 1035 §4.1.1), echoing the original ID and question section.
-- A DNS **response** packet (QR=1) arriving at the server is silently dropped: such traffic is
-  usually spoofed/reflected or misconfigured, and answering a response would create a loop.
-- **Upstream response source verification (anti-poisoning)**: direct UDP upstream sockets are
-  `connect`ed to the upstream, so the kernel drops responses whose source IP/port does not match.
-  Over a SOCKS5 proxy the socket is already `connect`ed to the relay, and the source address carried
-  in the datagram header is additionally checked against the upstream being queried; mismatches are
-  dropped and counted. See `udp_source_rejected` in `GET /api/system/status` (proxy path only — on the
-  direct path the kernel drops them and the application cannot see them).
-- Any panic inside the process is logged (rate-limited) and counted; check the `panics_total`
-  field of `GET /api/system/status` (it should stay 0).
-- As a safety net, a request that hits an unexpected panic is answered with **SERVFAIL**
-  instead of leaving the client waiting until timeout.
+> Passwords in proxy URLs are masked automatically in logs and debug output.
