@@ -50,7 +50,7 @@ pub fn serve(
                 tcp_stream = listener.accept() => match tcp_stream {
                     Ok((t, s)) => (t, s),
                     Err(e) => {
-                        log::debug!("error receiving TLS tcp_stream error: {}", e);
+                        log::debug!("TLS stream receive error: {}", e);
                         continue;
                     },
                 },
@@ -63,7 +63,7 @@ pub fn serve(
             // verify that the src address is safe for responses
             if let Err(e) = sanitize_src_address(src_addr) {
                 log::warn!(
-                    "address can not be responded to {src_addr}: {e}",
+                    "cannot respond to address {src_addr}: {e}",
                     src_addr = src_addr,
                     e = e
                 );

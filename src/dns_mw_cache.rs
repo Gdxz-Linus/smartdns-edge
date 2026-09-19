@@ -87,7 +87,7 @@ impl DnsCacheMiddleware {
                 if let Err(e) = res {
                     // 如果子线程读取因为文件损坏而当场崩溃了，我们把它拦截下来，打一条红字警告！
                     crate::log::error!(
-                        "🔥 FATAL: Cache file corrupted or read panic: {:?}. Ignoring old cache and starting fresh!",
+                        "cache file corrupted or unreadable ({:?}); ignoring the old cache and starting fresh",
                         e
                     );
                     // 🔐 P2：坏档**不再直接删除** —— 改名存档（只留最近 1 份），方便用户排查后再清

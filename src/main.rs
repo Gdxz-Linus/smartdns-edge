@@ -272,11 +272,11 @@ impl Cli {
                     match err.kind() {
                         std::io::ErrorKind::PermissionDenied => {
                             #[cfg(windows)]
-                            log::error!("{}. requires administrator privileges", err);
+                            log::error!("cannot create the symbolic link: {} (administrator privileges are required)", err);
                             #[cfg(unix)]
-                            log::error!("{}. requires root privileges", err);
+                            log::error!("cannot create the symbolic link: {} (root privileges are required)", err);
                         }
-                        _ => log::error!("{}", err),
+                        _ => log::error!("cannot create the symbolic link: {}", err),
                     }
                 }
             }
@@ -303,7 +303,7 @@ impl Cli {
                 }
 
                 // 🌟 明确告诉用户测试通过！
-                crate::log::info!("✅ Configuration test passed successfully!");
+                crate::log::info!("configuration test passed");
             }
             #[cfg(feature = "resolve-cli")]
             Commands::Resolve(command) => {

@@ -55,7 +55,7 @@ pub fn serve(
                         err_streak = err_streak.saturating_add(1);
                         if crate::server::should_log_stream_error(err_streak) {
                             log::warn!(
-                                "error accepting a TCP connection (consecutive #{}) : {}",
+                                "error accepting a TCP connection (consecutive #{}): {}",
                                 err_streak,
                                 e
                             );
@@ -76,7 +76,7 @@ pub fn serve(
             // verify that the src address is safe for responses
             if let Err(e) = sanitize_src_address(src_addr) {
                 log::warn!(
-                    "address can not be responded to {src_addr}: {e}",
+                    "cannot respond to address {src_addr}: {e}",
                     src_addr = src_addr,
                     e = e
                 );
@@ -131,7 +131,7 @@ pub fn serve(
                         Ok(Some(Ok(message))) => message,
                         Ok(Some(Err(e))) => {
                             log::debug!(
-                                "error in DNS request_stream src: {} error: {}",
+                                "DNS request stream from {} failed: {}",
                                 src_addr,
                                 e
                             );

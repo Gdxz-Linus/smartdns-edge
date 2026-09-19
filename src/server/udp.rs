@@ -82,7 +82,7 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
                         err_streak = err_streak.saturating_add(1);
                         if crate::server::should_log_stream_error(err_streak) {
                             log::warn!(
-                                "error receiving a message on udp_socket (consecutive #{}) : {}",
+                                "error receiving a message on udp_socket (consecutive #{}): {}",
                                 err_streak,
                                 e
                             );

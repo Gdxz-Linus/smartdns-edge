@@ -56,7 +56,7 @@ pub fn serve(
                 tcp_stream = listener.accept() => match tcp_stream {
                     Ok((t, s)) => (t, s),
                     Err(e) => {
-                        log::debug!("error receiving TLS tcp_stream error: {}", e);
+                        log::debug!("TLS stream receive error: {}", e);
                         continue;
                     },
                 },
@@ -113,7 +113,7 @@ pub fn serve(
                 let tls_stream = match tls_stream {
                     Ok(Ok(tls_stream)) => AsyncIoTokioAsStd(tls_stream),
                     Ok(Err(e)) => {
-                        log::debug!("tls handshake src: {} error: {}", src_addr, e);
+                        log::debug!("TLS handshake from {} failed: {}", src_addr, e);
                         return;
                     }
                     Err(_) => {
@@ -143,7 +143,7 @@ pub fn serve(
                         Ok(Some(Ok(message))) => message,
                         Ok(Some(Err(e))) => {
                             log::debug!(
-                                "error in DNS request_stream src: {} error: {}",
+                                "DNS request stream from {} failed: {}",
                                 src_addr,
                                 e
                             );

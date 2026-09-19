@@ -62,7 +62,7 @@ impl NomParser for NameServerInfo {
                         Some(m) => {
                             match u32::from_str_or_hex(m) {
                                 Ok(mark) => nameserver.so_mark = Some(mark),
-                                Err(_) => log::error!("Invalid set-mark value: '{}', ignored!", m), // 🌟 拒绝静默吞错
+                                Err(_) => log::error!("invalid set-mark value: '{}', ignored", m), // 🌟 拒绝静默吞错
                             }
                         }
                         None => {
@@ -85,7 +85,7 @@ impl NomParser for NameServerInfo {
                         Some(s) => {
                             match IpNet::parse(s) {
                                 Ok(net) => nameserver.subnet = Some(net.1),
-                                Err(_) => log::error!("Invalid subnet value: '{}', ignored!", s), // 🌟 拒绝静默吞错
+                                Err(_) => log::error!("invalid subnet value: '{}', ignored", s), // 🌟 拒绝静默吞错
                             }
                         }
                         None => {
@@ -130,7 +130,7 @@ impl NomParser for NameServerInfo {
                         Some(pin) => match crate::dns_url::decode_spki_pin(pin) {
                             Ok(_) => nameserver.server.set_spki_pin(pin),
                             Err(err) => {
-                                log::error!("Invalid spki-pin value: '{}', ignored! ({})", pin, err)
+                                log::error!("invalid spki-pin value: '{}', ignored ({})", pin, err)
                             } // 🌟 拒绝静默吞错
                         },
                         None => {
@@ -157,7 +157,7 @@ impl NomParser for NameServerInfo {
                         Some(value) => match value.parse::<u16>() {
                             Ok(seconds_100ms) => nameserver.tcp_keepalive = Some(seconds_100ms),
                             Err(err) => log::error!(
-                                "Invalid tcp-keepalive value: '{}', ignored! ({})",
+                                "invalid tcp-keepalive value: '{}', ignored ({})",
                                 value,
                                 err
                             ),
@@ -183,7 +183,7 @@ impl NomParser for NameServerInfo {
                                 ),
                             },
                             Err(err) => {
-                                log::error!("Invalid host-ip value: '{}', ignored! ({})", ip, err)
+                                log::error!("invalid host-ip value: '{}', ignored ({})", ip, err)
                             } // 🌟 与 spki-pin 一样：拒绝静默吞错
                         },
                         None => {

@@ -91,7 +91,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             // 单边容错 1：this 报错，that 拿到了真实 IP
             (Err(_), Ok(that)) if that.records().iter().any(|r| r.record_type().is_ip_addr()) => {
                 crate::log::debug!(
-                    "dual stack IP selection: {} , partial failure tolerated ({} survived)",
+                    "dual-stack IP selection: {}; partial failure tolerated ({} survived)",
                     req.query().original().name(),
                     that_req.query().query_type()
                 );
@@ -103,7 +103,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             // 单边容错 2：that 报错，this 拿到了真实 IP
             (Ok(this), Err(_)) if this.records().iter().any(|r| r.record_type().is_ip_addr()) => {
                 crate::log::debug!(
-                    "dual stack IP selection: {} , partial failure tolerated ({} survived)",
+                    "dual-stack IP selection: {}; partial failure tolerated ({} survived)",
                     req.query().original().name(),
                     req.query().query_type()
                 );

@@ -38,7 +38,7 @@ pub fn serve(
                     Ok(Some(c)) => c,
                     Ok(None) => continue,
                     Err(e) => {
-                        log::debug!("error receiving quic connection: {e}");
+                        log::debug!("error receiving a QUIC connection: {e}");
                         continue;
                     }
                 },
@@ -52,7 +52,7 @@ pub fn serve(
             // TODO: we're relying the quinn library to actually validate responses before we get here, but this check is still worth doing
             if let Err(e) = sanitize_src_address(src_addr) {
                 log::warn!(
-                    "address can not be responded to {src_addr}: {e}",
+                    "cannot respond to address {src_addr}: {e}",
                     src_addr = src_addr,
                     e = e
                 );

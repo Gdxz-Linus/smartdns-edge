@@ -161,13 +161,13 @@ fn collect_hosts_signature(hosts_file_pattern: Option<&str>) -> HostsFileSignatu
                             append_hosts_file_meta(path.as_path(), &mut files);
                         }
                         Err(err) => {
-                            log::error!("{}", err);
+                            log::error!("cannot read hosts file metadata: {}", err);
                         }
                     }
                 }
             }
             Err(err) => {
-                log::error!("{}", err);
+                log::error!("cannot enumerate hosts file paths: {}", err);
             }
         }
     }
@@ -227,7 +227,7 @@ fn read_hosts(pattern: &str) -> (Hosts, bool) {
                         path
                     }
                     Err(err) => {
-                        log::error!("{}", err);
+                        log::error!("cannot resolve a path matched by {}: {}", pattern, err);
                         continue;
                     }
                 };
@@ -235,7 +235,7 @@ fn read_hosts(pattern: &str) -> (Hosts, bool) {
                 let content = match std::fs::read(&path) {
                     Ok(content) => content,
                     Err(err) => {
-                        log::error!("{}", err);
+                        log::error!("cannot read hosts file {}: {}", path.display(), err);
                         continue;
                     }
                 };
@@ -250,7 +250,7 @@ fn read_hosts(pattern: &str) -> (Hosts, bool) {
             }
         }
         Err(err) => {
-            log::error!("{}", err);
+            log::error!("cannot list the hosts file directory: {}", err);
         }
     }
     (hosts, has_content)
