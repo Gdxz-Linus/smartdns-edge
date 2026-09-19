@@ -174,7 +174,7 @@ impl DnsCacheMiddleware {
                 if let Some(old) = slot.take() {
                     old.cancel.cancel();
                 }
-                log::info!("缓存持久化：已按新配置关闭，周期落盘任务停止（内存缓存不再往硬盘写）");
+                log::info!("cache persistence: disabled by the new configuration; the periodic flush task has stopped (the in-memory cache no longer writes to disk)");
                 false
             }
             PersistAction::Restart {
@@ -187,21 +187,21 @@ impl DnsCacheMiddleware {
                 let task = spawn_persist_task(cache, file.clone(), checkpoint_secs);
                 match current.as_ref() {
                     None => log::info!(
-                        "缓存持久化：已打开 —— 立刻开始周期落盘（每 {} 秒一次，写入 {}）",
+                        "cache persistence: enabled; periodic flushing starts now (every {} s, writing to {})",
                         checkpoint_secs,
                         file.display()
                     ),
                     Some((old_file, old_cadence)) => {
                         if old_file != &file {
                             log::info!(
-                                "缓存持久化：落盘路径已从 {} 改为 {}（周期落盘已按新路径重建，旧任务已停）",
+                                "cache persistence: flush path changed from {} to {} (the periodic task was rebuilt on the new path, the old one stopped)",
                                 old_file.display(),
                                 file.display()
                             );
                         }
                         if *old_cadence != checkpoint_secs {
                             log::info!(
-                                "缓存持久化：落盘节拍已从 {} 秒改为 {} 秒",
+                                "cache persistence: flush interval changed from {} s to {} s",
                                 old_cadence,
                                 checkpoint_secs
                             );
@@ -268,11 +268,11 @@ impl DnsCacheMiddleware {
                 if let Some(cancel) = slot.take() {
                     cancel.cancel();
                 }
-                log::info!("域名预取：已按新配置关闭（预取任务停止，到期条目不再自动刷新）");
+                log::info!("domain prefetch: disabled by the new configuration; the prefetch task has stopped and expired entries are no longer refreshed automatically");
             }
             (false, true) => {
                 *slot = Some(spawn_prefetch_task(cache, client));
-                log::info!("域名预取：已打开，立即生效（到期条目会按配置自动刷新）");
+                log::info!("domain prefetch: enabled and in effect immediately (expired entries are refreshed automatically as configured)");
             }
         }
     }
@@ -914,7 +914,7 @@ impl DnsCache {
             // 分片容量在创建时就定死了，改容量只能重建缓存（会丢内容）——
             // 所以这里如实告警，而不是静默装作已经生效。
             crate::log::warn!(
-                "cache-size 从 {} 改成 {} 需要重启才生效（缓存分片容量在启动时固定，其余缓存策略已即时生效）",
+                "changing cache-size from {} to {} requires a restart (shard capacity is fixed at startup; all other cache policies take effect immediately)",
                 old_size,
                 new_size
             );
@@ -1280,8 +1280,7 @@ impl DnsCache {
 
             if let Some(err) = rename_err {
                 crate::log::warn!(
-                    "替换缓存文件失败（旧档已保留、新档仍在 {}）：{}。\
-                     常见原因是杀毒/索引/备份软件正占用该文件，或另一个实例在同时写盘",
+                    "failed to replace the cache file (the old file is kept and the new one remains at {}): {}. Common causes: antivirus, indexing or backup software holding the file, or another instance writing to disk concurrently",
                     tmp_path.display(),
                     err
                 );
@@ -1581,7 +1580,7 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
         for old in &siblings {
             match std::fs::remove_file(old) {
                 Ok(()) => info!("清理旧缓存存档：{}", old.display()),
-                Err(err) => crate::log::warn!("清理旧缓存存档失败 {}：{}", old.display(), err),
+                Err(err) => crate::log::warn!("failed to remove an old cache archive {}: {}", old.display(), err),
             }
         }
     }

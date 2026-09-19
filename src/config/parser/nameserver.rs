@@ -145,7 +145,7 @@ impl NomParser for NameServerInfo {
                                 nameserver.server.set_http_host(host)
                             }
                             _ => log::warn!(
-                                "`-http-host` 只对 DoH 上游（https / h3）有效：这条是 {}，已忽略",
+                                "`-http-host` only applies to DoH upstreams (https / h3); this one is {}, so it was ignored",
                                 nameserver.server
                             ),
                         },
@@ -179,7 +179,7 @@ impl NomParser for NameServerInfo {
                             Ok(addr) => match nameserver.server.host() {
                                 url::Host::Domain(_) => nameserver.server.set_ip(addr),
                                 url::Host::Ipv4(_) | url::Host::Ipv6(_) => log::warn!(
-                                    "`-host-ip` 只对「地址写的是域名」的上游有意义：这条上游本身就写的 IP，已忽略"
+                                    "`-host-ip` only makes sense when the upstream address is a domain name; this upstream already uses an IP, so it was ignored"
                                 ),
                             },
                             Err(err) => {

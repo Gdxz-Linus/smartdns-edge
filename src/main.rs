@@ -202,7 +202,7 @@ impl Cli {
                 // 🔐 P3：这里原来用 `.ok()` 吞掉失败 —— 一旦日志系统没装上，之后所有
                 // log::info!/warn!/error! 全部石沉大海，而且没人知道。日志宏此刻不可用，只能直写 stderr。
                 if let Err(err) = tracing::dispatcher::set_global_default(log_dispatch) {
-                    eprintln!("⚠️ 日志系统初始化失败（后续日志可能不会输出）：{err}");
+                    eprintln!("log system initialisation failed (later log output may be missing): {err}");
                 }
 
                 // 此时日志系统已完美交接，这几十行配置摘要将一字不漏印入硬盘文件！
@@ -408,7 +408,7 @@ impl RuntimeConfig {
                         Ok(url) => Some(url),
                         Err(err) => {
                             // 🌟 拒绝静默吞错：解析不了就说出来，别让用户以为配了就能用
-                            log::error!("mDNS 上游地址 `{s}` 解析失败，已跳过：{err:?}");
+                            log::error!("mDNS upstream address `{s}` failed to resolve and was skipped: {err:?}");
                             None
                         }
                     }

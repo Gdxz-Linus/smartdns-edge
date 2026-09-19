@@ -76,7 +76,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
 
     if let Some(err) = &file_open_err {
         eprintln!(
-            "⚠️ 日志文件打不开（{}）：{err}；本次只输出到控制台。请检查该路径所在目录是否存在、是否可写。",
+            "cannot open the log file ({}): {err}; logging to the console only. Check that the directory exists and is writable.",
             path.as_ref().display()
         );
     }
@@ -94,7 +94,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
         crate::log::warn_once("log-syslog-non-linux");
 
         #[cfg(not(target_os = "linux"))]
-        eprintln!("⚠️ `log-syslog` 只在 Linux 上有效（其它平台没有系统日志），本次已忽略。");
+        eprintln!("`log-syslog` is Linux-only (other platforms have no syslog); ignored here.");
     }
 
     if writable {

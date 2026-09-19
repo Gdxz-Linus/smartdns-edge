@@ -31,8 +31,7 @@ const DEFAULT_GROUP: &str = "default";
 fn notice_no_speed() {
     if log::warn_once("set-no-speed-is-default") {
         crate::log::warn!(
-            "`ipset-no-speed` / `nftset-no-speed` 无需设置：本实现一律把解析出的地址「全部」写入集合，\
-             效果已等同于这两个开关。配置已受理，行为不变。"
+            "`ipset-no-speed` / `nftset-no-speed` need not be set: this implementation always writes all resolved addresses into the set, which is already equivalent to these switches. The configuration is accepted and behaviour is unchanged."
         );
     }
 }
@@ -205,7 +204,7 @@ impl RuntimeConfig {
                     path.display()
                 );
                 eprintln!("💡 Reason: {err:#}");
-                eprintln!("💡 Hint: 请检查该文件是否存在语法错误、非法参数或不可读的引用路径。");
+                eprintln!("Hint: check the file for syntax errors, invalid parameters or unreadable referenced paths.");
                 eprintln!("   You can validate a config standalone with: smartdns test -c <file>");
                 eprintln!("   Exit code: {EXIT_CODE_CONFIG_ERROR} (configuration error)\n");
                 std::process::exit(EXIT_CODE_CONFIG_ERROR);
@@ -243,21 +242,21 @@ impl RuntimeConfig {
         #[cfg(not(target_os = "linux"))]
         if self.log_syslog() || self.audit_syslog() {
             log::warn!(
-                "`log-syslog` / `audit-syslog` 只在 Linux 上有效（其它平台没有系统日志）：本次已忽略。"
+                "`log-syslog` / `audit-syslog` are Linux-only (other platforms have no syslog); ignored here."
             );
         }
 
         // 🔐 Q8：开了 `audit-syslog` 但审计本身没开 —— 什么都不会送
         if self.audit_syslog() && !self.audit_enable() {
             log::warn!(
-                "配置里有 `audit-syslog`，但审计没开（缺 `audit-enable yes`）—— 不会有任何审计输出。"
+                "`audit-syslog` is configured but auditing is off (missing `audit-enable yes`), so no audit output will be produced."
             );
         }
 
         // 🔐 Q8：审计改送系统日志后**不再写审计文件**，这点要说清楚（否则用户会去找文件）
         if self.audit_syslog() {
             log::info!(
-                "审计已改为送系统日志（`audit-syslog yes`）：不再写审计文件，行首也不带时间戳（系统日志自带）。"
+                "audit output now goes to syslog (`audit-syslog yes`): no audit file is written and lines carry no timestamp (syslog provides one)."
             );
         }
 
@@ -265,8 +264,7 @@ impl RuntimeConfig {
         // 用户会以为"配了没用"。启动时说清楚（只提示一次，且只在真配了的情况下提示）。
         if !self.local_domains.is_empty() && !self.mdns_lookup() {
             log::warn!(
-                "配置里有 {} 条 `local-domain`，但 `mdns-lookup` 是关着的 —— 这些域名不会走 mDNS 解析。\n\
-                 想用这个功能请加一行 `mdns-lookup yes`。",
+                "{} `local-domain` entries are configured but `mdns-lookup` is off, so those names will not be resolved over mDNS. Add `mdns-lookup yes` to enable it.",
                 self.local_domains.len()
             );
         }
@@ -274,7 +272,7 @@ impl RuntimeConfig {
         #[cfg(not(target_os = "linux"))]
         if !self.ipsets.is_empty() {
             log::warn!(
-                "配置里有 {} 条 `ipset` 规则，但当前平台没有 ipset（那是 Linux 内核的特性），这些规则不会生效。",
+                "{} `ipset` rules are configured but this platform has no ipset (a Linux kernel feature), so they will not take effect.",
                 self.ipsets.len()
             );
         }
@@ -1036,7 +1034,7 @@ impl RuntimeConfigBuilder {
                 // 不会被别人的刷新顺带重下；取用失败时保留上一次的名单（见 `get_with_cache`）。
                 match p.get_domain_set_cached(&cfg.proxy_servers, self.force_set_refresh) {
                     Ok(s) => {
-                        log::info!("DomainSet {} 生效 {} 条规则", s.len(), p.name());
+                        log::info!("DomainSet {}: {} rules in effect", s.len(), p.name());
                         set.extend(s);
                     }
                     Err(err) => {
@@ -1348,7 +1346,7 @@ impl RuntimeConfigBuilder {
                 Some(g) => Some(g.clone()),
                 None => {
                     log::warn!(
-                        "`group-begin {} -inherit {}`：这个组还没定义过（继承只认**已经定义**的组，不支持前向引用）—— 本次不继承",
+                        "`group-begin {} -inherit {}`: that group is not defined yet (inheritance only accepts already defined groups, no forward references), so nothing is inherited this time",
                         group.name,
                         name
                     );
@@ -1365,7 +1363,7 @@ impl RuntimeConfigBuilder {
             // 嵌套默认继承要明确说出来（它改变了"嵌套组是空白组"的既有行为）
             if group.inherit.is_none() {
                 log::info!(
-                    "嵌套组 `{}` 默认继承了外层组的规则（与 C 版一致）；不想继承就写 `group-begin {} -inherit none`",
+                    "nested group `{}` inherits the outer group's rules by default (same as the C implementation); write `group-begin {} -inherit none` to opt out",
                     group.name,
                     group.name
                 );
@@ -1448,7 +1446,7 @@ impl RuntimeConfigBuilder {
                 // 0 显然是笔误，这里忽略它、改用自动值，并把这件事明确说出来。
                 NumWorkers(0) => {
                     crate::log::warn!(
-                        "配置项 num-workers 0 无意义（会让服务完全不解析），已忽略该值并改用自动计算的工作线程数"
+                        "num-workers 0 is meaningless (it would stop all resolution); the value was ignored and the automatically computed worker count is used"
                     );
                     self.num_workers = None;
                 }

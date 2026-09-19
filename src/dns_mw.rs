@@ -58,7 +58,7 @@ impl DnsMiddlewareHandler {
         ) {
             crate::server::limit::QueryAdmission::Allowed(guard) => guard,
             crate::server::limit::QueryAdmission::Refused => {
-                crate::log::debug!("同时处理的查询数已达上限 → 拒绝（REFUSED）");
+                crate::log::debug!("the number of concurrent queries has reached its limit; replying REFUSED");
                 return Err(crate::libdns::proto::op::ResponseCode::Refused.into());
             }
         };
@@ -77,7 +77,7 @@ impl DnsMiddlewareHandler {
             && matched_rule.is_none()
         {
             crate::log::debug!(
-                "ACL 已开启：客户端 {client_ip} 没有匹配到任何 client-rules → 拒绝（REFUSED）"
+                "ACL is enabled: client {client_ip} matched no client-rules; replying REFUSED"
             );
             return Err(crate::libdns::proto::op::ResponseCode::Refused.into());
         }

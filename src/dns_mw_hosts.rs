@@ -82,7 +82,7 @@ impl DnsHostsMiddleware {
         let (mut refreshed, mut has_content) = read_hosts_blocking(pattern_str.clone()).await;
 
         if !has_content && prev_has_content {
-            log::debug!("hosts 文件本次读到空内容，稍后重读一次（可能是文件正在被替换）");
+            log::debug!("the hosts file read as empty this time; it will be read once more shortly (the file may be mid-replacement)");
             tokio::time::sleep(Duration::from_millis(200)).await;
             let (hosts2, content2) = read_hosts_blocking(pattern_str.clone()).await;
             refreshed = hosts2;
@@ -90,7 +90,7 @@ impl DnsHostsMiddleware {
 
             if !has_content {
                 log::warn!(
-                    "hosts 文件连续两次都读到空内容，按空处理（如果这不是你的本意，请检查 hosts-file 配置）"
+                    "the hosts file read as empty twice in a row and is treated as empty (check the hosts-file setting if this is unexpected)"
                 );
             }
         }

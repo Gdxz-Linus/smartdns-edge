@@ -75,7 +75,7 @@ impl DnsAuditMiddleware {
             // 🔐 P3：先把审计档的目录准备好 —— 同上，不再依赖"构建时顺手建出来的 ./logs"。
             if let Err(err) = crate::infra::mapped_file::ensure_parent_dir(&audit_file) {
                 crate::log::error!(
-                    "审计档所在目录建不出来（{}）：{err}；本次审计可能写不进文件",
+                    "cannot create the audit directory ({}): {err}; audit output may not reach the file",
                     audit_file.display()
                 );
             }

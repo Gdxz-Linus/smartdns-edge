@@ -35,12 +35,12 @@ impl NomParser for IpRules {
                     Some(value) => match ip_list(value) {
                         Ok((_, list)) => rules.alias = Some(list),
                         Err(err) => crate::log::error!(
-                            "`ip-rules ... -ip-alias` 的值不合法，已忽略：{value}（{err:?}）"
+                            "invalid `ip-rules ... -ip-alias` value; ignored: {value} ({err:?})"
                         ),
                     },
-                    None => crate::log::warn!("`ip-rules ... -ip-alias` 后面缺值，已忽略"),
+                    None => crate::log::warn!("`ip-rules ... -ip-alias` has no value; ignored"),
                 },
-                other => crate::log::warn!("ip-rules 上不认识的选项：-{other}（已忽略）"),
+                other => crate::log::warn!("unknown option on ip-rules: -{other} (ignored)"),
             }
         }
 

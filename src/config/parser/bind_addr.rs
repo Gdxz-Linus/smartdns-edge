@@ -239,16 +239,16 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
                     opts.nftset.get_or_insert_with(Vec::new).extend(sets);
                 }
                 Some(Err(err)) => {
-                    crate::log::error!("监听上的 `-nftset` 值不合法，已忽略：{err:?}")
+                    crate::log::error!("invalid `-nftset` value on a listener; ignored: {err:?}")
                 }
-                None => crate::log::warn!("监听上的 `-nftset` 后面缺值，已忽略"),
+                None => crate::log::warn!("`-nftset` on a listener has no value; ignored"),
             },
             "ipset" => match v.map(Vec::<ConfigForIP<IpsetConfig>>::parse) {
                 Some(Ok((_, sets))) => {
                     opts.ipset.get_or_insert_with(Vec::new).extend(sets);
                 }
-                Some(Err(err)) => crate::log::error!("监听上的 `-ipset` 值不合法，已忽略：{err:?}"),
-                None => crate::log::warn!("监听上的 `-ipset` 后面缺值，已忽略"),
+                Some(Err(err)) => crate::log::error!("invalid `-ipset` value on a listener; ignored: {err:?}"),
+                None => crate::log::warn!("`-ipset` on a listener has no value; ignored"),
             },
             "no-speed-check" => opts.no_speed_check = Some(true),
             "no-cache" => opts.no_cache = Some(true),

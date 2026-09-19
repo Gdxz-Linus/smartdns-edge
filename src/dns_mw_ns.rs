@@ -129,8 +129,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
 
                     if crate::log::warn_once(&format!("server-group:{group_name}")) {
                         crate::log::warn!(
-                            "配置里没有名为 \"{}\" 的上游服务器组（查询 {} 命中了它）：已退回默认组解析。\
-                             请检查 server/nameserver 行的 -group、bind 的 -group 与 nameserver /域名/组名 规则里的组名",
+                            "no upstream server group named `{}` in the configuration (query {} matched it); falling back to the default group. Check the group names in server/nameserver `-group`, in bind `-group` and in the nameserver /domain/group rules",
                             group_name,
                             name
                         );

@@ -1076,7 +1076,7 @@ mod tests {
     /// 换一台机器就变成一条假命题（既可能误报通过，也可能误报失败）。
     fn skip_no_proxy(test: &str) {
         eprintln!(
-            "跳过 {test}：环境变量里没有可用代理（可设 SMARTDNS_TEST_SOCKS5_PROXY；也认 ALL_PROXY / HTTP_PROXY / HTTPS_PROXY）"
+            "skipping {test}: no usable proxy in the environment (set SMARTDNS_TEST_SOCKS5_PROXY; ALL_PROXY / HTTP_PROXY / HTTPS_PROXY）"
         );
     }
 

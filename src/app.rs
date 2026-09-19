@@ -158,9 +158,9 @@ impl App {
                     continue;
                 };
 
-                log::info!("名单定时刷新：按 -interval（最小 {secs} 秒）重新加载配置");
+                log::info!("domain list scheduled refresh: reloading configuration per -interval (minimum {secs} s)");
                 if let Err(err) = app.reload_reusing_set_cache().await {
-                    log::error!("名单定时刷新失败：{err}");
+                    log::error!("domain list scheduled refresh failed: {err}");
                 }
             }
         });
@@ -257,7 +257,7 @@ impl App {
                         // 实测现场见 `probe_a9_reload.py`。
                         if self.bind_retry.write().await.remove(&bind_addr).is_some() {
                             log::info!(
-                                "监听 {} 已绑成功，顺手清掉重试队列里的旧账",
+                                "listener {} bound successfully; retry queue cleared",
                                 bind_addr.sock_addr()
                             );
                         }
@@ -302,8 +302,7 @@ impl App {
             Entry::Vacant(v) => {
                 let state = BindRetry::new(now, format!("{addr}: {err}"));
                 log::error!(
-                    "❌ 监听 {} 绑定失败，已加入自动重试队列（{} 秒后重试第一次，\
-                     之后指数退避、最长 60 秒一次；端口只是被短暂占用的话会自行恢复，无需手动重启）：{}",
+                    "listener {} failed to bind and was queued for automatic retry (first retry in {} s, then exponential backoff up to 60 s; a temporarily occupied port recovers on its own, no restart needed): {}",
                     addr,
                     retry_backoff(1).as_secs(),
                     state.last_error
@@ -315,7 +314,7 @@ impl App {
                 state.failed_again(now, format!("{addr}: {err}"));
                 if state.attempts.is_power_of_two() {
                     log::warn!(
-                        "⏳ 监听 {} 仍然绑不上（第 {} 次失败，{} 秒后再试）：{}",
+                        "listener {} still cannot bind (failure {}, retrying in {} s): {}",
                         addr,
                         state.attempts,
                         retry_backoff(state.attempts).as_secs(),
@@ -356,7 +355,7 @@ impl App {
             // 配置里已经不要这个监听了（例如用户改完配置并 reload 过）→ 放弃重试
             if !cfg.binds().contains(&bind_addr) {
                 self.bind_retry.write().await.remove(&bind_addr);
-                log::info!("监听 {} 已不在当前配置中，放弃重试", bind_addr.sock_addr());
+                log::info!("listener {} is no longer in the current configuration; retry abandoned", bind_addr.sock_addr());
                 continue;
             }
 
@@ -387,7 +386,7 @@ impl App {
                     }
 
                     log::info!(
-                        "✅ 监听 {} 已恢复：第 {} 次重试成功（从首次失败起累计 {:?}）",
+                        "listener {} recovered: retry {} succeeded ({:?} since the first failure)",
                         addr,
                         attempts,
                         waited
@@ -399,7 +398,7 @@ impl App {
                         state.failed_again(now, format!("{}: {err}", bind_addr.sock_addr()));
                         if state.attempts.is_power_of_two() {
                             log::warn!(
-                                "⏳ 监听 {} 仍然绑不上（第 {} 次失败，{} 秒后再试）：{}",
+                                "listener {} still cannot bind (failure {}, retrying in {} s): {}",
                                 bind_addr.sock_addr(),
                                 state.attempts,
                                 retry_backoff(state.attempts).as_secs(),
@@ -536,7 +535,7 @@ pub fn install_panic_hook() {
         let count = PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // 限流：前 5 次每次都记，之后每 100 次记一条，避免被刷爆日志/磁盘
         if count <= 5 || count % 100 == 0 {
-            crate::log::warn!("⚠️ 捕获到 panic（累计第 {count} 次）：{info}");
+            crate::log::warn!("panic caught (occurrence {count}): {info}");
         }
     }));
 }
@@ -779,7 +778,7 @@ async fn process(
         Ok(response) => response,
         Err(_) => {
             crate::log::warn!(
-                "请求处理发生未预期的 panic，已改为回 SERVFAIL（详见上面的 panic 记录）"
+                "unexpected panic while handling a request; replying SERVFAIL instead (see the panic entry above)"
             );
             fallback
         }
@@ -927,7 +926,7 @@ async fn process_inner(
                                             // ACL 拒绝时我们主动产出 REFUSED —— 它不是"故障"，不能抹成 SERVFAIL。
                                             (Some(code), None) => {
                                                 log::debug!(
-                                                    "{}Response: 按明确的状态码回复客户端: {code:?}, Duration: {:?}",
+                                                    "{}Response: replying to the client with an explicit status code: {code:?}, duration: {:?}",
                                                     background,
                                                     start.elapsed()
                                                 );
@@ -1098,7 +1097,7 @@ async fn process_inner(
         // 并留下可查的日志。
         _ => {
             crate::log::debug!(
-                "dropping unparsable DNS request from {proto}://{addr}#{port}（无法构造应答）",
+                "dropping unparsable DNS request from {proto}://{addr}#{port} (no reply can be constructed)",
                 proto = protocol,
                 addr = addr.ip(),
                 port = addr.port(),

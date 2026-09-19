@@ -198,7 +198,7 @@ impl IntoResponse for crate::dns::DnsError {
         // 🔐 P2：不再手工拼 JSON —— 错误文本里一旦出现引号 / 反斜杠 / 换行，
         // 拼出来的就是坏 JSON；而且细节直接回显等于把内部信息（含服务器路径）送给调用方。
         // 这里用 serde_json 生成（自动转义），详情只写服务端日志。
-        crate::log::warn!("DoH 查询失败: {self:?}");
+        crate::log::warn!("DoH query failed: {self:?}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": self.to_string() })),
@@ -285,10 +285,10 @@ pub fn api_token() -> &'static str {
 
         let token = generate_api_token();
         crate::log::warn!(
-            "管理后台没有配置口令，已随机生成：{token}（想固定下来，请在配置里加一行：api-token {token}）"
+            "the management console has no token configured, so one was generated: {token} (to make it permanent, add this line to the configuration: api-token {token})"
         );
-        println!("[smartdns] 管理后台口令（本次运行随机生成）：{token}");
-        println!("[smartdns] 想固定下来，请在配置文件里加一行：api-token {token}");
+        println!("[smartdns] management console token (randomly generated for this run): {token}");
+        println!("[smartdns] to make it permanent, add this line to the configuration file: api-token {token}");
         token
     })
 }
@@ -336,8 +336,7 @@ pub fn warn_plaintext_api(binds: &[crate::config::BindAddrConfig]) {
             continue;
         }
         crate::log::warn!(
-            "⚠️ 管理后台（网页控制台）挂在明文 HTTP 上：{addr}。口令会以明文在网络中传输 —— \
-             请只在可信内网使用；需要跨网络访问请改用 bind-https（TLS）或反向代理。"
+            "the management console is served over plain HTTP on {addr}: the token travels the network unencrypted. Use it only on a trusted LAN; for remote access use bind-https (TLS) or a reverse proxy."
         );
     }
 }
@@ -419,7 +418,7 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
     if let Some(ip) = client_ip {
         let count = auth_record_failure(ip);
         if count >= AUTH_FAIL_LIMIT {
-            crate::log::warn!("来源 {ip} 在窗口期内连续 {count} 次口令错误");
+            crate::log::warn!("source {ip} sent {count} incorrect tokens within the window");
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
     }
@@ -431,7 +430,7 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
             req.uri().path()
         ),
         None => crate::log::warn!(
-            "Unauthorized API access attempt（来源地址未知，可能是本机代理或 Unix socket）to: {}",
+            "unauthorized API access attempt (source address unknown; possibly a local proxy or Unix socket) to: {}",
             req.uri().path()
         ),
     }

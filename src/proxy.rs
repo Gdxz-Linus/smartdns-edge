@@ -167,7 +167,7 @@ pub fn resolve_proxy<'a>(
         None => {
             if crate::log::warn_once(&format!("unknown-proxy:{name}")) {
                 crate::log::warn!(
-                    "代理名 {name} 未在 `proxy-server ... -name {name}` 里定义，本次改为直连（请检查拼写）"
+                    "proxy name {name} is not defined by any `proxy-server ... -name {name}`; connecting directly this time (check the spelling)"
                 );
             }
             None

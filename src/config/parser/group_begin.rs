@@ -25,9 +25,9 @@ impl NomParser for GroupBegin {
                     // 🔐 Q18：-inherit <组|none|parent|default>
                     "inherit" | "h" => match v {
                         Some(value) => group.inherit = Some(value.to_string()),
-                        None => crate::log::warn!("`group-begin ... -inherit` 后面缺组名，已忽略"),
+                        None => crate::log::warn!("`group-begin ... -inherit` has no group name; ignored"),
                     },
-                    other => crate::log::warn!("group-begin 上不认识的选项：-{other}（已忽略）"),
+                    other => crate::log::warn!("unknown option on group-begin: -{other} (ignored)"),
                 }
             }
 

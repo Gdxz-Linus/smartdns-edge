@@ -47,8 +47,7 @@ impl DnsContext {
             && crate::log::warn_once(&format!("rule-group:{group_name}"))
         {
             crate::log::warn!(
-                "配置里没有名为 \"{}\" 的规则组（查询 {} 命中了它）：已改用默认组的规则。\
-                 请检查 group-begin / client-rules 里的组名是否拼错或已改名",
+                "no rule group named `{}` in the configuration (query {} matched it); falling back to the default group's rules. Check the group names in group-begin / client-rules for typos or renames",
                 group_name,
                 name
             );

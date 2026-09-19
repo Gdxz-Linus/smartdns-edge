@@ -270,7 +270,7 @@ fn test_sendarp_real_lookup() {
         .parse()
         .expect("SMARTDNS_TEST_ARP_TARGET 要是 IPv4 地址");
     match lookup_client_mac_from_arp_v4(ip) {
-        Some(mac) => println!("SendARP 取到 {ip} 的 MAC = {mac} ✓（字节序正确）"),
+        Some(mac) => println!("SendARP resolved MAC = {mac} for {ip} (byte order correct)"),
         None => panic!(
             "SendARP 取不到 {ip} 的 MAC —— 字节序可能仍然不对（只发 2 字节前缀那种静默失败）"
         ),

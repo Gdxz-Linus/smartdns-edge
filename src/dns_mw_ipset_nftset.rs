@@ -194,7 +194,7 @@ fn report_ipset_result(setname: &str, addrs: &[IpAddr], timeout: u64) {
 
     if result.is_ok() {
         crate::log::debug!(
-            "ipset: 已把 {} 个地址写入集合 {}（过期时间 {} 秒，0 = 不过期）",
+            "ipset: wrote {} addresses into set {} (timeout {} s, 0 = no expiry)",
             result.added,
             setname,
             timeout
@@ -215,8 +215,7 @@ fn report_ipset_result(setname: &str, addrs: &[IpAddr], timeout: u64) {
 
     if crate::log::warn_once(&key) {
         crate::log::warn!(
-            "ipset: 写入集合 `{}` 失败（成功 {} 条、失败 {} 条，例如 {}）：{}。\
-             请检查集合是否存在（`ipset list {}`）、进程权限是否足够；本行只提示一次。",
+            "ipset: writing into set `{}` failed ({} succeeded, {} failed, e.g. {}): {}. Check that the set exists (`ipset list {}`) and that the process has enough privileges; this message is printed once.",
             setname,
             result.added,
             result.failed,
@@ -294,7 +293,7 @@ fn report_nftset_result(
         Ok(n) => {
             if debug {
                 crate::log::debug!(
-                    "nftset: 已把 {} 个地址写入 {}/{} 的集合 {}（过期时间 {} 秒，0 = 不过期）",
+                    "nftset: wrote {} addresses into set {} of {}/{} (timeout {} s, 0 = no expiry)",
                     n,
                     family,
                     table,
@@ -307,7 +306,7 @@ fn report_nftset_result(
             let key = format!("nftset-write-fail:{family}:{table}:{set_name}");
             if crate::log::warn_once(&key) {
                 crate::log::warn!(
-                    "nftset: 往 {family}/{table} 的集合 {set_name} 写不了地址：{err}（表或集合可能不存在、或权限不足；本行只提示一次）"
+                    "nftset: cannot write addresses into set {set_name} of {family}/{table}: {err} (the table or set may not exist, or privileges are insufficient; this message is printed once)"
                 );
             }
         }

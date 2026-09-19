@@ -69,7 +69,7 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
                             oversize_total = oversize_total.saturating_add(1);
                             if crate::server::should_log_stream_error(oversize_total) {
                                 log::warn!(
-                                    "UDP 报文超过接收缓冲上限 {} 字节，已丢弃（累计第 {} 次；这类客户端应改用 TCP 重问）: {}",
+                                    "UDP message exceeds the {} byte receive buffer and was dropped (#{} so far; such clients should retry over TCP): {}",
                                     UDP_RECV_BUFFER_SIZE,
                                     oversize_total,
                                     e
@@ -82,7 +82,7 @@ pub fn serve(socket: net::UdpSocket, handler: DnsHandle, token: CancellationToke
                         err_streak = err_streak.saturating_add(1);
                         if crate::server::should_log_stream_error(err_streak) {
                             log::warn!(
-                                "error receiving message on udp_socket（连续第 {} 次）: {}",
+                                "error receiving a message on udp_socket (consecutive #{}) : {}",
                                 err_streak,
                                 e
                             );

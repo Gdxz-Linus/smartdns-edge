@@ -25,8 +25,7 @@ pub fn create_service_definition() -> ServiceDefinition {
         // `service install` 会**直接 panic**（用户只看到 "not yet implemented"，没有原因、没有出路）。
         // 现在给出可读说明并退回 sysvinit 脚本定义：不崩，且至少给出一个能试的方向。
         crate::log::warn!(
-            "未识别到 systemd / sysvinit / runit 服务管理器：将按 sysvinit 脚本方式安装；\
-             若你的系统用的是别的服务管理器，请手动配置开机自启"
+            "no systemd / sysvinit / runit service manager detected; installing as a sysvinit script. If your system uses another service manager, configure autostart manually"
         );
         initd::create_service_definition()
     }

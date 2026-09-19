@@ -467,7 +467,7 @@ pub fn parse_config(input: &str) -> IResult<&str, Option<ConfigItem>> {
 /// 放这里是因为域名集合与 IP 集合共用同一套判断与提醒。
 pub(crate) fn warn_if_interval_too_short(kind: &str, name: &str, interval: Option<usize>) {
     if let Some(secs) = interval.filter(|secs| *secs > 0 && *secs < 10) {
-        crate::log::warn!("{kind} {name}: -interval {secs} 秒太短，会频繁重载配置（建议 ≥ 10 秒）");
+        crate::log::warn!("{kind} {name}: -interval {secs} s is too short and will reload the configuration frequently (10 s or more is recommended)");
     }
 }
 

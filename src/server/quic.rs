@@ -62,7 +62,7 @@ pub fn serve(
             // 🔐 P0-5：连接数上限。超出预算就拒绝新连接（不影响已有连接），保护进程内存。
             // 默认上限按物理内存自动推算：家庭小机器自动收紧，企业大机器自动放宽。
             let Some(conn_guard) = crate::server::limit::global().acquire(src_addr.ip()) else {
-                log::debug!("连接数超出上限，拒绝 {src_addr} 的新连接");
+                log::debug!("global connection limit reached; refusing the new connection from {src_addr}");
                 continue;
             };
 
@@ -71,7 +71,7 @@ pub fn serve(
                 Some(l) => match l.acquire(src_addr.ip()) {
                     Some(guard) => Some(guard),
                     None => {
-                        log::debug!("该监听连接数超限，拒绝 {src_addr} 的新连接");
+                        log::debug!("per-listener connection limit reached; refusing the new connection from {src_addr}");
                         continue;
                     }
                 },
@@ -118,7 +118,7 @@ pub fn serve(
                                 {
                                     Ok(r) => r,
                                     Err(_) => {
-                                        log::debug!("QUIC 子流首包超时，关闭该子流: {src_addr}");
+                                        log::debug!("QUIC substream first-packet timeout; closing the substream: {src_addr}");
                                         let _ = request_stream.stop(DoqErrorCode::NoError);
                                         return;
                                     }

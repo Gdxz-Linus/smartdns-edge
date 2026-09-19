@@ -100,7 +100,7 @@ impl ConnectionLimiter {
         };
 
         crate::log::info!(
-            "连接数上限：总计 {}、单一来源 {}（可用 max-connections / max-connections-per-ip 调整）",
+            "connection limits: total {}, per source {} (adjust with max-connections / max-connections-per-ip)",
             max_connections,
             max_per_source
         );
@@ -140,7 +140,7 @@ impl ConnectionLimiter {
                 // 日志限流：每累计 32 次才打一条，避免被刷爆
                 if self.rejected.load(Ordering::Relaxed) % 32 == 1 {
                     crate::log::warn!(
-                        "连接数达到上限，拒绝来自 {} 的连接（当前 {}，上限 {}；累计超限 {}）",
+                        "connection limit reached; refusing a connection from {} (current {}, limit {}; {} refused so far)",
                         addr,
                         self.current.load(Ordering::Relaxed),
                         self.max_connections,
@@ -208,7 +208,7 @@ pub fn register_listener(
         return;
     }
     crate::log::info!(
-        "监听 {addr} 单独设置了连接上限：总计 {:?}、单一来源 {:?}",
+        "listener {addr} has its own connection limits: total {:?}, per source {:?}",
         max_connections,
         max_per_source
     );
@@ -401,8 +401,7 @@ impl QueryLimiter {
             .is_ok()
         {
             crate::log::warn!(
-                "同时处理的查询数已达上限（`max-query-limit`），新的查询会被直接拒绝（REFUSED）。\n\
-                 这说明有异常流量或上游太慢导致查询堆积；确认是正常业务量就调大这个值，或查一下上游。"
+                "the number of concurrent queries has reached the `max-query-limit`; new queries are refused. This indicates abnormal traffic or query pile-up behind slow upstreams; raise the limit if the load is legitimate, otherwise check the upstreams."
             );
         }
     }

@@ -51,7 +51,7 @@ impl DomainRuleMap {
                 // 用 warn_once 收口 —— 否则一条空名单会随每次周期刷新反复刷屏，把真告警淹掉。
                 if names.is_empty() && crate::log::warn_once(&format!("empty-domain-set:{s}")) {
                     crate::log::warn!(
-                        "domain-set `{}` 为空或加载失败：引用它的规则已被丢弃（检查名单文件/URL 是否可读）",
+                        "domain-set `{}` is empty or failed to load; rules referencing it were dropped (check that the list file or URL is readable)",
                         s
                     );
                 }

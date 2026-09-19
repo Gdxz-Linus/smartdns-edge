@@ -604,7 +604,7 @@ mod name_server {
                 // 🌟 别让"配了却不起作用"重演：明文上游上写 -spki-pin 等于没配，说清楚
                 if url.spki_pin().is_some() {
                     crate::log::warn!(
-                        "{}：`-spki-pin` 只对加密上游（tls / https / quic / h3）有效，这条是明文上游，已忽略",
+                        "{}: `-spki-pin` only applies to encrypted upstreams (tls / https / quic / h3); this upstream is plaintext, so it was ignored",
                         url
                     );
                 }
@@ -1090,7 +1090,7 @@ mod bootstrap {
                     // 🔐 B4：这里**不会退出**（P1-6 起已改成降级继续运行），所以不能再喊 FATAL ——
                     // 用户看到"致命错误"却发现服务照常跑，会以为出了更严重的问题。
                     eprintln!(
-                        "\n\x1b[33;1m[警告]\x1b[0m 读不到系统网卡上的 DNS 配置：{}",
+                        "\n\x1b[33;1m[WARN]\x1b[0m cannot read the DNS configuration of the system interfaces: {}",
                         err
                     );
                     eprintln!(

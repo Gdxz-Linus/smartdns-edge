@@ -31,7 +31,7 @@ pub const TTL_MAX: u64 = 0x7FFF_FFFF;
 /// 既不静默出错，也不会因为一个手误就让服务起不来。
 pub fn sanitize_ttl(name: &str, v: u64) -> u64 {
     if v > TTL_MAX {
-        crate::log::warn!("配置项 {name} 的值 {v} 超出 DNS 规范上限 {TTL_MAX} 秒，已按上限生效");
+        crate::log::warn!("the value {v} of {name} exceeds the DNS maximum of {TTL_MAX} seconds; the maximum is applied");
         TTL_MAX
     } else {
         v

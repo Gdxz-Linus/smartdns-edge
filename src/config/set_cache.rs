@@ -74,19 +74,19 @@ impl<T: Clone> SetCache<T> {
             && let Some((fetched_at, value)) = self.lookup(&key)
             && fetched_at.elapsed() < Duration::from_secs(secs as u64)
         {
-            crate::log::debug!("{label} {name} 未到 -interval {secs} 秒，沿用上次的名单");
+            crate::log::debug!("{label} {name}: not yet due under -interval {secs} s; using the previous list");
             return Ok(value);
         }
 
         match fetch() {
             Ok(value) => {
-                crate::log::info!("{label} {name} 取到名单（-interval {secs} 秒）");
+                crate::log::info!("{label} {name}: list fetched (-interval {secs} s)");
                 self.store(&key, &value);
                 Ok(value)
             }
             Err(err) => match self.lookup(&key) {
                 Some((_, value)) => {
-                    crate::log::warn!("{label} {name} 取用失败（{err}），继续用上一次的名单");
+                    crate::log::warn!("{label} {name}: fetch failed ({err}); keeping the previous list");
                     Ok(value)
                 }
                 None => Err(err),

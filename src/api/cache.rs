@@ -54,7 +54,7 @@ async fn caches(
     let limit = page.limit.min(MAX_PAGE_LIMIT);
     if limit != page.limit {
         log::debug!(
-            "caches: 请求的 limit={} 超过单页上限，按 {} 返回",
+            "caches: requested limit={} exceeds the per-page maximum; returning {}",
             page.limit,
             MAX_PAGE_LIMIT
         );
