@@ -79,7 +79,7 @@ docker run -d \
 
 ## 🖥️ Web Console (management UI)
 
-The web console is **not container-specific**: it is mounted on the `bind-http` / `bind-https` / `bind-h3`
+The web console is mounted on the `bind-http` / `bind-https` / `bind-h3`
 listeners — whichever of those you configure also serves the DNS service (DoH) and the management console
 on that port (the `/api` endpoints for config, upstreams, address rules, cache and logs, plus `/api/docs`
 for the API reference).
