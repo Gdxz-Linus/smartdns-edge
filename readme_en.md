@@ -2,15 +2,15 @@
 
 SmartDNS-edge is the Rust rewrite of the C-language SmartDNS. It keeps the same feature set, implements every feature properly, and thoroughly re-optimises the algorithms behind cache prefetching, dual-stack IP selection and speed checking — surpassing the C version across the board and serving as a drop-in replacement for it.
 
-The project is a secondary development based on mokeyish's 0.13 release, with free gemini 3.1 pro intelligence assisting the effort, delivering multi-upstream split routing and dual-stack IP selection with no DNS leaks and no memory leaks.
+The project is a secondary development based on mokeyish's 0.13 release, with a free AI engine assisting the effort, delivering dual-stack IP selection and other features. No DNS leaks, no memory leaks.
 
 This refactor keeps the original architecture in place while completely reshaping the business logic, network throughput, CPU performance, memory-leak resistance, anti-abuse defences and failure tolerance — targeting an industrial-grade, enterprise-grade edge DNS proxy gateway.
 
 SmartDNS-edge accepts DNS queries from local or LAN clients, resolves them against multiple upstream DNS servers, and returns the fastest-responding result to the client, which speeds up web access.
 
-SmartDNS-edge also supports pinning specific domain names to specific IP addresses with high-performance matching, which can block ads, and it performs multi-upstream split routing with no DNS leaks and no memory leaks.
+SmartDNS-edge also supports pinning specific domain names to specific IP addresses with high-performance matching, which can block ads, along with multi-upstream split routing and other features.
 
-Due to limited resources, only the key Windows features have been tested so far; Linux, macOS and Docker have not been tested.
+Key features have been tested on Windows and on WSL2 (Linux).
 
 ## What has been improved
 🚀 SmartDNS-edge: core architecture and feature evolution
@@ -99,14 +99,11 @@ This part of the code exists to cope with hostile network environments, resist m
 3.	Fail fast instead of running blind: if reading the machine's interface DNS configuration fails at startup, the service raises an error and exits. Following the "never work while sick" principle, an abnormal interface does not go online in a broken, black-holing state — troubleshooting starts immediately.
 
 📡 3. Resource limits and protocol robustness (no drag-downs, no crashes)
-1.	No more "small cart, huge load" memory grabs: the packet length a client claims is no longer used as the basis for allocating memory — you only occupy what you actually receive. The old trick of sending two bytes to stake out 64 KiB no longer works here.
-2.	Connections cannot just sit there: a connection must send its first complete request within 5 seconds or it is closed. Long-lived connections already in use are unaffected.
-3.	Connection counts are capped: both the total number of simultaneous connections and the number from a single source have limits; over the limit, only new connections are refused — connections already in use are never dropped. The limits are derived automatically from the machine's physical memory (tighter on small machines, looser on large ones) and can be adjusted per port. The local machine (127.0.0.1) never consumes quota, so you can still reach the management console even while the service is being hammered with a connection flood.
-4.	Everything is visible: current connections, refusals, the limit values and the program's own error count can all be viewed in the management console. Running with the defaults for a while and checking the real peak before adjusting anything is recommended.
-5.	Unsupported requests get a clear answer: for old-fashioned or unrecognised query types the program returns a "not supported" response instead of silently discarding the request as it used to.
-6.	Forged "response" packets are simply dropped: such packets usually come from spoofing or reflection traffic, and answering a response creates a loop, so they are logged but not answered.
-7.	Only answers from the upstream you asked are accepted: answers whose source does not match are discarded, so resolution results cannot be substituted by a third party.
-8.	Problems are visible and there is a fallback: if the program itself fails internally, the situation is logged and counted; the request is then answered with a "server failure" response where possible, rather than leaving the client waiting until it times out.
+1.	Connection counts are capped: both the total number of simultaneous connections and the number from a single source have limits; over the limit, only new connections are refused — connections already in use are never dropped. The limits are derived automatically from the machine's physical memory (tighter on small machines, looser on large ones) and can be adjusted per listener.
+2.	Unsupported requests get a clear answer: for old-fashioned or unrecognised query types the program returns a "not supported" response instead of silently discarding the request as it used to.
+3.	Forged "response" packets are simply dropped: such packets usually come from spoofing or reflection traffic, and answering a response creates a loop, so they are logged but not answered.
+4.	Only answers from the upstream you asked are accepted: answers whose source does not match are discarded, so resolution results cannot be substituted by a third party.
+5.	Problems are visible and there is a fallback: if the program itself fails internally, the situation is logged and counted; the request is then answered with a "server failure" response where possible, rather than leaving the client waiting until it times out.
 
 💻 Part Four: built-in tools, API and operational experience
 1.	Windows service management rebuilt (major): installing and uninstalling the Windows service now uses modern synchronous PowerShell commands, and installation configures firewall rules and system network prerequisites automatically. Service install failures, start failures, broken status queries and restart failures on Windows are eliminated.
