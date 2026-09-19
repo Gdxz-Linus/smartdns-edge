@@ -1260,7 +1260,7 @@ impl RuntimeConfigBuilder {
 
                 if std::str::from_utf8(&buf).is_err() {
                     warn!(
-                        "配置文件 {:?} 第 {} 行含有非 UTF-8 字节，已按替换字符解析（该行之后照常加载）",
+                        "configuration file {:?} line {} contains non-UTF-8 bytes; parsed with replacement characters (loading continues after this line)",
                         path, lineno
                     );
                 }
@@ -1302,14 +1302,14 @@ impl RuntimeConfigBuilder {
                 let shown_line = redact_config_line(line);
                 let shown_rest = redact_config_line(rest);
                 let detail = if item.is_none() {
-                    format!("未识别的配置行（已原样忽略）：{shown_line:?}，请检查关键字拼写")
+                    format!("unrecognised configuration line (ignored as-is): {shown_line:?}; check the keyword spelling")
                 } else {
                     format!(
-                        "配置行尾部有无法识别的内容（已忽略）：{shown_rest:?} —— 整行：{shown_line:?}"
+                        "unrecognised content at the end of a configuration line (ignored): {shown_rest:?} -- full line: {shown_line:?}"
                     )
                 };
                 match lineno {
-                    Some(no) => warn!("配置文件第 {no} 行：{detail}"),
+                    Some(no) => warn!("configuration file line {no}: {detail}"),
                     None => warn!("{detail}"),
                 }
             }
@@ -1522,7 +1522,7 @@ impl RuntimeConfigBuilder {
                     let files = self.expand_conf_files(&v.path);
                     if files.is_empty() {
                         warn!(
-                            "conf-file {:?} 没有匹配到任何文件（通配符没命中或路径不存在）",
+                            "conf-file {:?} matched no files (the pattern hit nothing, or the path does not exist)",
                             v.path
                         );
                     }

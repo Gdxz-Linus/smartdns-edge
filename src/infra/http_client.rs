@@ -21,7 +21,7 @@ fn read_capped<R: Read>(reader: R) -> anyhow::Result<String> {
 
     if buf.len() as u64 > MAX_BODY_BYTES {
         anyhow::bail!(
-            "响应体超过上限 {} 字节，已拒绝（这个地址可能返回了异常内容）",
+            "response body exceeds the {} byte limit and was rejected (this address may have returned unexpected content)",
             MAX_BODY_BYTES
         );
     }

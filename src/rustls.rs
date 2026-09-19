@@ -86,7 +86,7 @@ impl TlsClientConfigBundle {
                 Arc::new(rustls::crypto::ring::default_provider()),
             )
             .build()
-            .map_err(|err| rustls::Error::General(format!("构建证书链校验器失败：{err}")))?
+            .map_err(|err| rustls::Error::General(format!("failed to build the certificate chain verifier: {err}")))?
         } else {
             Arc::new(NoCertificateVerification)
         };
@@ -229,13 +229,13 @@ impl rustls::client::danger::ServerCertVerifier for SpkiPinVerifier {
 
         // ② 再核对公钥
         let spki = extract_spki(end_entity.as_ref()).ok_or_else(|| {
-            rustls::Error::General("读不出对端证书的公钥（SPKI），无法核对 spki-pin".to_string())
+            rustls::Error::General("cannot read the peer certificate public key (SPKI); spki-pin cannot be checked".to_string())
         })?;
 
         let hash = digest(&SHA256, &spki);
         if hash.as_ref() != self.pin {
             return Err(rustls::Error::General(format!(
-                "对端证书公钥与 spki-pin 不符（实际 pin 是 {}），已拒绝这次连接",
+                "peer certificate public key does not match spki-pin (actual pin: {}); the connection was rejected",
                 write_sha256_hex(hash.as_ref())
             )));
         }

@@ -585,11 +585,11 @@ impl std::fmt::Display for HttpsPrefer {
 /// base64 解码后**必须正好 32 字节**（SHA-256 的长度），否则这条 pin 不成立 ——
 /// 宁可在读配置时就报错，也不要"配了却当成没配"（那正是这条问题的老毛病）。
 pub fn decode_spki_pin(pin: &str) -> Result<[u8; 32], String> {
-    let raw = base64::decode(pin.trim()).map_err(|err| format!("不是合法的 base64：{err}"))?;
+    let raw = base64::decode(pin.trim()).map_err(|err| format!("not valid base64: {err}"))?;
     let len = raw.len();
 
     <[u8; 32]>::try_from(raw)
-        .map_err(|_| format!("base64 解码后是 {len} 字节，必须正好 32 字节（SHA-256 的长度）"))
+        .map_err(|_| format!("decoded base64 is {len} bytes; it must be exactly 32 bytes (SHA-256 length)"))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -975,11 +975,11 @@ mod tests {
 
         let short = base64::encode([7u8; 31]);
         let err = decode_spki_pin(&short).unwrap_err();
-        assert!(err.contains("31 字节"), "要说清解码后是多少字节：{err}");
+        assert!(err.contains("31 bytes"), "must state how many bytes were decoded: {err}");
 
         let long = base64::encode([7u8; 33]);
         let err = decode_spki_pin(&long).unwrap_err();
-        assert!(err.contains("33 字节"), "要说清解码后是多少字节：{err}");
+        assert!(err.contains("33 bytes"), "must state how many bytes were decoded: {err}");
 
         assert!(decode_spki_pin("这不是-base64!!").is_err());
         assert!(decode_spki_pin("").is_err());

@@ -83,7 +83,7 @@ async fn create(
 
         if idx.is_some() {
             // 🔐 P2：重复域名是「冲突」，回 409，不能再回 500 —— 后者会误触监控告警。
-            return Err(ApiError::Conflict(format!("域名 {} 已存在", rule.domain)));
+            return Err(ApiError::Conflict(format!("domain {} already exists", rule.domain)));
         } else {
             config.push(ConfigLine::Config {
                 config: ConfigItem::Address(rule),

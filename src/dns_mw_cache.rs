@@ -1354,14 +1354,14 @@ impl DnsCache {
             if version != CACHE_FORMAT_VERSION {
                 let archived = archive_cache_file(path, &format!("v{version}-incompatible"));
                 error!(
-                    "缓存文件 {} 的格式版本是 v{}，本程序只认 v{}：**未删除**，已改名存档为 {}；本次按冷启动继续运行",
+                    "cache file {} has format version v{}, this build only supports v{}: the file is kept and archived as {}; continuing as a cold start",
                     display_str,
                     version,
                     CACHE_FORMAT_VERSION,
                     archived
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(存档失败，原文件保留)".to_string()),
+                        .unwrap_or_else(|| "(archiving failed; the original file is kept)".to_string()),
                 );
                 return;
             }
@@ -1369,7 +1369,7 @@ impl DnsCache {
             declared = Some(entries_in_file);
             payload = &data[CACHE_HEADER_LEN..];
         } else {
-            info!("缓存文件没有文件头：按旧格式读取（本次兼容；下次落盘会补上头）");
+            info!("cache file has no header: reading it in the legacy format (supported this time; the header is written on the next flush)");
         }
 
         let (entries, stopped_at) = deserialize_best_effort(payload);
@@ -1377,17 +1377,17 @@ impl DnsCache {
         if let Some(err) = stopped_at.as_ref() {
             let archived = archive_cache_file(path, "corrupt");
             error!(
-                "缓存文件 {} 读取中断：{}（文件声明 {} 条，已挽救 {} 条）—— **未删除**，已改名存档为 {}",
+                "cache file {} read interrupted: {} (the file declares {} records, {} were recovered); the file is kept and archived as {}",
                 display_str,
                 err,
                 declared
                     .map(|c| c.to_string())
-                    .unwrap_or_else(|| "未知".to_string()),
+                    .unwrap_or_else(|| "unknown".to_string()),
                 entries.len(),
                 archived
                     .as_ref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(存档失败，原文件保留)".to_string()),
+                    .unwrap_or_else(|| "(archiving failed; the original file is kept)".to_string()),
             );
         }
 
@@ -1550,7 +1550,7 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
 
     if let Err(err) = std::fs::rename(path, &archived) {
         error!(
-            "缓存文件改名存档失败（{} → {}）：{}。原文件保留不动。",
+            "failed to archive the cache file ({} -> {}): {}; the original file is left untouched",
             path.display(),
             archived.display(),
             err
@@ -1579,7 +1579,7 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
         siblings.sort();
         for old in &siblings {
             match std::fs::remove_file(old) {
-                Ok(()) => info!("清理旧缓存存档：{}", old.display()),
+                Ok(()) => info!("removing an old cache archive: {}", old.display()),
                 Err(err) => crate::log::warn!("failed to remove an old cache archive {}: {}", old.display(), err),
             }
         }
@@ -1776,7 +1776,7 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
         //
         // ⚠️ 必须**先偷看再决定吃不吃**：条目在文件里是**背靠背**排列的，没有分隔符，
         // 上一条读完之后紧跟的就是下一条的起始字节（恒为 tag 1）。如果这里无脑 read_u8()，
-        // 读到的是下一条的 `0x01`，会被误判成"本条目里有未知 tag"→ 整份文件被判坏
+        // 读到的是下一条的 `0x01`，会被误判成"本条目里有unknown tag"→ 整份文件被判坏
         // （实测：无头旧格式文件会 0 条救回并改名存档）。
         //
         // 两种情形要分清：

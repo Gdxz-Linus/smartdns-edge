@@ -79,7 +79,7 @@ fn encode_add(setname: &str, addr: IpAddr, timeout: u64, seq: u32) -> io::Result
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "ipset 集合名太长：'{}' 有 {} 字节，内核上限是 {} 字节（含结尾），最多 {} 个字符",
+                "ipset set name too long: '{}' is {} bytes; the kernel limit is {} bytes (including the terminator), at most {} characters",
                 setname,
                 setname.as_bytes().len() + 1,
                 IPSET_MAXNAMELEN,
@@ -379,7 +379,7 @@ mod imp {
     pub fn add(_setname: &str, _addr: IpAddr, _timeout: u64) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "ipset 是 Linux 内核特性，当前平台不支持（配置已忽略）",
+            "ipset is a Linux kernel feature and is not available on this platform (the configuration was ignored)",
         ))
     }
 }
@@ -616,7 +616,7 @@ mod tests {
 
         let err = encode_add(&"a".repeat(32), addr, 0, 1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("太长"), "要说清原因：{err}");
+        assert!(err.to_string().contains("too long"), "must state the reason: {err}");
     }
 
     /// add_batch：能分开报"成了几条、第一条错是什么"
