@@ -54,7 +54,7 @@ SmartDNS Edge is a local DNS intelligent gateway rewritten in the Rust programmi
 
 *   **13. Fully Native Green Cross-Platform Deployment**
 
-    Provides native out-of-the-box support for Windows, macOS (both Intel and Apple Silicon), standard Linux servers, OpenWrt firmware, ASUS router systems, and WSL container environments with zero external dependencies.
+    Provides native out-of-the-box support for Windows, macOS (both Intel and Apple Silicon), standard Linux servers, and WSL container environments with zero external dependencies.
 
 ---
 

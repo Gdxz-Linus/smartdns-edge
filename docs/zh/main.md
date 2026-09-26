@@ -54,7 +54,7 @@ SmartDNS Edge 是使用 Rust 语言重写的本地 DNS 智能网关。它能够�
 
 *   **13. 全平台绿色部署运行**
 
-    原生满血支持 Windows、macOS (Intel/M系列)、普通 Linux 服务器、OpenWrt 固件、华硕路由器系统以及 WSL 容器环境。
+    原生满血支持 Windows、macOS (Intel/M系列)、普通 Linux 服务器以及 WSL 容器环境。
 
 ---
 

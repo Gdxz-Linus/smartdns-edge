@@ -50,7 +50,7 @@ SmartDNS Edge 支持通过本地代理客户端（如 Clash、Xray）安全地�
    nameserver /github.com/overseas
    ```
    
-## 2.3 引导 DNS (Bootstrap DNS)
+## 2.3 Bootstrap DNS
 
 当您的上游 DNS 配置为域名形式（如 https://cloudflare-dns.com/dns-query）时，程序必须先解析该域名才能建立连接。专门用于解析此类上游服务器域名的 DNS 称为 Bootstrap DNS。
 

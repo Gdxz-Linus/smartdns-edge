@@ -3,11 +3,13 @@ SmartDNS Edge 能够并发请求多个上游 DNS，并对返回的众多 IP 进�
 
 ## 3.1 测速模式 (Speed Check Mode)
 
-程序默认会使用 ping、tcp:80、tcp:443 三种方式进行综合测速。您可以根据网络环境调整全局测速模式，或者为特定域名关闭测速。
+程序默认会使用 ping、tcp:443 两种方式进行综合测速（不含 tcp:80，以减少多余探测开销）。您可以根据网络环境调整全局测速模式，或者为特定域名关闭测速。
+
+**不写 `speed-check-mode` 时（默认）= 会测速**；只有显式写 `none` 才是关闭测速。
 
    ```Shell
-   # 全局测速模式配置（默认优先 ping，超时后使用 tcp）
-   speed-check-mode ping,tcp:80,tcp:443
+   # 全局测速模式配置（默认优先 ping，超时后使用 tcp:443）
+   speed-check-mode ping,tcp:443
 
    # 仅使用 ping 测速或关闭全局测速
    speed-check-mode ping
@@ -50,6 +52,26 @@ SmartDNS Edge 能够并发请求多个上游 DNS，并对返回的众多 IP 进�
    # 只有两个 IP 的速度差大于此阈值时，才会进行优选干预。
    dualstack-ip-selection-threshold 10
    ```
+
+> ⚠️ **双栈优选的前提是开启测速**（默认开启）。如果测速被关闭，双栈优选也会随之失去作用。
+>
+> 关闭测速有两种写法，**两种都生效**：
+>
+>    ```Shell
+>    # ① 全局关闭（对所有监听生效）
+>    speed-check-mode none
+>
+>    # ② 只对某一条监听关闭（bind 级，优先级最高）
+>    bind :6053 -no-speed-check
+>    ```
+>
+> 出现"双栈优选开着、测速却关着"时，启动日志会提示：
+>
+> ```
+> dualstack ip selection: ON, but INACTIVE (`speed-check-mode none` disables speed measurement, ...)
+> ```
+>
+> 看到 `INACTIVE` 就说明优选此刻不起作用。
    
 ## 3.4 屏蔽 IPv6 与 DNS64
 

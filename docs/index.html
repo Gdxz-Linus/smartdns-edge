@@ -4,8 +4,45 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartDNS Edge - Smart DNS Gateway</title>
-    <!-- 引入 Marked.js 用于客户端 Markdown 解析 -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 🔐 问题 23：内容安全策略（CSP）。
+         对比：程序自己的管理后台早就有一整套 CSP（见 `src/api/mod.rs` 的 `SECURITY_CSP`），
+         官网作为"用户下载安装包 + 提交反馈"的入口反而没有 —— 做法应当向后台看齐。
+
+         这份策略是照着**页面实际用到的资源**逐项写的，不是照抄一个宽松模板：
+           · default-src 'none'        —— 默认什么都不许，其余按需开口（最小权限）
+           · script-src  'self' + jsDelivr —— 只放行本站脚本（app.js）与那个已固定版本+带 SRI 的 marked
+           · style-src   'self' 'unsafe-inline' —— 页面用了内联 style 块与若干内联 style 属性
+           · img-src     'self' data: + komarev.com —— 允许图标与那个访问计数请求
+           · connect-src 'self'         —— fetch 只用于本站（抓取 Markdown、提交反馈到 /feedback）
+           · base-uri 'none'、form-action 'self'、object-src 'none' —— 挡 base 劫持、表单外发与插件
+
+         ⚠️ **三点如实说明（不能假装完整）**：
+         ① `frame-ancestors` 与 `report-uri` 在 meta 形式下**按规范无效**，只在 HTTP 响应头里生效。
+            真正的防内嵌靠部署侧的响应头（已附 `docs/_headers` 供 Cloudflare Pages 使用），
+            且**需要部署后实际验证**（配置没生效时代码不会报错）。
+         ② `script-src` 里**没有** `'unsafe-inline'` —— 为此做过两件事：
+            · 把两处内联事件处理器（`onchange=` / `onclick=`）改为 `addEventListener`；
+            · 把原先内联的 ~460 行脚本抽到外部 `app.js`。
+            若日后往 HTML 里加内联 `on*=` 属性或新的内联 script 块，**它们会被 CSP 拦下**，
+            这是有意为之：请改用外部文件与事件绑定，而不是给 CSP 加 `'unsafe-inline'`。
+         ③ 本策略**实测过一次失败**：最初只改内联事件、没意识到还有内联脚本块，
+            结果整页脚本被拦、官网白屏（正文卡在 Loading、导航为空）。
+            是浏览器真机验证抓出来的 —— 静态检查完全看不出来。详见审查报告 §32。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://komarev.com; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+    <!-- 引入 Marked.js 用于客户端 Markdown 解析
+         🔐 问题 23：**必须固定版本 + 带 SRI 完整性校验**。
+         原来写的是 `npm/marked/marked.min.js`（不带版本）：
+         jsDelivr 会把"无版本"解析成**当前最新版**，也就是说——
+         该 CDN 或该包一旦被投毒/发新版，官网会在**没有任何记录**的情况下执行新代码。
+         而这里正是用户下载安装包、提交反馈（后端存着仓库令牌）的入口，风险不在"官网显示异常"，
+         而在"攻击者在下载链路上做手脚"。
+         现在锁定 15.0.7（页面只用 `marked.parse()`，是该库最稳定的 API），
+         并用 `integrity` 钉住文件内容：浏览器会在执行前校验哈希，对不上就**拒绝加载**。
+         ⚠️ 升级版本时**必须同时更新 integrity**，算法与取法见 tests/e2e/_p10_docs_links.py 的说明。 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"
+            integrity="sha384-H+hy9ULve6xfxRkWIh/YOtvDdpXgV2fmAGQkIDTxIgZwNoaoBal14Di2YTMR6MzR"
+            crossorigin="anonymous"
+            referrerpolicy="no-referrer"></script>
 	<meta name="yandex-verification" content="3d08923d49b82f5c" />
 	<link rel="canonical" href="https://smartdns-edge.pages.dev/" />
     
@@ -318,6 +355,48 @@
             font-size: 0.92rem;
         }
 
+        /* 🔐 配置项总表（5 列）：固定列宽。
+           原样式是 `display:block` + `width:max-content` —— 列宽由**内容最长的行**
+           决定（`server` 那行的参数列表极长），于是其余行里"功能说明"被挤成窄条、
+           "可用值/要求"大片留白，整张表各行的视觉宽度参差不齐。
+
+           ⚠️ 这里必须同时改回 `display: table`：`table-layout: fixed` **只对表格盒生效**，
+           在 `display: block` 下会被忽略。代价是这张表不再横向滚动，而是靠折行适配窄屏
+           （其内容本来就用 `<br />` 分行，折行无副作用）。 */
+        .markdown-body table:has(th:nth-child(5)) {
+            display: table;
+            width: 100%;
+            table-layout: fixed;
+        }
+
+        .markdown-body table:has(th:nth-child(5)) th:nth-child(1) { width: 12%; } /* 键名 */
+        .markdown-body table:has(th:nth-child(5)) th:nth-child(2) { width: 27%; } /* 功能说明 */
+        .markdown-body table:has(th:nth-child(5)) th:nth-child(3) { width: 8%; }  /* 默认值 */
+        .markdown-body table:has(th:nth-child(5)) th:nth-child(4) { width: 38%; } /* 可用值/要求 */
+        .markdown-body table:has(th:nth-child(5)) th:nth-child(5) { width: 15%; } /* 举例 */
+
+        /* 固定列宽后，超长 token（如整条 openssl 命令）必须能折行，否则会溢出格子 */
+        .markdown-body table:has(th:nth-child(5)) td,
+        .markdown-body table:has(th:nth-child(5)) th {
+            overflow-wrap: anywhere;
+        }
+
+        /* 窄屏：5 列表格在手机上按比例压缩后会过窄，改为允许横向滚动 */
+        @media (max-width: 850px) {
+            .markdown-body table:has(th:nth-child(5)) {
+                display: block;
+                width: max-content;
+                min-width: 100%;
+                table-layout: auto;
+            }
+
+            .markdown-body table:has(th:nth-child(5)) th:nth-child(1) { width: 130px; }
+            .markdown-body table:has(th:nth-child(5)) th:nth-child(2) { width: 300px; }
+            .markdown-body table:has(th:nth-child(5)) th:nth-child(3) { width: 90px; }
+            .markdown-body table:has(th:nth-child(5)) th:nth-child(4) { width: 420px; }
+            .markdown-body table:has(th:nth-child(5)) th:nth-child(5) { width: 170px; }
+        }
+
         .markdown-body th, .markdown-body td {
             padding: 10px 14px;
             border: 1px solid var(--border-color);
@@ -490,11 +569,11 @@
             <div class="logo" id="header-logo">🐋 SmartDNS Edge</div>
             <nav class="main-nav" id="main-nav"></nav>
             <div class="header-actions">
-                <select id="lang-select" onchange="changeLang(this.value)">
+                <select id="lang-select">
                     <option value="zh">简体中文</option>
                     <option value="en">English</option>
                 </select>
-                <button class="btn-toggle" id="theme-toggle" onclick="toggleTheme()" aria-label="Toggle Theme">🌙</button>
+                <button class="btn-toggle" id="theme-toggle" aria-label="Toggle Theme">🌙</button>
             </div>
         </div>
     </header>
@@ -517,433 +596,24 @@
     <!-- 页脚区域 -->
     <footer class="site-footer">
         <div class="footer-container">
-            <p>Copyright © 2026 Gdxz.Linus. Open sourced under GPL-3.0-only. Hosted on <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank">GitHub</a>.</p>
+            <p>Copyright © 2026 Gdxz.Linus. Open sourced under GPL-3.0-only. Hosted on <a href="https://github.com/Gdxz-Linus/smartdns-edge" target="_blank" rel="noopener noreferrer">GitHub</a>.</p>
+            <!-- 🔐 问题 23：第三方统计的隐私说明（文案由 JS 按当前语言填充，见 renderFooterPrivacy）。
+                 本页会向第三方服务（komarev.com）发一个访问计数请求，
+                 该请求会把访客的 IP、浏览器标识（User-Agent）与来源页暴露给对方。
+                 此前页面上**没有任何说明** —— 用户无从得知这件事。
+                 这里如实告知，并说明它不影响功能、以及如何自行拦截。 -->
+            <p class="footer-privacy" id="footer-privacy"
+               style="font-size: 0.82rem; color: var(--text-secondary); margin-top: 6px; line-height: 1.5;"></p>
         </div>
     </footer>
 
-    <!-- 10. 交互逻辑 JavaScript -->
-    <script>
-        // 安全数据存储容器（防 file:// 本地打开时浏览器安全策略报错）
-        const safeStorage = {
-            getItem(key) {
-                try {
-                    return localStorage.getItem(key);
-                } catch (e) {
-                    return this[key] || null;
-                }
-            },
-            setItem(key, value) {
-                try {
-                    localStorage.setItem(key, value);
-                } catch (e) {
-                    this[key] = value;
-                }
-            }
-        };
 
-        // A. 5个主菜单的配置及其对应的 md 文件路径（相对于 docs 根路径，直接采用 `zh/` 或 `en/`）
-        const menuConfig = {
-            home: {
-                zh: { label: '主页', file: './zh/main.md' },
-                en: { label: 'Home', file: './en/main.md' }
-            },
-            install: {
-                zh: { label: '安装与运行', file: './zh/install&run.md' },
-                en: { label: 'Install & Run', file: './en/install&run.md' }
-            },
-            download: {
-                zh: { label: '下载', file: './zh/download.md' },
-                en: { label: 'Download', file: './en/download.md' }
-            },
-            config: {
-                zh: { label: '配置指导', file: null },
-                en: { label: 'Config Guide', file: null }
-            },
-            options: {
-                zh: { label: '配置选项说明', file: './zh/configuration.md' },
-                en: { label: 'Config Options', file: './en/configuration.md' }
-            },
-            feedback: {
-                zh: { label: '问题反馈', file: './zh/feedback.md' },
-                en: { label: 'Feedback', file: './en/feedback.md' }
-            }
-        };
-
-        // B. “配置指导”对应的 8 个子模块配置文件信息
-        const configModules = [
-            {
-                id: '1-basic-service.md',
-                zh: { label: '1. 基础服务与监听配置', file: './zh/config/1-basic-service.md' },
-                en: { label: '1. Basic Service', file: './en/config/1-basic-service.md' }
-            },
-            {
-                id: '2-upstream-and-proxy.md',
-                zh: { label: '2. 上游 DNS 与代理通道', file: './zh/config/2-upstream-and-proxy.md' },
-                en: { label: '2. Upstream & Proxy', file: './en/config/2-upstream-and-proxy.md' }
-            },
-            {
-                id: '3-speed-check.md',
-                zh: { label: '3. 解析测速与 IP 优选', file: './zh/config/3-speed-check.md' },
-                en: { label: '3. Speed Check', file: './en/config/3-speed-check.md' }
-            },
-            {
-                id: '4-dns-cache.md',
-                zh: { label: '4. 高性能 DNS 缓存机制', file: './zh/config/4-dns-cache.md' },
-                en: { label: '4. DNS Cache', file: './en/config/4-dns-cache.md' }
-            },
-            {
-                id: '5-domain-control.md',
-                zh: { label: '5. 域名控制与广告拦截', file: './zh/config/5-domain-control.md' },
-                en: { label: '5. Domain Control', file: './en/config/5-domain-control.md' }
-            },
-            {
-                id: '6-ip-control.md',
-                zh: { label: '6. IP 控制与 CDN 加速', file: './zh/config/6-ip-control.md' },
-                en: { label: '6. IP Control', file: './en/config/6-ip-control.md' }
-            },
-            {
-                id: '7-split-routing.md',
-                zh: { label: '7. 智能分流与客户端控制', file: './zh/config/7-split-routing.md' },
-                en: { label: '7. Split Routing', file: './en/config/7-split-routing.md' }
-            },
-            {
-                id: '8-firewall-integration.md',
-                zh: { label: '8. 高级防火墙联动', file: './zh/config/8-firewall-integration.md' },
-                en: { label: '8. Firewall Integration', file: './en/config/8-firewall-integration.md' }
-            }
-        ];
-
-        // 默认状态变量
-        let currentLang = 'zh';
-        let activeMenu = 'home';
-        let activeSubConfig = '1-basic-service.md';
-
-        // 获取当前语言状态
-        function getLang() {
-            return safeStorage.getItem('lang') || (navigator.language.startsWith('zh') ? 'zh' : 'en');
-        }
-
-        // 1. 初始化主题设置
-        function initTheme() {
-            const savedTheme = safeStorage.getItem('theme');
-            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            if (savedTheme === 'dark' || (!savedTheme && systemPrefersDark)) {
-                document.documentElement.classList.add('dark');
-                document.getElementById('theme-toggle').textContent = '☀️';
-            } else {
-                document.documentElement.classList.remove('dark');
-                document.getElementById('theme-toggle').textContent = '🌙';
-            }
-        }
-
-        // 手动开灯/关灯切换
-        function toggleTheme() {
-            const isDark = document.documentElement.classList.toggle('dark');
-            safeStorage.setItem('theme', isDark ? 'dark' : 'light');
-            document.getElementById('theme-toggle').textContent = isDark ? '☀️' : '🌙';
-        }
-
-        // 2. 路由逻辑解析器 (Hash-based Router)
-        function handleHashRoute() {
-            const hash = window.location.hash;
-            let lang = getLang();
-            let menu = 'home';
-            let subFile = '1-basic-service.md';
-
-            if (hash && hash.startsWith('#/')) {
-                const parts = hash.slice(2).split('/');
-                if (parts[0] === 'zh' || parts[0] === 'en') {
-                    lang = parts[0];
-                }
-                if (menuConfig[parts[1]]) {
-                    menu = parts[1];
-                }
-                if (parts[2]) {
-                    subFile = parts[2];
-                }
-            }
-
-            currentLang = lang;
-            activeMenu = menu;
-            activeSubConfig = subFile;
-
-            // 同步下拉框状态
-            safeStorage.setItem('lang', currentLang);
-            document.getElementById('lang-select').value = currentLang;
-
-            renderTopNav();
-            renderSidebar();
-            loadMarkdown();
-        }
-
-        // 3. 渲染主导航菜单
-        function renderTopNav() {
-            const nav = document.getElementById('main-nav');
-            nav.innerHTML = '';
-            Object.keys(menuConfig).forEach(key => {
-                const item = menuConfig[key];
-                const btn = document.createElement('button');
-                btn.className = 'nav-item' + (key === activeMenu ? ' active' : '');
-                // 改为读取当前语言对象下的 label
-                btn.textContent = item[currentLang].label;
-                btn.addEventListener('click', () => switchMenu(key));
-                nav.appendChild(btn);
-            });
-        }
-
-        // 4. 渲染或隐藏配置侧边栏（单/双栏切换）
-        function renderSidebar() {
-            const menu = document.getElementById('sidebar-menu');
-            const container = document.getElementById('layout-container');
-
-            if (activeMenu === 'config') {
-                container.classList.remove('no-sidebar');
-                menu.innerHTML = '';
-                configModules.forEach(mod => {
-                    const li = document.createElement('li');
-                    // 使用唯一标识 id 进行激活项匹配
-                    li.className = 'sidebar-item' + (mod.id === activeSubConfig ? ' active' : '');
-                    // 改为读取当前语言对象下的 label
-                    li.textContent = mod[currentLang].label;
-                    li.addEventListener('click', () => switchSubConfig(mod.id));
-                    menu.appendChild(li);
-                });
-            } else {
-                container.classList.add('no-sidebar');
-            }
-        }
-
-        // 5. 动态 Fetch 对应 Markdown 文件并渲染
-        // 5. 动态 Fetch 对应 Markdown 文件并渲染（含表单自动注入与提交控制）
-        async function loadMarkdown() {
-            const contentArea = document.getElementById('markdown-content');
-            contentArea.innerHTML = '<div class="loading">Loading...</div>';
-
-            let url = '';
-            if (activeMenu === 'config') {
-                const activeMod = configModules.find(mod => mod.id === activeSubConfig);
-                if (activeMod && activeMod[currentLang]) {
-                    url = activeMod[currentLang].file;
-                } else {
-                    url = `./${currentLang}/config/${activeSubConfig}`;
-                }
-            } else {
-                url = menuConfig[activeMenu][currentLang].file;
-            }
-
-            try {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error(`File not found: ${url} (HTTP ${response.status})`);
-                }
-                const markdownText = await response.text();
-                contentArea.innerHTML = marked.parse(markdownText);
-
-                // 🌟 核心新增：检测页面是否含有反馈表单占位符，若有则自动注入表单并绑定逻辑
-                injectFeedbackFormIfNeeded();
-				
-				// 🌟 核心新增：动态绑定防复制隐蔽下载事件
-                bindSecureDownloadEvents();
-
-            } catch (err) {
-                let browserSecurityHelp = '';
-                if (window.location.protocol === 'file:') {
-                    browserSecurityHelp = `
-                        <p style="margin-top:12px; color:#cf222e; font-weight:bold;">
-                            ⚠️ 检测到您目前是通过双击本地 HTML 文件 (file:// 协议) 打开的。
-                        </p>
-                        <p style="font-size:0.92rem; margin-top:4px;">
-                            由于浏览器的安全机制 (CORS)，直接在本地双击加载子文档会被浏览器拒绝，导致一直处于 Loading。
-                        </p>
-                        <p style="font-size:0.92rem; margin-top:4px; font-weight:bold;">
-                            解决方法：请使用本地静态网页服务器打开本页面。当您将该项目部署至 GitHub Pages 时，此问题会自动消失。
-                        </p>
-                    `;
-                }
-                contentArea.innerHTML = `
-                    <div class="error-msg">
-                        <h3>加载失败 (Load Error)</h3>
-                        <p>无法获取目标文档，请检查路径是否正确或稍后重试。</p>
-                        <p style="font-size:0.85em; margin-top:8px; font-family:monospace; background:rgba(0,0,0,0.04); padding:4px 8px; border-radius:4px;">${err.message}</p>
-                        ${browserSecurityHelp}
-                    </div>`;
-            }
-        }
-
-        // 🌟 核心新增：反馈表单注入与安全提交控制器
-        function injectFeedbackFormIfNeeded() {
-            const placeholder = document.getElementById("feedback-form-placeholder");
-            if (!placeholder) return; // 没有占位符，说明不是反馈页面，直接退出
-
-            const label_type = currentLang === 'zh' ? '反馈类型' : 'Feedback Type';
-            const opt_bug = currentLang === 'zh' ? '🐛 Bug 反馈' : '🐛 Bug Report';
-            const opt_enh = currentLang === 'zh' ? '💡 功能建议' : '💡 Enhancement';
-            const opt_que = currentLang === 'zh' ? '💬 使用咨询' : '💬 Question';
-			const label_title = currentLang === 'zh' ? '简短标题' : 'Title';
-			const label_contact = currentLang === 'zh' ? '您的电子邮箱（选填，方便回复您）' : 'Your Email (Optional)';
-            const label_desc = currentLang === 'zh' ? '详细问题描述（建议附带简要日志或配置，请勿包含私密密钥）' : 'Description';
-			const tip_markdown = currentLang === 'zh' ? '💡 提示：本输入框支持 Markdown 语法。如需插入图片，可将其上传至任意免费图床（如 SM.MS 或路过图床），然后使用 `![描述](图片链接)` 格式粘贴到正文中即可。' : '💡 Tip: Markdown supported. To insert images, upload to an image host and use `![desc](image_url)` syntax.';
-            const btn_submit = currentLang === 'zh' ? '提交反馈' : 'Submit';
-            const msg_empty = currentLang === 'zh' ? '请填写标题与描述！' : 'Please fill in both title and description.';
-            const msg_sending = currentLang === 'zh' ? '正在努力向 GitHub 传送中，请稍候...' : 'Submitting to GitHub, please wait...';
-            const msg_err = currentLang === 'zh' ? '反馈发送失败' : 'Submission failed';
-
-            // 动态构建高度美观、完美契合亮/暗主题的 HTML 表单
-            placeholder.innerHTML = `
-                <div style="background-color: var(--bg-secondary); border: 1px solid var(--border-color); padding: 24px; border-radius: 8px; margin-top: 24px; box-shadow: var(--shadow);">
-                    <form id="raw-feedback-form">
-                    <div style="margin-bottom: 16px;">
-                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_type}</label>
-                        <select id="fb-type" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;">
-                            <option value="Bug">${opt_bug}</option>
-                            <option value="Enhancement">${opt_enh}</option>
-                            <option value="Question">${opt_que}</option>
-                        </select>
-                    </div>
-					<div style="margin-bottom: 16px;">
-                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_title}</label>
-                        <input type="text" id="fb-title" placeholder="e.g. Windows下服务无法正常自启" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" required />
-                    </div>
-                    <div style="margin-bottom: 16px;">
-                        <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_contact}</label>
-                        <input type="text" id="fb-contact" placeholder="e.g. email@example.com" style="width: 100%; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem;" />
-                    </div>
-                    <div style="margin-bottom: 20px;">
-                            <label style="display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;">${label_desc}</label>
-                            <textarea id="fb-desc" rows="16" placeholder="e.g. 1. 运行环境\n2. 具体复现步骤\n3. 终端报错日志" style="width: 100%; height: 320px; overflow-y: auto; padding: 10px; background-color: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; outline: none; font-size: 0.95rem; font-family: monospace; resize: vertical;" required></textarea>
-                            <small style="display: block; margin-top: 6px; color: var(--text-secondary); font-size: 0.85rem; line-height: 1.4;">${tip_markdown}</small>
-                        </div>
-                        <div id="fb-status-msg" style="margin-bottom: 16px; font-size: 0.95rem; font-weight: 500;"></div>
-                        <button type="submit" id="fb-submit-btn" style="background-color: var(--accent-color); color: #ffffff; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: background-color 0.2s;">${btn_submit}</button>
-                    </form>
-                </div>
-            `;
-
-            // 监听表单安全提交
-            const form = document.getElementById("raw-feedback-form");
-            form.addEventListener("submit", async (e) => {
-                e.preventDefault();
-
-                const type = document.getElementById("fb-type").value;
-                const title = document.getElementById("fb-title").value.trim();
-                const contact = document.getElementById("fb-contact").value.trim(); 
-                const description = document.getElementById("fb-desc").value.trim();
-                const statusMsg = document.getElementById("fb-status-msg");
-                const submitBtn = document.getElementById("fb-submit-btn");
-
-                if (!title || !description) {
-                    statusMsg.innerHTML = `<span style="color: #cf222e;">⚠️ ${msg_empty}</span>`;
-                    return;
-                }
-
-                // 准备锁死按钮，防止用户重复疯狂点击
-                submitBtn.disabled = true;
-                submitBtn.style.opacity = "0.6";
-                statusMsg.innerHTML = `<span style="color: var(--text-secondary);">${msg_sending}</span>`;
-
-                // 🌟 获取当前访问域名并自动拼接 API。
-                const apiUrl = `${window.location.protocol}//${window.location.host}/feedback`;
-
-                try {
-                    const response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ type, title, description, contact }),
-                    });
-
-                    const resData = await response.json();
-
-                    if (response.ok && resData.success) {
-                        statusMsg.innerHTML = `
-                            <span style="color: #1a7f37; font-weight: bold; display: block; margin-bottom: 8px;">
-                                💚 ${currentLang === 'zh' ? '反馈提交成功！' : 'Submitted successfully!'}
-                            </span>
-                            <span style="font-size: 0.92rem; color: var(--text-primary);">
-                                ${currentLang === 'zh' ? '已在 GitHub 自动为您生成 Issue 编号' : 'GitHub Issue created'}: 
-                                <a href="${resData.issue_url}" target="_blank" style="font-weight: bold; text-decoration: underline; color: var(--accent-color);">
-                                    #${resData.issue_number} (点击前往查看)
-                                </a>
-                            </span>
-                        `;
-                        // 清空表单输入框，并让提交按钮隐退
-                        document.getElementById("fb-title").value = "";
-                        document.getElementById("fb-contact").value = "";
-                        document.getElementById("fb-desc").value = "";
-                        submitBtn.style.display = "none";
-                    } else {
-                        throw new Error(resData.error || "未知服务器异常");
-                    }
-                } catch (err) {
-                    statusMsg.innerHTML = `<span style="color: #cf222e;">❌ ${msg_err}: ${err.message}</span>`;
-                    submitBtn.disabled = false;
-                    submitBtn.style.opacity = "1";
-                }
-            });
-        }
-
-        // 6. 交互路由跳转控制
-        function switchMenu(key) {
-            if (key === 'config') {
-                window.location.hash = `#/${currentLang}/config/${activeSubConfig}`;
-            } else {
-                window.location.hash = `#/${currentLang}/${key}`;
-            }
-        }
-
-        function switchSubConfig(file) {
-            window.location.hash = `#/${currentLang}/config/${file}`;
-        }
-
-        function changeLang(newLang) {
-            safeStorage.setItem('lang', newLang);
-            if (activeMenu === 'config') {
-                window.location.hash = `#/${newLang}/config/${activeSubConfig}`;
-            } else {
-                window.location.hash = `#/${newLang}/${activeMenu}`;
-            }
-        }
-
-        // 🌟 核心新增：无链接隐蔽下载与右键拦截控制器
-        function bindSecureDownloadEvents() {
-            const dlLinks = document.querySelectorAll('.dl-link');
-            dlLinks.forEach(link => {
-                // 1. 拦截右键点击：当用户右键点击“点击下载”时，直接吞掉菜单，无法弹出“复制链接地址” [3]
-                link.addEventListener('contextmenu', e => e.preventDefault());
-                
-                // 2. 监听左键点击：采用无感路由隐蔽跳转下载
-                link.addEventListener('click', () => {
-                    const fileKey = link.getAttribute('data-file');
-                    if (fileKey) {
-                        // 动态隐蔽启动下载流，对外绝对不暴露任何真实的绝对 URL 属性 [2]
-                        window.location.href = `./download/${fileKey}`;
-                    }
-                });
-            });
-        }
-		
-		// 7. 脚本初始化执行入口
-        document.addEventListener('DOMContentLoaded', () => {
-            initTheme();
-			
-			// 🌟 核心新增：自动触发 GitHub 访问计数器（通过后台静默加载图片）
-            new Image().src = "https://komarev.com/ghpvc/?username=Gdxz-Linus&repo=smartdns-edge&color=0969da&t=" + Date.now();
-            
-            // 绑定 Logo 的点击跳转
-            document.getElementById('header-logo').addEventListener('click', () => {
-                window.location.hash = `#/${getLang()}/home`;
-            });
-
-            // 如果首次进入页面且无 Hash 路由，跳转至默认 Hash
-            if (!window.location.hash) {
-                window.location.hash = `#/${getLang()}/home`;
-            }
-
-            // 监听 Hash 变化
-            window.addEventListener('hashchange', handleHashRoute);
-            handleHashRoute();
-        });
-    </script>
+    <!-- 10. 交互逻辑 JavaScript
+         问题 23：原先这里是内联的 script 块（约 460 行），现已抽到 app.js。
+         原因：CSP 的 script-src 若要放行内联脚本就得维护一个 hash（改一个字即失效，
+         而失效的表现是整页脚本被拦、官网白屏，静态检查看不出来）。
+         抽成外部文件后 script-src self 即可，没有需要同步维护的哈希。
+         注意：不要改回内联 —— 内联会被 CSP 拦下。 -->
+    <script src="./app.js"></script>
 </body>
 </html>

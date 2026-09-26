@@ -8,23 +8,23 @@ SmartDNS Edge 提供极度灵活的域名管理能力，您可以轻松实现域
 
    1. 指定域名到单个或多个 IP（多 IP 时会随机排序返回）：
 
-    ```shell
-    address /example.com/1.2.3.4
-    address /example.com/1.2.3.4,5.6.7.8
-    ```
+```shell
+address /example.com/1.2.3.4
+address /example.com/1.2.3.4,5.6.7.8
+```
 
    2. 配置 CNAME 别名映射：
 
-    ```shell
-    cname /www.example.com/cdn.example.com
-    ```
+```shell
+cname /www.example.com/cdn.example.com
+```
 
    3. 支持前缀通配与主域名精确匹配：
 
-    ```shell
-    address /*-a.example.com/1.2.3.4  # 通配前缀
-    address /-.example.com/1.2.3.4   # 仅匹配主域名，不包含子域名
-    ```
+```shell
+address /*-a.example.com/1.2.3.4  # 通配前缀
+address /-.example.com/1.2.3.4   # 仅匹配主域名，不包含子域名
+```
 
 ## 5.2 域名规则与高级控制 (Domain Rules)
 
@@ -32,9 +32,9 @@ SmartDNS Edge 提供极度灵活的域名管理能力，您可以轻松实现域
 
 统一设置某域名的专属上游、测速模式与缓存控制：
 
-    ```shell
-    domain-rules /example.com/ -nameserver overseas -speed-check-mode none -no-cache
-    ```
+```shell
+domain-rules /example.com/ -nameserver overseas -speed-check-mode none -no-cache
+```
 
 ## 5.3 广告拦截实战 (Ad Blocking)
 
@@ -42,16 +42,16 @@ SmartDNS Edge 提供极度灵活的域名管理能力，您可以轻松实现域
 
    拦截特定域名的所有请求，或仅拦截其 IPv6 解析：
 
-    ```shell
-    # 屏蔽特定域名的所有解析 (直接返回 SOA)
-    address /ad.example.com/#
+```shell
+# 屏蔽特定域名的所有解析 (直接返回 SOA)
+address /ad.example.com/#
 
-    # 仅屏蔽该域名的 IPv6 解析
-    address /ad.example.com/#6
+# 仅屏蔽该域名的 IPv6 解析
+address /ad.example.com/#6
 
-    # 忽略拦截（为被误杀的特定子域名添加例外放行）
-    address /pass.ad.example.com/-
-    ```
+# 忽略拦截（为被误杀的特定子域名添加例外放行）
+address /pass.ad.example.com/-
+```
 
 ## 5.4 域名集合与远程规则下载 (Domain Set & Proxy)
 
@@ -59,13 +59,13 @@ SmartDNS Edge 提供极度灵活的域名管理能力，您可以轻松实现域
 
    **SmartDNS Edge 专属绝杀**：原生支持通过 `-proxy` 参数，使用本地代理隧道穿透网络墙，去 GitHub 等远端极速下载、更新十几万行的 Anti-AD 等去广告规则集！
 
-    ```shell
-    # 声明本地 SOCKS5 代理客户端
-    proxy-server socks5://127.0.0.1:1080 -name clash
+```shell
+# 声明本地 SOCKS5 代理客户端
+proxy-server socks5://127.0.0.1:1080 -name clash
 
-    # 创建名为 ad-list 的域名集，并强制通过代理去远端下载实时更新的屏蔽规则
-    domain-set -name ad-list -type list -file https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
+# 创建名为 ad-list 的域名集，并强制通过代理去远端下载实时更新的屏蔽规则
+domain-set -name ad-list -type list -file https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
 
-    # 将该集合中的所有十万级域名，一键应用到广告拦截规则中
-    address /domain-set:ad-list/#
-    ```
+# 将该集合中的所有十万级域名，一键应用到广告拦截规则中
+address /domain-set:ad-list/#
+```

@@ -2,7 +2,7 @@
 
 SmartDNS Edge provides high-performance, native executables across all major platforms. For standard Windows, Linux, and macOS systems, we highly recommend downloading the latest releases directly from this project.
 
-For soft-router systems like OpenWrt that require graphical web interfaces (such as LuCI), you may refer to the router-specific packages provided by the original C-version ecosystem.
+For soft-router systems like OpenWrt that require graphical web interfaces (such as LuCI), **SmartDNS Edge does not provide support**; please refer to the router-specific packages provided by the original C-version ecosystem.
 
 ## 1. Official SmartDNS Edge Releases (Recommended)
 
@@ -24,8 +24,11 @@ Native multi-architecture image (amd64 / arm64), which can be pulled directly vi
 docker pull ghcr.io/gdxz-linus/smartdns-edge:latest
 ```
 
-##  2. Soft-Router & Embedded Ecosystem (Complementary)
-Since SmartDNS Edge currently targets a cross-platform, enterprise-grade core gateway, if you require the native luci-app web GUI on router firmwares like OpenWrt or DD-WRT, you can continue to use the original C-version package manager provided by pymumu for installation:
+##  2. Soft-Router & Embedded Ecosystem (NOT Supported by This Project)
+
+**OpenWrt, DD-WRT and similar router firmwares are NOT supported platforms for SmartDNS Edge.** This project targets cross-platform, enterprise-grade core gateways (Windows / Linux / macOS / Docker) and does not provide integration for soft-router micro-environments. If you need this on router firmware, please use the original C-version SmartDNS maintained by pymumu.
+
+The table below lists installation methods for the **original C-version SmartDNS ecosystem** on router firmware. It is **not** a statement of support for SmartDNS Edge; using this Rust implementation on those platforms is unsupported and will not be adapted (for example, service installation on OpenWrt is explicitly refused).
 
 | System / Environment | Installation Method & Details |
 | :--- | :--- |

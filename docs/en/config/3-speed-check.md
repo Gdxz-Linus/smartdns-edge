@@ -2,11 +2,13 @@
 SmartDNS Edge can concurrently query multiple upstream DNS servers and perform real-network speed tests on the returned IPs, ensuring clients always connect to the server with the lowest physical latency.
 
 ## 3.1 Speed Check Mode
-By default, the program uses ping, tcp:80, and tcp:443 for comprehensive speed testing. You can adjust the global speed check mode based on your network environment, or disable it for specific domains.
-Global speed check mode (defaults to ping, falls back to tcp on timeout)
+By default, the program uses ping and tcp:443 for comprehensive speed testing (tcp:80 is not included, to reduce redundant probing). You can adjust the global speed check mode based on your network environment, or disable it for specific domains.
+
+**Leaving `speed-check-mode` unset (the default) means speed checking IS enabled**; only an explicit `none` disables it.
+Global speed check mode (defaults to ping, falls back to tcp:443 on timeout)
 
 Shell
-speed-check-mode ping,tcp:80,tcp:443
+speed-check-mode ping,tcp:443
 Only use ping for speed checking or disable global speed checking
 
 Shell
@@ -50,6 +52,26 @@ Intervention only occurs if the speed difference between the two IPs is greater 
 
 Shell
 dualstack-ip-selection-threshold 10
+
+> ⚠️ **Dual-stack selection requires speed checking to be on** (it is on by default).
+> If speed checking is turned off, dual-stack selection stops taking effect as well.
+>
+> There are two ways to turn speed checking off, and **both take effect**:
+>
+> Shell
+> # ① Globally (applies to every listener)
+> speed-check-mode none
+>
+> # ② For one listener only (bind level, highest priority)
+> bind :6053 -no-speed-check
+>
+> When dual-stack selection is on but speed checking is off, the startup log says:
+>
+> ```
+> dualstack ip selection: ON, but INACTIVE (`speed-check-mode none` disables speed measurement, ...)
+> ```
+>
+> Seeing `INACTIVE` means the selection is not doing anything right now.
 
 ## 3.4 Blocking IPv6 & DNS64
 If your network lacks native IPv6, or if specific domains suffer from severe IPv6 lag, you can force block IPv6 resolution by returning empty SOA records.

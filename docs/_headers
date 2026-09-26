@@ -1,0 +1,32 @@
+# Cloudflare Pages 响应头配置
+#
+# ## 为什么需要这个文件（问题 23）
+#
+# 页面里的 `<meta http-equiv="Content-Security-Policy">` 能覆盖大部分指令，
+# 但按 CSP 规范，**有两条在 meta 形式下是无效的、只在真正的 HTTP 响应头里生效**：
+#   · `frame-ancestors` —— 防点击劫持（禁止本站被别的站点用 iframe 内嵌）
+#   · `report-uri` / `report-to` —— 违规上报
+# 所以这里再用响应头补一份完整的 CSP。
+#
+# ## 部署方式
+#
+# Cloudflare Pages 会读取输出目录根部的 `_headers` 文件（本仓库的输出目录是 `docs/`，
+# 即 Pages 构建设置里的 "Build output directory"），按路径匹配并追加响应头。
+# ⚠️ **请在部署后实际验证**（`curl -I https://<站点>/` 应能在响应头里看到 content-security-policy）；
+#    配置没生效时代码不会报错，只会"看起来设置了、实际没有"。
+#
+# ## 安全响应头（与管理后台对齐，见 src/api/mod.rs 的 with_security_headers）
+#
+# 后台早就有这几项，官网此前一项都没有 —— 这里补齐。
+
+/*
+  # 🔐 与页面 meta 保持一致，另加上 meta 做不到的 frame-ancestors
+  Content-Security-Policy: default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://komarev.com; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'
+  # 禁止浏览器凭内容猜测类型（防"把上传的文本当脚本执行"这类问题）
+  X-Content-Type-Options: nosniff
+  # 双保险：老浏览器不认 CSP 的 frame-ancestors，用这个头兜住点击劫持
+  X-Frame-Options: DENY
+  # 跨站跳转时不泄露完整来源地址（含路径与查询串）
+  Referrer-Policy: no-referrer
+  # 不申请任何用不到的浏览器权限（定位/摄像头/麦克风等）
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()

@@ -8,23 +8,23 @@ When a website does not exist, some unscrupulous ISPs will return a specific IP 
 
    1. Set bogus IP filters and ignore specific dirty IPs:
 
-    ```shell
-    Treat the ISP's hijacked ad IP subnet as bogus
-    bogus-nxdomain 1.2.3.4/24
+```shell
+Treat the ISP's hijacked ad IP subnet as bogus
+bogus-nxdomain 1.2.3.4/24
 
-    Directly drop/ignore a specific dirty IP returned by the upstream
-    ignore-ip 4.5.6.7
-    ```
+Directly drop/ignore a specific dirty IP returned by the upstream
+ignore-ip 4.5.6.7
+```
 
    2. Apply strict pass or drop policies to upstream results using blacklists and whitelists:
 
-    ```shell
-    Blacklist: If the returned IP is in this range, immediately discard the result
-    blacklist-ip 192.168.1.0/24
+```shell
+Blacklist: If the returned IP is in this range, immediately discard the result
+blacklist-ip 192.168.1.0/24
 
-    Whitelist: Only accept IPs within this specified range; discard all others
-    whitelist-ip 10.0.0.0/8
-    ```
+Whitelist: Only accept IPs within this specified range; discard all others
+whitelist-ip 10.0.0.0/8
+```
 
 ## 6.2 IP Aliasing & CDN Acceleration
 
@@ -32,11 +32,11 @@ CDN providers like Cloudflare use Anycast routing. You can use speed-testing too
 
    Force map broad CDN subnets to your tested fastest node IP:
 
-    ```shell
-    Map two large Cloudflare subnets entirely to your fastest tested node (e.g., 104.16.0.1)
-    ip-alias 104.16.0.0/13 104.16.0.1
-    ip-alias 172.64.0.0/13 104.16.0.1
-    ```
+```shell
+Map two large Cloudflare subnets entirely to your fastest tested node (e.g., 104.16.0.1)
+ip-alias 104.16.0.0/13 104.16.0.1
+ip-alias 172.64.0.0/13 104.16.0.1
+```
 
 ## 6.3 IP Sets & Remote Rule Downloading
 
@@ -44,13 +44,13 @@ Similar to domain sets, for massive domestic/overseas IP routing tables (like ch
 
    Download and apply large-scale IP rules using a proxy tunnel:
 
-    ```shell
-    # Create an IP set and force it to fetch the remote IP list via the local 'clash' proxy
-    ip-set -name cn-ip -type list -file https://example.com/china_ip_list.txt -proxy clash
+```shell
+# Create an IP set and force it to fetch the remote IP list via the local 'clash' proxy
+ip-set -name cn-ip -type list -file https://example.com/china_ip_list.txt -proxy clash
 
-    # Apply the set to a rule (e.g., whitelist these IPs for direct connection)
-    ip-rules ip-set:cn-ip -whitelist-ip
-    ```
+# Apply the set to a rule (e.g., whitelist these IPs for direct connection)
+ip-rules ip-set:cn-ip -whitelist-ip
+```
 
 ## 6.4 EDNS Client Subnet (ECS)
 
@@ -58,10 +58,10 @@ EDNS Client Subnet allows SmartDNS Edge to carry your specified subnet IP info w
 
    Configure the client subnet globally, or specifically for an upstream server:
 
-    ```shell
-    # Set ECS globally (exposing a broad subnet, like /24, to get the most accurate CDN resolution)
-    edns-client-subnet 1.2.3.4/24
+```shell
+# Set ECS globally (exposing a broad subnet, like /24, to get the most accurate CDN resolution)
+edns-client-subnet 1.2.3.4/24
 
-    # Send specific local subnet info only to a specific upstream via proxy, correcting CDN dispatch deviations
-    server 8.8.8.8 -proxy clash -subnet 1.2.3.4/24
-    ```
+# Send specific local subnet info only to a specific upstream via proxy, correcting CDN dispatch deviations
+server 8.8.8.8 -proxy clash -subnet 1.2.3.4/24
+```
