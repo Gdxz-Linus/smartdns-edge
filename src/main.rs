@@ -24,6 +24,7 @@ mod dns_mw_cname;
 mod dns_mw_dns64;
 mod dns_mw_dnsmasq;
 mod dns_mw_dualstack;
+mod dns_mw_force_no_cname;
 mod dns_mw_hosts;
 // 这个模块本身**所有平台都编译**：写内核集合的那半边按平台/特性门控，
 // 而"从应答算过期时间"这类纯计算要能在本机（Windows）单测。
@@ -50,6 +51,7 @@ mod server;
 #[cfg(feature = "service")]
 mod service;
 mod third_ext;
+mod trusted_proxy;
 mod zone;
 
 use error::Error;
@@ -182,6 +184,13 @@ impl Cli {
                 hello_starting();
                 let cfg = RuntimeConfig::load(directory, conf);
 
+                // 🔐 13-⑥：把可信代理清单交给管理后台的鉴权中间件。
+                //
+                // 中间件是**无状态**的（`middleware::from_fn` 形式的函数，手上只有 `Request`），
+                // 拿不到 `ServeState`，所以与 `api_token()` 一样走全局存储。
+                // 未初始化时它取到的是**空清单** = 不信任任何代理头 = 原本行为。
+                crate::api::init_trusted_proxies(cfg.trusted_proxies());
+
                 // 🌟 核心修复 3：精确击杀日志锁！
                 // 因为改了名字，这次绝对不会杀错人，主线程的霸权彻底终结！
                 drop(log_guard);
@@ -202,16 +211,38 @@ impl Cli {
                 // 🔐 P3：这里原来用 `.ok()` 吞掉失败 —— 一旦日志系统没装上，之后所有
                 // log::info!/warn!/error! 全部石沉大海，而且没人知道。日志宏此刻不可用，只能直写 stderr。
                 if let Err(err) = tracing::dispatcher::set_global_default(log_dispatch) {
-                    eprintln!("log system initialisation failed (later log output may be missing): {err}");
+                    eprintln!(
+                        "log system initialisation failed (later log output may be missing): {err}"
+                    );
                 }
 
                 // 此时日志系统已完美交接，这几十行配置摘要将一字不漏印入硬盘文件！
                 cfg.summary();
 
                 #[cfg(target_os = "linux")]
-                match cfg.user() {
-                    Some(user) => run_user::with(user, None).expect("switch user failed"),
-                    None => run_user::try_drop_privs(),
+                {
+                    // 🔐 必须在降权**之前**把日志/审计相关的属主交出去。
+                    // 降权之后就没有权限改了；而那正是日志写满需要归档、却因目录属于 root
+                    // 而归档失败、进而静默停写的根因。
+                    let target_user = cfg.user().unwrap_or(run_user::DEFAULT_USER);
+                    let target_group = if cfg.user().is_some() {
+                        None
+                    } else {
+                        Some(run_user::DEFAULT_GROUP)
+                    };
+
+                    if let Some((uid, gid)) = run_user::target_ids(target_user, target_group) {
+                        let mut paths = vec![cfg.log_file()];
+                        if let Some(audit) = cfg.audit_file() {
+                            paths.push(audit);
+                        }
+                        crate::infra::mapped_file::prepare_owner_for_drop(&paths, uid, gid);
+                    }
+
+                    match cfg.user() {
+                        Some(user) => run_user::with(user, None).expect("switch user failed"),
+                        None => run_user::try_drop_privs(),
+                    }
                 }
                 app::serve(cfg);
                 good_bye();
@@ -269,15 +300,35 @@ impl Cli {
                 };
 
                 if let Err(err) = output {
-                    match err.kind() {
+                    // 🔐 用户可见的错误文案：原文案写的是「无法创建符号链接」，
+                    // 那是从 Symlink 子命令抄过来的，跟服务管理毫无关系。
+                    let detail = match err.kind() {
                         std::io::ErrorKind::PermissionDenied => {
                             #[cfg(windows)]
-                            log::error!("cannot create the symbolic link: {} (administrator privileges are required)", err);
+                            {
+                                format!("{err} (administrator privileges are required)")
+                            }
                             #[cfg(unix)]
-                            log::error!("cannot create the symbolic link: {} (root privileges are required)", err);
+                            {
+                                format!("{err} (root privileges are required)")
+                            }
+                            #[cfg(not(any(unix, windows)))]
+                            {
+                                format!("{err} (elevated privileges are required)")
+                            }
                         }
-                        _ => log::error!("cannot create the symbolic link: {}", err),
-                    }
+                        _ => err.to_string(),
+                    };
+
+                    // 🔐 必须同时写 stderr 与日志：Service 分支不会初始化日志系统
+                    // （`log_guard` 只在带 -x/-v 时存在），此时单靠 log::error! 用户什么也看不到。
+                    eprintln!("[smartdns] service command failed: {detail}");
+                    log::error!("service command failed: {detail}");
+
+                    // 🔐 关键：以非 0 退出码结束。脚本与 CI 靠退出码判断成功与否，
+                    // 之前这里只打印不退出，`service install` 失败也会被当成成功，
+                    // 部署脚本会带着「装好了」的错误认知继续往下走。
+                    std::process::exit(1);
                 }
             }
             #[cfg(not(feature = "service"))]
@@ -286,6 +337,10 @@ impl Cli {
             }
             Commands::Test { directory, conf } => {
                 let cfg = RuntimeConfig::load(directory, conf);
+
+                // 🔐 13-⑥：`test` 也与真正启动走同一套准备（见上面 `Run` 分支的说明），
+                // 这样"配置自检通过"与"真能启动"才是一致的。
+                crate::api::init_trusted_proxies(cfg.trusted_proxies());
 
                 // 打印出解析到的配置摘要，让用户确信读取成功了
                 crate::hello_starting();
@@ -446,8 +501,81 @@ pub mod signal {
     // 🌟 核心修复 2：暴露出一个安全的、原生的内存关机通知器
     pub static SHUTDOWN_NOTIFY: LazyLock<Notify> = LazyLock::new(Notify::new);
 
+    /// 进程是否已经收到过关机请求。
+    ///
+    /// 🔐 问题 47：这个标志位是"**通知不丢**"的关键 —— 理由见
+    /// [`request_shutdown`] 与 [`wait_for_shutdown`] 的说明。
     static TERMINATING: AtomicBool = AtomicBool::new(false);
 
+    /// 是否已经收到过关机请求（幂等：重复调用也返回 `true`）。
+    #[inline]
+    pub fn is_terminating() -> bool {
+        TERMINATING.load(Ordering::Relaxed)
+    }
+
+    /// 🔐 问题 47：**发出关机请求 —— 通知不会丢**。
+    ///
+    /// 原实现的 Windows 服务停止处理是：
+    ///
+    /// ```ignore
+    /// crate::signal::SHUTDOWN_NOTIFY.notify_waiters();
+    /// ```
+    ///
+    /// `notify_waiters()` 只唤醒**此刻已经在等待**的任务，**不保留任何许可**：
+    /// 如果系统要求停止服务时，主流程**还没走到** `terminate()` 里的
+    /// `SHUTDOWN_NOTIFY.notified()`（例如正在启动、正在加载配置、
+    /// 或正要进入等待点），这条通知就**直接丢了**。
+    ///
+    /// 后果（正是报告描述的"Stop 被完全忽略"）：服务不响应停止指令，
+    /// 只能等系统强制杀掉；而强制杀掉的路径下，
+    /// 退出前"把日志队列排空"这一步**不会执行** ——
+    /// 恰好是代码注释里最担心的"关机前后日志被吞"。
+    ///
+    /// 修法分两层：
+    ///   1. **置标志位**（本函数的 `swap`）—— 这是**永久可查**的事实，
+    ///      与"此刻有没有人在等"无关，因此不会丢；
+    ///   2. 仍然 `notify_waiters()` 唤醒当前正在等待的那些任务，让它们立刻响应。
+    ///
+    /// 标志位还能顺带解决另一个问题：`terminate()` 被**多处**同时等待
+    /// （服务监听循环、名单刷新循环、缓存预取循环…），
+    /// 而通知机制本质上只会唤醒"当时在等的人"；有了标志位，
+    /// 每一处等待都能在**自己的下一轮**立刻看到"该退出了"。
+    ///
+    /// 返回 `true` 表示这是**第一次**请求关机（可用于打一次"terminating"日志）。
+    pub fn request_shutdown() -> bool {
+        let first = !TERMINATING.swap(true, Ordering::Relaxed);
+        SHUTDOWN_NOTIFY.notify_waiters();
+        first
+    }
+
+    /// 🔐 问题 47：**等待关机请求 —— 不会错过已经发生的那次**。
+    ///
+    /// 与 [`request_shutdown`] 配套。关键差别在于**先查标志位**：
+    ///
+    /// * 若关机请求**已经来过**（标志位为真），立即返回 —— 即使当时没有人在等、
+    ///   通知已经"丢"了，也能补上。（这正是原实现漏掉的一步。）
+    /// * 否则挂起等待；被唤醒后标志位必然已经是真（由 `request_shutdown` 设置）。
+    ///
+    /// ⚠️ 这里刻意**不把 `notified()` 的 future 提前构造**：
+    /// `Notify::notified()` 只有在**首次被 poll** 时才注册到等待队列，
+    /// 因此"先查标志、再 await"的顺序是安全的 ——
+    /// 两者之间即使发生 `request_shutdown`，标志位检查也会兜住。
+    pub async fn wait_for_shutdown() {
+        if is_terminating() {
+            return;
+        }
+
+        SHUTDOWN_NOTIFY.notified().await;
+
+        // 被唤醒后标志位一定为真；这里再设一次是**幂等**的（`store` 写入相同的值），
+        // 让"等待方自己"也能把状态固化下来（例如未来有别的唤醒来源时）。
+        TERMINATING.store(true, Ordering::Relaxed);
+    }
+
+    /// 等待关机信号（Ctrl+C、SIGTERM，或 Windows 服务停止）。
+    ///
+    /// Windows 服务停止走的是 [`request_shutdown`]，因此本函数在
+    /// **服务环境下也可靠**（不会像原来那样丢掉通知）。
     pub async fn terminate() -> std::io::Result<()> {
         use tokio::signal::ctrl_c;
 
@@ -471,16 +599,143 @@ pub mod signal {
             // 🌟 核心修复 3：谁先触发（人为按 Ctrl+C，或系统服务发来原生关机命令），就响应谁！
             tokio::select! {
                 res = ctrl_c() => { res?; },
-                _ = SHUTDOWN_NOTIFY.notified() => {},
+                // 🔐 问题 47：改走 `wait_for_shutdown()` —— 它会**先查标志位**，
+                // 因此"服务停止通知比等待点更早到达"这种情形不再丢。
+                _ = wait_for_shutdown() => {},
             }
         }
 
-        if !TERMINATING.load(Ordering::Relaxed) {
-            TERMINATING.store(true, Ordering::Relaxed);
+        // 标志位已经在 `wait_for_shutdown` / `request_shutdown` 里置好；
+        // 这里只负责打一次日志（人为 Ctrl+C 的那条路径也会走到）。
+        if !TERMINATING.swap(true, Ordering::Relaxed) {
             crate::log::info!("terminating...");
         }
 
         Ok(())
+    }
+
+    // ============ 🔐 问题 47 的回归测试 ============
+    //
+    // 这一组测试**刻意不依赖 Windows 服务环境**：它钉住的是问题 47 的**核心不变量**
+    // ——「关机通知不会因为'来早了'而丢掉」。
+    // 原实现用 `notify_waiters()`，这个不变量在**所有平台**上都是不成立的；
+    // 只是 Windows 服务场景最容易踩到（停止指令常在启动/加载配置期间到达）。
+    //
+    // 为什么不用"真的装一个 Windows 服务再停它"来验证：
+    // 那会操作到用户的生产服务（本项目已有过事故，见报告 §27.0），
+    // 而且服务安装是编译期常量 `smartdns-rs`、无法隔离。
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 测试串行锁。
+        ///
+        /// ⚠️ **必须串行**：这些用例共享进程级的 `TERMINATING` 标志位与
+        /// `SHUTDOWN_NOTIFY`，而 cargo 默认**并行**跑测试 ——
+        /// 不串行就会出现"A 用例刚置位、B 用例把它归零"的互相干扰
+        /// （第一版就是这么失败的：断言"第一次应当是 true"随机失败）。
+        ///
+        /// 不用 `serial_test` 之类的额外依赖：一把 `Mutex` 就够，
+        /// 且不引入新的依赖（离线 registry 里也未必有）。
+        ///
+        /// ⚠️ 注意 `Mutex` 中毒：某个用例 panic 后锁会中毒，
+        /// 后续用例会连带失败。这里用 `unwrap_or_else(|e| e.into_inner())`
+        /// 忽略中毒 —— 测试的目的就是让每个用例都独立地跑出自己的结论。
+        static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        /// 取得测试串行锁，并把标志位重置为"未收到"。
+        fn lock_and_reset() -> std::sync::MutexGuard<'static, ()> {
+            let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            TERMINATING.store(false, Ordering::Relaxed);
+            guard
+        }
+
+        /// 🔐 问题 47 的**核心不变量**：**通知来得比等待更早时，也不会丢**。
+        ///
+        /// 这正是原实现（`notify_waiters()`）做不到的事：
+        /// 它只唤醒"此刻已在等"的任务、不保留任何许可 ——
+        /// 服务停止通知若在主流程走到等待点之前到达，就**永久消失**，
+        /// 服务于是不响应停止，只能等系统强杀（日志与缓存都来不及落盘）。
+        ///
+        /// 本测试的顺序是刻意的：**先发通知，后等待**。
+        /// 撤掉修复（把 `wait_for_shutdown` 换回裸 `SHUTDOWN_NOTIFY.notified()`）
+        /// 之后这条测试会**卡住直到超时**——那正是"通知丢了"的表现。
+        #[tokio::test]
+        async fn shutdown_request_is_not_lost_when_it_arrives_early() {
+            let _guard = lock_and_reset();
+
+            // ① 通知先到（此刻**没有任何人在等**）
+            let first = request_shutdown();
+            assert!(first, "第一次请求关机应当返回 true");
+            assert!(
+                is_terminating(),
+                "置了标志位之后，`is_terminating()` 必须为真 —— 这是「不丢」的依据"
+            );
+
+            // ② 之后才有人来等：必须**立刻**返回，而不是永久挂起
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_secs(2), wait_for_shutdown()).await;
+
+            assert!(
+                waited.is_ok(),
+                "🔐 问题 47：早到的关机通知丢了 —— 后来的等待者一直等不到它。\
+                 这正是「服务 Stop 被完全忽略、只能等系统强杀」的原缺陷"
+            );
+        }
+
+        /// 🔐 对照：**正在等待时**收到通知，同样要能醒来（正常路径不能被改坏）。
+        #[tokio::test]
+        async fn shutdown_request_wakes_a_waiting_task() {
+            let _guard = lock_and_reset();
+
+            let waiter = tokio::spawn(async { wait_for_shutdown().await });
+
+            // 给等待方一点时间真正注册到等待队列
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            request_shutdown();
+
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(2), waiter).await;
+            assert!(waited.is_ok(), "正在等待的任务应当被唤醒");
+        }
+
+        /// 🔐 幂等性：重复请求关机是安全的，且只有**第一次**返回 `true`。
+        ///
+        /// 为什么重要：`request_shutdown()` 会在"第一次"时打一条日志。
+        /// 系统可能连续下发多次 Stop/Shutdown，若每次都返回 `true` 就会刷屏；
+        /// 而如果实现成"后来者覆盖"，又可能让日志与状态判断出错。
+        #[tokio::test]
+        async fn repeated_shutdown_requests_are_idempotent() {
+            let _guard = lock_and_reset();
+
+            assert!(request_shutdown(), "第一次应当是 true");
+            assert!(!request_shutdown(), "第二次应当是 false（已经处理过了）");
+            assert!(!request_shutdown(), "第三次同理");
+
+            assert!(is_terminating(), "标志位始终为真");
+        }
+
+        /// 🔐 等待方**自己**也要能读到状态：多处等待点使用同一套判断。
+        ///
+        /// `terminate()` 被服务监听循环、名单刷新循环、缓存预取循环**多处**同时等待，
+        /// 而通知机制只会唤醒"当时在等的人"。标志位的意义就在于：
+        /// 每一处都能在**自己的下一轮**立刻看到"该退出了"。
+        #[tokio::test]
+        async fn flag_is_visible_to_all_waiters() {
+            let _guard = lock_and_reset();
+
+            assert!(!is_terminating(), "初始状态应当是「未收到」");
+
+            request_shutdown();
+
+            // 模拟"多个等待点各自检查"，全部应当看到同一事实
+            for i in 0..5 {
+                assert!(
+                    is_terminating(),
+                    "第 {i} 个等待点没有看到关机标志（多处等待点会读到不一致的状态）"
+                );
+            }
+        }
     }
 }
 
@@ -517,6 +772,27 @@ mod run_user {
         if let Err(err) = with(DEFAULT_USER, Some(DEFAULT_GROUP)) {
             log::error!("failed to drop privs: {}", err);
         }
+    }
+
+    /// 🔐 解析「即将降权到哪个用户/组」，但**不真的降权**。
+    ///
+    /// 用途：在仍持有 root 权限时，把日志/审计文件的目录与文件属主交给这个账号，
+    /// 否则降权后日志写满没法归档，会静默停写（见 `mapped_file::prepare_owner_for_drop`）。
+    ///
+    /// 返回 `None` 的两种情形：当前不是 root（没有降权这回事），或用户不存在。
+    pub fn target_ids(username: &str, groupname: Option<&str>) -> Option<(u32, u32)> {
+        if !(get_current_uid() == 0 || get_effective_uid() == 0) {
+            return None; // 本来就不是 root，不需要改属主
+        }
+
+        let user = get_user_by_name(username)?;
+        let gid = groupname
+            .map(get_group_by_name)
+            .unwrap_or_default()
+            .map(|g| g.gid())
+            .unwrap_or_else(|| user.primary_group_id());
+
+        Some((user.uid(), gid))
     }
 
     #[inline]

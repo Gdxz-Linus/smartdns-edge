@@ -71,6 +71,12 @@ pub struct ServerOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_aaaa_soa: Option<bool>,
 
+    /// 🔐 force no CNAME record in the reply（对应 bind 的 `-force-no-CNAME`）。
+    ///
+    /// 与 `force_aaaa_soa` 一样支持三层：bind 级 > 组级 > 全局（见 `DnsContext::force_no_cname`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_no_cname: Option<bool>,
+
     /// force HTTPS query return SOA.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_https_soa: Option<bool>,
@@ -108,6 +114,12 @@ pub struct AnswerAffectingOpts {
     pub no_speed_check: bool,
     pub no_dualstack_selection: bool,
     pub force_aaaa_soa: bool,
+    /// 🔐 bind 级 `-force-no-CNAME`。**必须进缓存键**：同一个域名在两个监听上一个开了、
+    /// 一个没开，答案不一样（一个带 CNAME、一个被展平），不进键就会互相借用答案。
+    ///
+    /// 组级参数不用在这里单列 —— `rule_group` 字段本身就是键的一部分，
+    /// 不同规则组天然拿到不同的键。
+    pub force_no_cname: bool,
     pub force_https_soa: bool,
     pub no_rule_addr: bool,
     pub no_rule_nameserver: bool,
@@ -122,6 +134,10 @@ impl AnswerAffectingOpts {
             no_speed_check: opts.no_speed_check(),
             no_dualstack_selection: opts.no_dualstack_selection(),
             force_aaaa_soa: opts.force_aaaa_soa(),
+            // 🔐 bind 级取原始 `Option` 的"写了没有"，而不是 `unwrap_or_default()`：
+            // 本字段要区分"本监听没写"（应当让组级/全局来定）和"写了"。
+            // bind 选项是标志位，只会被设成 `Some(true)`，所以 `false` 就等价于"没写"。
+            force_no_cname: opts.force_no_cname.is_some(),
             force_https_soa: opts.force_https_soa(),
             no_rule_addr: opts.no_rule_addr(),
             no_rule_nameserver: opts.no_rule_nameserver(),
@@ -141,6 +157,9 @@ impl AnswerAffectingOpts {
             no_speed_check: Some(self.no_speed_check),
             no_dualstack_selection: Some(self.no_dualstack_selection),
             force_aaaa_soa: Some(self.force_aaaa_soa),
+            // 🔐 只有真正的 bind 级设置才回填；`false` 表示"当时没设"，回填 `Some(false)`
+            // 会变成"显式关闭"并压住组级/全局的值（本字段是标志位，永远只被设成 true）。
+            force_no_cname: self.force_no_cname.then_some(true),
             force_https_soa: Some(self.force_https_soa),
             no_rule_addr: Some(self.no_rule_addr),
             no_rule_nameserver: Some(self.no_rule_nameserver),
@@ -216,6 +235,16 @@ impl ServerOpts {
         self.force_aaaa_soa.unwrap_or_default()
     }
 
+    /// 🔐 bind 级 `-force-no-CNAME` 的**显式值**。
+    ///
+    /// 注意这里返回 `Option` 而不是 `bool`：三层优先级（bind 级 > 组级 > 全局）
+    /// 要求区分"本监听没写"和"本监听写了 no"。若在这里就 `unwrap_or_default()`，
+    /// 会把"没写"当成"显式关闭"，从而永远压住组级/全局的值。
+    #[inline]
+    pub fn force_no_cname(&self) -> Option<bool> {
+        self.force_no_cname
+    }
+
     /// force HTTPS query return SOA.
     #[inline]
     pub fn force_https_soa(&self) -> bool {
@@ -243,6 +272,7 @@ impl ServerOpts {
             max_connections_per_ip: _,
             no_dualstack_selection,
             force_aaaa_soa,
+            force_no_cname,
             force_https_soa,
             no_serve_expired,
             is_background: _,
@@ -288,6 +318,10 @@ impl ServerOpts {
 
         if self.force_aaaa_soa.is_none() {
             self.force_aaaa_soa = force_aaaa_soa;
+        }
+
+        if self.force_no_cname.is_none() {
+            self.force_no_cname = force_no_cname;
         }
 
         if self.force_https_soa.is_none() {

@@ -271,7 +271,12 @@ impl FromStr for DnsUrl {
                         .into(),
                     disable_grease: options.is_set("disable_grease"),
                 },
-                _ => unimplemented!(),
+                // 🔐 `Protocol` 是 hickory 的**非穷尽枚举**（`#[non_exhaustive]`），
+                // 因此这个通配分支**必须保留**：hickory 将来新增协议变体时就会落到这里。
+                // 原实现是 `unimplemented!()` —— 那会让"解析一个我们不认识的协议 URL"
+                // 变成**请求路径上的 panic**。这里改为返回配置错误（本函数本来就返回 `Result`），
+                // 用户看到的是"这个协议不支持"，而不是进程崩掉。
+                _ => return Err(DnsUrlParseErr::ProtocolNotSupport(proto.to_string())),
             },
             host,
             port,
@@ -546,7 +551,21 @@ impl From<Protocol> for ProtocolConfig {
                 path: DEFAULT_DNS_QUERY_PATH.into(),
                 disable_grease: Default::default(),
             },
-            _ => unimplemented!(),
+            // 🔐 `Protocol` 是 hickory 的**非穷尽枚举**（`#[non_exhaustive]`），
+            // 这个通配分支**必须保留**，且**确实可达**：`resolver.rs` 的 `set_proto(proto)`
+            // 传的就是 `Protocol`，用户用 `resolve` 命令查一个 hickory 新增的协议时走到这里。
+            //
+            // 原实现是 `unimplemented!()` ⇒ 那种情况会**直接 panic**。
+            // 这里改为安全兜底：退回 UDP（本项功能的语义只是"选哪种传输去做 DDNS/解析探测"，
+            // 退回 UDP 与"这个协议我们还不认识"相比是明显更可取的降级），
+            // 并留下告警，便于发现"hickory 又加了新协议"。
+            // 采用的是与 `to_protocol()` 相同的取向：**不认识就安全处理，绝不 panic**。
+            other => {
+                crate::log::warn!(
+                    "dns-url: unknown hickory protocol {other:?}, falling back to UDP"
+                );
+                Self::Udp
+            }
         }
     }
 }
@@ -588,8 +607,9 @@ pub fn decode_spki_pin(pin: &str) -> Result<[u8; 32], String> {
     let raw = base64::decode(pin.trim()).map_err(|err| format!("not valid base64: {err}"))?;
     let len = raw.len();
 
-    <[u8; 32]>::try_from(raw)
-        .map_err(|_| format!("decoded base64 is {len} bytes; it must be exactly 32 bytes (SHA-256 length)"))
+    <[u8; 32]>::try_from(raw).map_err(|_| {
+        format!("decoded base64 is {len} bytes; it must be exactly 32 bytes (SHA-256 length)")
+    })
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -975,11 +995,17 @@ mod tests {
 
         let short = base64::encode([7u8; 31]);
         let err = decode_spki_pin(&short).unwrap_err();
-        assert!(err.contains("31 bytes"), "must state how many bytes were decoded: {err}");
+        assert!(
+            err.contains("31 bytes"),
+            "must state how many bytes were decoded: {err}"
+        );
 
         let long = base64::encode([7u8; 33]);
         let err = decode_spki_pin(&long).unwrap_err();
-        assert!(err.contains("33 bytes"), "must state how many bytes were decoded: {err}");
+        assert!(
+            err.contains("33 bytes"),
+            "must state how many bytes were decoded: {err}"
+        );
 
         assert!(decode_spki_pin("这不是-base64!!").is_err());
         assert!(decode_spki_pin("").is_err());

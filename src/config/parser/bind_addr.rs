@@ -247,7 +247,9 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
                 Some(Ok((_, sets))) => {
                     opts.ipset.get_or_insert_with(Vec::new).extend(sets);
                 }
-                Some(Err(err)) => crate::log::error!("invalid `-ipset` value on a listener; ignored: {err:?}"),
+                Some(Err(err)) => {
+                    crate::log::error!("invalid `-ipset` value on a listener; ignored: {err:?}")
+                }
                 None => crate::log::warn!("`-ipset` on a listener has no value; ignored"),
             },
             "no-speed-check" => opts.no_speed_check = Some(true),
@@ -265,6 +267,8 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             "no-serve-expired" => opts.no_serve_expired = Some(true),
             "no-dualstack-selection" => opts.no_dualstack_selection = Some(true),
             "force-aaaa-soa" => opts.force_aaaa_soa = Some(true),
+            // 🔐 bind 级 `-force-no-CNAME`：优先级最高的一层（bind 级 > 组级 > 全局）
+            "force-no-cname" => opts.force_no_cname = Some(true),
             "force-https-soa" => opts.force_https_soa = Some(true),
             _ => rest_options.push((*k, *v)),
         }

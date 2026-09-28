@@ -18,19 +18,21 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
         let query_type = req.query().query_type();
 
         if let Some(rdatas) = handle_rule_addr(query_type, ctx) {
-            let local_ttl = ctx.cfg().local_ttl() as u32;
+            let local_ttl = ctx.local_ttl() as u32;
 
             // 🌟 提取 rr-ttl 和 rr-ttl-min，为合成否定缓存 (SOA 拦截) 提供规范的兜底寿命
+            // 📌 乙类：`ctx.rr_ttl()` / `ctx.rr_ttl_min()` 内部已是"组级 > 全局"，
+            // 域名规则级由这里的 `.get(...)` 负责 —— 合起来即"域名规则 > 组级 > 全局"。
             let rr_ttl = ctx
                 .domain_rule
                 .get(|r| r.rr_ttl)
                 .map(|i| i as u32)
-                .or_else(|| ctx.cfg().rr_ttl().map(|i| i as u32));
+                .or_else(|| ctx.rr_ttl().map(|i| i as u32));
             let rr_ttl_min = ctx
                 .domain_rule
                 .get(|r| r.rr_ttl_min)
                 .map(|i| i as u32)
-                .unwrap_or_else(|| ctx.cfg().rr_ttl_min().unwrap_or(300) as u32);
+                .unwrap_or_else(|| ctx.rr_ttl_min().unwrap_or(300) as u32);
             // 如果没配 rr_ttl，就用 min 兜底
             let intercept_soa_ttl = rr_ttl.unwrap_or(rr_ttl_min);
 
@@ -66,7 +68,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
             // 🔐 B3：本地 address 规则 / 强制 SOA 的应答走的是这条**早返回**分支，
             // 以前完全不经过 `rr-ttl-reply-max` —— 于是 `rr-ttl-min 600` + `rr-ttl-reply-max 60`
             // 时，这类应答照样带 600 秒返回给客户端，与"允许返回给客户端的最大 TTL"对不上。
-            if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
+            if let Some(reply_max) = ctx.rr_ttl_reply_max().map(|i| i as u32) {
                 clamp_reply_ttl(&mut lookup, reply_max);
             }
 
@@ -86,7 +88,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
 
                 // 1) max-reply-ip-num：截断 Answer 区的 IP 记录
                 if query_type.is_ip_addr()
-                    && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
+                    && let Some(mut max_reply_ip_num) = ctx.max_reply_ip_num()
                     && max_reply_ip_num > 0
                 {
                     let mut truncate = None;
@@ -109,7 +111,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 }
 
                 // 2) rr-ttl-reply-max：把"给客户端看的 TTL"统一压到上限以内（B3：三个区都压）。
-                if let Some(reply_max) = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32) {
+                if let Some(reply_max) = ctx.rr_ttl_reply_max().map(|i| i as u32) {
                     clamp_reply_ttl(&mut lookup, reply_max);
                 }
 
@@ -158,7 +160,8 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
     if !no_rule_soa {
         match query_type {
             // force AAAA query return SOA
-            AAAA if server_opts.force_aaaa_soa() || cfg.force_aaaa_soa() => {
+            // 🔐 取值走 `ctx.force_aaaa_soa()`：bind 级 > 组级 > 全局
+            AAAA if ctx.force_aaaa_soa() => {
                 return Some(vec![RData::default_soa()]);
             }
             // force HTTPS query return SOA
@@ -333,6 +336,77 @@ mod tests {
                 .await
                 .unwrap()[0],
             RData::AAAA("::ffff:1.2.3.4".parse().unwrap())
+        );
+    }
+
+    /// 🔐 问题 26 的实测判定：**`#6` 下 A 查询会向父域规则回落**（报告描述不成立）。
+    ///
+    /// ## 背景
+    ///
+    /// 审查时怀疑：`domain-rules /域/ -address #6`（只声明 v6）时，
+    /// A 查询会返回 SOA 且**不再向父域回落**，而 `-address -`（忽略）会回落 ——
+    /// 两种"类型不匹配"处理不一致。当时标注为**待确认**，需与 C 版语义对齐。
+    ///
+    /// ## 真机实测（`tests/e2e/_p26_fallback.ps1`）
+    ///
+    /// 构造"父域有 v4、子域只有 `#6`"，查子域的 A：
+    ///
+    /// ```text
+    /// address /parent.test/1.2.3.4      # 父域：明确的 v4
+    /// address /sub.parent.test/#6       # 子域：只声明 v6
+    /// ```
+    ///
+    /// 实测返回 **父域的 1.2.3.4** —— 即**确实回落了**。
+    /// 原因在 `handle_rule_addr` 的匹配顺序：`SOAv6 if query_type == AAAA` 这个**守卫条件**
+    /// 让 A 查询不匹配该分支，落到 `_ => ()`，于是执行 `node = rule.zone()` 继续找父域。
+    ///
+    /// 而 `SOAv4`/`Addr` 那些分支在类型不匹配时同样不匹配，行为是一致的 ——
+    /// **不存在**报告担心的"两种处理不一致"。
+    ///
+    /// ## 这条测试为什么值得存在
+    ///
+    /// 实测前，这个"会回落"的行为**没有任何测试覆盖**
+    /// （既有的 `test_address_rule_soa_v6` 只验证了 AAAA 返回 SOA、
+    /// 以及 A 查询走上游，**没有**构造父域规则）。
+    /// 也就是说：日后若有人"修"这个所谓的问题、把回落改成不回落，
+    /// 不会有任何测试报警。现在把它钉住。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_soa_v6_falls_back_to_parent_rule_for_a_query() {
+        let cfg = RuntimeConfig::builder()
+            .with("address /parent.test/1.2.3.4") // 父域：明确的 v4
+            .with("address /sub.parent.test/#6") // 子域：只声明 v6
+            .build()
+            .unwrap();
+
+        let mock = DnsMockMiddleware::mock(AddressMiddleware)
+            // 上游也有记录：用于区分"是不是回落到父域规则"（若是走上游，会拿到 9.9.9.9）
+            .with_a_record("sub.parent.test", "9.9.9.9".parse().unwrap())
+            .build(cfg);
+
+        // ① A 查询：应当**回落**到父域规则，拿到 1.2.3.4（不是上游的 9.9.9.9）
+        assert_eq!(
+            mock.lookup_rdata("sub.parent.test", RecordType::A)
+                .await
+                .unwrap()[0],
+            RData::A("1.2.3.4".parse().unwrap()),
+            "🔐 `#6` 只声明 v6；A 查询不匹配该规则，应当继续向父域查找并命中 1.2.3.4"
+        );
+
+        // ② AAAA 查询：`#6` 生效，Answer 区为空、Authority 区是 SOA
+        let res = mock
+            .lookup("sub.parent.test", RecordType::AAAA)
+            .await
+            .unwrap();
+        assert!(
+            res.answers().is_empty(),
+            "`#6` 对 AAAA 查询生效：Answer 区应为空"
+        );
+        assert!(
+            matches!(
+                res.authorities().first().map(|r| r.data()),
+                Some(RData::SOA(_))
+            ),
+            "`#6` 对 AAAA 查询生效：Authority 区应带 SOA"
         );
     }
 

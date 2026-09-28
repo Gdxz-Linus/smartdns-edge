@@ -77,7 +77,9 @@ pub fn serve(
             .serve_with_shutdown(acceptor, cancellation_token.cancelled())
             .await
         {
-            crate::log::warn!("HTTP/3 connection handling failed (the connection was dropped): {err:#}");
+            crate::log::warn!(
+                "HTTP/3 connection handling failed (the connection was dropped): {err:#}"
+            );
         }
     });
 
@@ -133,14 +135,18 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
                     // 超出就丢弃这次新连接，**不影响已有连接**（与 DoQ/DoT/DoH 一致）。
                     // 计数位置也与 DoQ 一致：握手完成之后才占名额，没握完的不算。
                     let Some(conn_guard) = crate::server::limit::global().acquire(peer.ip()) else {
-                        log::debug!("DoH3 global connection limit reached; refusing the new connection from {peer}");
+                        log::debug!(
+                            "DoH3 global connection limit reached; refusing the new connection from {peer}"
+                        );
                         continue;
                     };
                     let listener_guard = match self.listener_limiter.as_ref() {
                         Some(limiter) => match limiter.acquire(peer.ip()) {
                             Some(guard) => Some(guard),
                             None => {
-                                log::debug!("DoH3 per-listener connection limit reached; refusing the new connection from {peer}");
+                                log::debug!(
+                                    "DoH3 per-listener connection limit reached; refusing the new connection from {peer}"
+                                );
                                 continue; // 全局限额随作用域结束自动归还
                             }
                         },

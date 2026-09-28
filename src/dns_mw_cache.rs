@@ -62,13 +62,35 @@ pub struct DnsCacheMiddleware {
 
 impl DnsCacheMiddleware {
     pub fn new(cfg: &Arc<RuntimeConfig>, dns_handle: DnsHandle) -> Self {
+        let configured = cfg.cache_size();
         let cache = Arc::new(DnsCache::new(
-            cfg.cache_size(),
+            configured,
             cfg.serve_expired(),
             cfg.serve_expired_ttl(),
             cfg.serve_expired_reply_ttl(),
             cfg.serve_expired_prefetch_time(),
         ));
+
+        // 🔐 问题 34：**必须把实际分配的容量说清楚**。
+        //
+        // 配置值 ≠ 实际值（向上取整到 64 的倍数；小值还会被抬到 64）。
+        // 不说清楚的话，用户按 `cache-size 1000` 去估内存/命中率，
+        // 拿到的是另一个数 —— 这正是本问题"配置与实得对不上"的根源，
+        // 光改取整方向不够，**还要让人看得见**。
+        //
+        // 只在两者**确实不同**时才提"实际值"，避免正常情况刷无关信息；
+        // 且用 info 级（这是正常启动摘要，不是告警）。
+        if configured != cache.actual_cache_size() {
+            info!(
+                "DNS cache: `cache-size {}` is rounded up to {} entries \
+                 (the cache has {} fixed shards and each shard holds at least one entry, \
+                 so the total is always a multiple of {})",
+                configured,
+                cache.actual_cache_size(),
+                SHARD_COUNT,
+                SHARD_COUNT,
+            );
+        }
 
         // 🌟 最小改动 2：必须先读完硬盘 cache 文件，再开门迎客（防击穿）
         if cfg.cache_persist() {
@@ -174,7 +196,9 @@ impl DnsCacheMiddleware {
                 if let Some(old) = slot.take() {
                     old.cancel.cancel();
                 }
-                log::info!("cache persistence: disabled by the new configuration; the periodic flush task has stopped (the in-memory cache no longer writes to disk)");
+                log::info!(
+                    "cache persistence: disabled by the new configuration; the periodic flush task has stopped (the in-memory cache no longer writes to disk)"
+                );
                 false
             }
             PersistAction::Restart {
@@ -255,6 +279,16 @@ impl DnsCacheMiddleware {
     /// （反方向"开→关"因为查询路径那道闸门本来就按新配置走，实际上会停 —— 但任务还挂着，
     ///   这里一并按新配置把任务收掉，让"关了就是真关"。）
     fn sync_prefetch_task(cfg: &Arc<RuntimeConfig>, cache: &Arc<DnsCache>, client: DnsHandle) {
+        // 🔐 **这里必须读全局值，不能读组级**（`prefetch_domain_in_group`）。
+        //
+        // 后台预取任务是**一个进程一份**：它遍历所有缓存条目、按热度挑选预取对象，
+        // 不是"某个规则组在预取"。若改成按组取值，就会出现
+        // "某个组写了 `prefetch-domain no`、把整个进程的后台任务停掉"——
+        // 那是**跨组误伤**：其它组明明没写这个参数，预取却一起没了。
+        //
+        // 分工（丙-1 的边界）：
+        //   · **逐查询**的"这条应答要不要安排预取" → 按组（查询路径上的 `ctx.prefetch_domain()`）；
+        //   · **进程级**的"要不要启动后台预取任务"   → 只认全局（就是这里）。
         let want = cfg.prefetch_domain();
         let mut slot = cache
             .prefetch_task
@@ -268,11 +302,15 @@ impl DnsCacheMiddleware {
                 if let Some(cancel) = slot.take() {
                     cancel.cancel();
                 }
-                log::info!("domain prefetch: disabled by the new configuration; the prefetch task has stopped and expired entries are no longer refreshed automatically");
+                log::info!(
+                    "domain prefetch: disabled by the new configuration; the prefetch task has stopped and expired entries are no longer refreshed automatically"
+                );
             }
             (false, true) => {
                 *slot = Some(spawn_prefetch_task(cache, client));
-                log::info!("domain prefetch: enabled and in effect immediately (expired entries are refreshed automatically as configured)");
+                log::info!(
+                    "domain prefetch: enabled and in effect immediately (expired entries are refreshed automatically as configured)"
+                );
             }
         }
     }
@@ -391,10 +429,16 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             ctx.source = LookupFrom::Cache;
                             return Ok(res);
                         }
-                        CacheStatus::Expired if ctx.cfg().serve_expired() && !no_serve_expired => {
+                        // 📌 丙-1：这两个现在按规则组取值（逐查询）。
+                        // `ctx.serve_expired()` 是"组级 > 全局"；
+                        // `ctx.serve_expired_reply_ttl()` 同理。
+                        CacheStatus::Expired if ctx.serve_expired() && !no_serve_expired => {
                             if self.cache.mark_prefetching(&cache_key).await {
                                 // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
-                                let reply_ttl = Duration::from_secs(self.cache.expired_reply_ttl());
+                                // ⚠️ 这个基准必须与本次判断同源：既然"要不要喂"是按组判断的，
+                                // 喂出去的寿命也必须按同一条取值链取，否则两个组会共用同一个
+                                // 时间戳、双栈兄弟记录会对不齐。
+                                let reply_ttl = Duration::from_secs(ctx.serve_expired_reply_ttl());
                                 let sync_valid_until = Instant::now() + reply_ttl;
 
                                 self.cache
@@ -477,7 +521,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             }
 
                             // 极小概率兜底：如果有其他并发已经拿了预取锁，但时间戳还未更新完毕
-                            let reply_ttl_secs = self.cache.expired_reply_ttl() as u32;
+                            // 📌 丙-1：这里同样按组取值 —— 它已经处在"决定要喂过期数据"之后，
+                            // 若这里退回全局值，同一组的两次应答会带出**两个不同的 TTL**。
+                            let reply_ttl_secs = ctx.serve_expired_reply_ttl() as u32;
                             let mut fallback_res = res;
                             fallback_res.set_new_ttl(reply_ttl_secs);
                             debug!(
@@ -574,8 +620,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                     }
 
                     // 截断包没有进缓存，也就没有"到期再预取"这回事
+                    //
+                    // 📌 丙-1：这里按规则组取值 —— 它管的是"**这条应答**要不要安排预取"。
+                    // ⚠️ 后台预取任务的**启停**不在这里，仍读全局（见 `sync_prefetch_task`）：
+                    // 任务是一个进程一份、遍历所有缓存条目，不是"某个组在预取"。
                     if !lookup.truncated()
-                        && ctx.cfg().prefetch_domain()
+                        && ctx.prefetch_domain()
                         && let Some(ttl) = lookup.min_ttl()
                     {
                         self.cache
@@ -661,6 +711,43 @@ impl Deref for DomainPrefetchingNotify {
 
 const MAX_TTL: u32 = 86400_u32;
 const SHARD_COUNT: usize = 64;
+
+/// 🔐 问题 13-③：测试专用 —— 统计 `cached_records_paginated` 第二趟迭代了多少条。
+///
+/// 只在测试构建下存在（`#[cfg(test)]`），**不进生产二进制**。
+/// 它存在的唯一理由：这项修复只改变"代价"、不改变"返回值"
+/// （退回旧实现，返回的 `total` 与 `records` 完全一样），所以
+/// "结果对不对"测不出它；而**用时间测也不可靠** —— 我实测两次反向验证都没抓住。
+/// 只有在实现内部计这个确定量，反向验证才能稳定复现。
+///
+/// ⚠️ `static` 不能放在 `impl` 块里（第一版放进去、编译直接报
+/// "associated `static` items are not allowed"），所以放在模块层级。
+#[cfg(test)]
+static PAGINATION_SCAN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+use std::sync::atomic::Ordering as AtomicOrdering;
+
+/// 🔐 问题 34：把配置的 `cache-size` 换算成**实际生效**的总容量。
+///
+/// 规则：**向上取整到 `SHARD_COUNT`(64) 的倍数**（至少 64）。
+///
+/// 为什么是"向上"而不是原来的向下：分片数固定 64、每片至少 1 条，
+/// 原先的 `size / 64` 会让**实得少于配置**（`1000` → 960），
+/// 用户按 1000 估的内存/命中率都会偏乐观。向上取整保证**只会多、不会少**。
+///
+/// ⚠️ 已知边界（如实记录，不是缺陷漏修）：**小值仍会被抬到 64**
+/// （`cache-size 10` → 64），因为 64 片 × 1 条是这套分片结构的硬下限。
+/// 要让 10 精确等于 10 必须改分片数（大动作，本次不做）——
+/// 所以启动日志会打印**实际值**，让用户看得见。
+///
+/// 抽成独立函数是为了让**写入侧（构造）、告警侧（重载）、测试**共用同一口径；
+/// 三处各写一遍的话，将来改规则必然漂移。
+#[inline]
+fn effective_cache_size(configured: usize) -> usize {
+    configured.div_ceil(SHARD_COUNT).max(1) * SHARD_COUNT
+}
 
 /// 🔐 A8：一个"周期落盘"任务当前的形态 —— 热重载时拿它和新配置比对，决定要不要停掉重建。
 struct PersistTask {
@@ -859,6 +946,13 @@ pub struct DnsCache {
     expired_prefetch_time: AtomicU64,
     /// 当前生效的配置容量（分片在创建时就固定了，用来检测"容量被改过"并如实告警）
     cache_size: AtomicUsize,
+    /// 🔐 问题 34：**实际分配**的总容量（= 每片容量 × 分片数）。
+    ///
+    /// 与 `cache_size` 的区别：后者是**配置值**（用户写的数），这里是**真实可用条数**。
+    /// 两者可能不等（向上取整到 64 的倍数；小值还会被抬到 64）。
+    /// 分开存是为了让管理接口与日志能**如实**报告实际值，
+    /// 而不是把配置值当成实际值糊弄用户。
+    actual_cache_size: AtomicUsize,
     /// 🔐 A8：当前这个周期落盘任务长什么样（`None` = 没有任务，即持久化关着）。
     /// 句柄放在 `DnsCache` 里而不是中间件里 —— 热重载会重建中间件、但复用同一个
     /// `Arc<DnsCache>`，任务只有挂在这儿才能跨重载被找到并停掉。
@@ -876,11 +970,27 @@ impl DnsCache {
         expired_reply_ttl: u64,
         expired_prefetch_time: u64,
     ) -> Self {
-        let shard_size = std::cmp::max(1, cache_size / SHARD_COUNT);
+        // 🔐 问题 34：分片容量**向上取整到 64 的倍数**，并对"实际值"如实交代。
+        //
+        // 背景：分片数固定为 `SHARD_COUNT`(64)，每片容量为 `LruCache::new(NonZeroUsize)`
+        // ⇒ **每片至少 1 条**，于是总容量的下限被钉死在 64。
+        // 原先用 `cache_size / 64`（向下取整）：
+        //   · `cache-size 1000` → 每片 15 → 实得 **960**（比配置**少** 40）；
+        //   · `cache-size 10`   → 每片 0 被夹到 1 → 实得 **64**（比配置**多** 6.4 倍）。
+        //
+        // 现在改为向上取整（**只会多、不会少**）：
+        //   · `1000` → **1024**（多 24）；`512` → **512**（正好）；`4096` → **4096**（正好）。
+        //
+        // ⚠️ 边界如实说明：**小值仍然会被抬到 64**（`cache-size 10` → 64）。
+        // 详见 `effective_cache_size()` 的文档。
+        let actual_total = effective_cache_size(cache_size);
+        let shard_size = actual_total / SHARD_COUNT;
+
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
+            // `shard_size` 已由 `.max(1)` 保证非零，这里的 expect 不可能触发
             shards.push(Mutex::new(LruCache::new(
-                NonZeroUsize::new(shard_size).unwrap(),
+                NonZeroUsize::new(shard_size).expect("shard_size is at least 1"),
             )));
         }
 
@@ -892,7 +1002,10 @@ impl DnsCache {
             expired_ttl: AtomicU64::new(expired_ttl),
             expired_reply_ttl: AtomicU64::new(expired_reply_ttl),
             expired_prefetch_time: AtomicU64::new(expired_prefetch_time),
+            // ⚠️ 这里存**配置值**，不是 actual_total —— 见 `reload_config` 的比较语义
+            // 与 `cache_size()` 的注释，两者用途不同，别混。
             cache_size: AtomicUsize::new(cache_size),
+            actual_cache_size: AtomicUsize::new(actual_total),
             prefetch_notify: Arc::new(DomainPrefetchingNotify::new()),
         }
     }
@@ -913,12 +1026,30 @@ impl DnsCache {
         if old_size != new_size {
             // 分片容量在创建时就定死了，改容量只能重建缓存（会丢内容）——
             // 所以这里如实告警，而不是静默装作已经生效。
+            //
+            // 🔐 问题 34：告警里要带上**重启后实际会得到的容量**，
+            // 而不是只说"需要重启"。原提示只说"改了要重启"，用户重启后
+            // 看到的是另一个数（向上取整到 64 的倍数），按提示理解会得到错误结论。
             crate::log::warn!(
-                "changing cache-size from {} to {} requires a restart (shard capacity is fixed at startup; all other cache policies take effect immediately)",
+                "changing cache-size from {} to {} requires a restart \
+                 (shard capacity is fixed at startup; all other cache policies take effect immediately). \
+                 After a restart the cache will actually hold {} entries ({} x {} shards)",
                 old_size,
-                new_size
+                new_size,
+                effective_cache_size(new_size),
+                effective_cache_size(new_size) / SHARD_COUNT,
+                SHARD_COUNT,
             );
         }
+    }
+
+    /// 🔐 问题 34：**实际生效**的总容量（向上取整到 64 的倍数）。
+    ///
+    /// 公开出来是为了让启动摘要与管理接口都能如实报告 ——
+    /// 配置值 ≠ 实际值，把两者混为一谈会让用户按错的数去估算内存与命中率。
+    #[inline]
+    pub fn actual_cache_size(&self) -> usize {
+        self.actual_cache_size.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -1016,21 +1147,54 @@ impl DnsCache {
         offset: usize,
         limit: usize,
     ) -> (usize, Vec<CachedQueryRecord>) {
-        let mut total = 0;
+        // 🔐 问题 13-③：分两趟做，让"离谱的 offset"付出零代价。
+        //
+        // 原实现把"数总数"和"收集这一页"混在同一个循环里，于是：
+        //   · `records.len() >= limit` 用的是 `continue` —— 收集够了**仍把 64 个分片跑完**；
+        //   · `current_offset < offset` 会把偏移之前的条目**逐个走一遍**，
+        //     调用方给个 `?offset=1000000000` 就是一个可控的 CPU 消耗点。
+        //
+        // 现在：
+        //   第一趟只做 `len()` 求和（不碰条目内容，极便宜）；
+        //   若 `offset >= total`，这一页必然为空 ⇒ **直接返回，一条都不扫**；
+        //   否则第二趟收集，且收满 `limit` 就**立刻跳出**（不再遍历剩余条目）。
+        let total: usize = self
+            .shards
+            .iter()
+            .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .sum();
+
+        if offset >= total || limit == 0 {
+            return (total, Vec::new());
+        }
+
         let mut records = Vec::new();
         let mut current_offset = 0;
+        let mut done = false;
 
         for shard in self.shards.iter() {
+            if done {
+                break;
+            }
             let cache = shard.lock().unwrap_or_else(|e| e.into_inner());
-            total += cache.len();
 
             for (key, entry) in cache.iter() {
-                if records.len() >= limit {
-                    continue;
-                }
+                // 🔐 问题 13-③：测试专用埋点 —— 统计第二趟**实际迭代了多少条**。
+                // 之所以要这个埋点：这项修复**只影响代价、不影响返回值**
+                // （退回旧实现，返回的 `total` 与 `records` 完全一样），
+                // 所以"结果对不对"测不出它；用时间测也不可靠（实测两次都没抓住）。
+                // 只有在实现内部计这个确定量，反向验证才能稳定复现。
+                #[cfg(test)]
+                PAGINATION_SCAN_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+
+                // 跳过本页之前的条目（此时 `offset < total`，因此这段最多走 offset 步）
                 if current_offset < offset {
                     current_offset += 1;
                     continue;
+                }
+                if records.len() >= limit {
+                    done = true;
+                    break;
                 }
                 records.push(CachedQueryRecord {
                     name: key.query.name().clone(),
@@ -1043,6 +1207,7 @@ impl DnsCache {
                 current_offset += 1;
             }
         }
+
         (total, records)
     }
 
@@ -1202,11 +1367,30 @@ impl DnsCache {
                     }
 
                     entry.is_in_prefetching = true;
+
+                    // 🔐 问题 27-3：排序键取"判定时"的热度，扣减**不再兼任**排序键。
+                    //
+                    // ⚠️ 先记一个复核结论：报告说的"两个口径不一致 ⇒ 顺序轻微错序"
+                    // **经穷举实验判定不成立**。`x.saturating_sub(1)` 是**单调非减**函数，
+                    // 而唯一会产生并列的 `hits=1` 根本不够格入选（门槛是扣减前 `hits >= 2`），
+                    // 所以"按扣减前排序"与"按扣减后排序"的结果**恒等**。
+                    // 证据：`tests/e2e/_p27_3_monotonic.py`（穷举 4680 种组合，顺序不一致 0 种）。
+                    //
+                    // 那这段改动为什么保留？因为它把**不变量**写显了：
+                    // 排序口径与准入口径从此是同一个量，将来若有人调整准入门槛
+                    // （例如降到 `hits >= 1`），并列点出现、两者才会真正分叉，
+                    // 那时这里不必再改。扣减保留，它服务的是**热度衰减**语义
+                    // （"这一轮已经安排过预取了，热度回落一格"）。
+                    let hits_for_ordering = entry.stats.hits;
+
+                    // 热度衰减：表示"这一轮已经把它安排出去了"
                     entry.stats.hits = entry.stats.hits.saturating_sub(1);
 
-                    // 🌟 保持 CacheKey 的原汁原味，不丢失 RecordType 和 ECS 信息
+                    // 🌟 保持 CacheKey 的原汁原味，不丢失 RecordType 和 ECS 信息。
+                    // 同一 key 可能出现在多个分片（理论上不该，但取 max 更稳），
+                    // 因此这里也让"排序键"取较大者，避免被一次低热度覆盖。
                     let current_hits = to_prefetch.get(key).copied().unwrap_or(0);
-                    to_prefetch.insert(key.clone(), std::cmp::max(current_hits, entry.stats.hits));
+                    to_prefetch.insert(key.clone(), std::cmp::max(current_hits, hits_for_ordering));
                 }
             }
 
@@ -1361,7 +1545,9 @@ impl DnsCache {
                     archived
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(archiving failed; the original file is kept)".to_string()),
+                        .unwrap_or_else(
+                            || "(archiving failed; the original file is kept)".to_string()
+                        ),
                 );
                 return;
             }
@@ -1369,7 +1555,9 @@ impl DnsCache {
             declared = Some(entries_in_file);
             payload = &data[CACHE_HEADER_LEN..];
         } else {
-            info!("cache file has no header: reading it in the legacy format (supported this time; the header is written on the next flush)");
+            info!(
+                "cache file has no header: reading it in the legacy format (supported this time; the header is written on the next flush)"
+            );
         }
 
         let (entries, stopped_at) = deserialize_best_effort(payload);
@@ -1465,7 +1653,10 @@ const CACHE_MAGIC: &[u8; 8] = b"SMCACHE\0";
 /// - v2（2026-09-17）：条目新增 tag 7 = "会影响答案的监听级选项"（见 `AnswerAffectingOpts`）。
 ///   缓存标记跟着变了，v1 的条目不能再当成本版本的口径使用，所以旧档一律按"版本不兼容"
 ///   改名存档、本次按冷启动继续（这条路径本来就有，见 `load_cache`）。
-const CACHE_FORMAT_VERSION: u16 = 2;
+/// - v3（组级参数机制）：`AnswerAffectingOpts` 新增 bind 级 `force-no-CNAME`。
+///   同样是"缓存标记变了" —— v2 的条目是按旧口径算出来的（那时还没有这个键位），
+///   混用会让两个配得不一样的监听互相借用答案，所以必须 +1 让旧档走"版本不兼容"路径。
+const CACHE_FORMAT_VERSION: u16 = 3;
 /// 文件头长度：魔数 8 + 版本 2 + 条目数 4
 const CACHE_HEADER_LEN: usize = 14;
 /// 替换缓存文件失败时的重试次数与间隔（200ms × 2）
@@ -1518,6 +1709,45 @@ fn deserialize_best_effort(data: &[u8]) -> (Vec<DnsCacheEntry>, Option<ProtoErro
     }
 
     (entries, None)
+}
+
+/// 🔐 问题 35：把从缓存文件读出的"秒数"钳制到合理范围，越界时告警一次。
+///
+/// 上限 = [`MAX_TTL`]（86400 秒）。这个值是**写入侧**的上限
+/// （`insert_full_response` 里 `min_ttl.min(MAX_TTL)`），
+/// 因此正常产出的文件不可能超过它 —— 超过即说明文件损坏或被改写。
+///
+/// ⚠️ **不是崩溃防护**：实测 `Instant ± Duration` 溢出时会**饱和**、不 panic。
+/// 这道校验挡的是**语义污染**（超大值让条目"永不新鲜"或"瞬间远古"，
+/// 带偏 `serve-expired` 与预取/清理判断），并让异常**可见**。
+///
+/// 为什么是"钳制"而不是"丢弃整条"：见 `BinDecodable for DnsCacheEntry` 里的说明
+/// （越界通常只是个别字段被破坏，整条丢掉会连带扔掉完好的答案）。
+///
+/// 告警做**限流**（每进程只喊一次）：一份被大范围改写的文件会有成百上千条越界，
+/// 每条都喊会刷屏，反而把真正要看的信息挤掉。
+fn clamp_file_duration(secs: u32, field: &'static str) -> u64 {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    if secs <= MAX_TTL {
+        return secs as u64;
+    }
+
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        crate::log::warn!(
+            "cache file contains an out-of-range time value ({} = {} seconds, limit is {}); \
+             it was clamped to the limit. This usually means the cache file was corrupted or \
+             modified by hand; the affected entries are kept but treated as short-lived. \
+             (further occurrences are not logged)",
+            field,
+            secs,
+            MAX_TTL
+        );
+    }
+
+    MAX_TTL as u64
 }
 
 /// 判断一个文件名是不是**我们自己产出**的缓存存档（`{原文件名}.{tag}-YYYYMMDD-HHMMSS`）。
@@ -1580,7 +1810,11 @@ fn archive_cache_file(path: &Path, tag: &str) -> Option<PathBuf> {
         for old in &siblings {
             match std::fs::remove_file(old) {
                 Ok(()) => info!("removing an old cache archive: {}", old.display()),
-                Err(err) => crate::log::warn!("failed to remove an old cache archive {}: {}", old.display(), err),
+                Err(err) => crate::log::warn!(
+                    "failed to remove an old cache archive {}: {}",
+                    old.display(),
+                    err
+                ),
             }
         }
     }
@@ -1730,12 +1964,34 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
         let message = Message::read(decoder)?;
 
         let tag = decoder.read_u8()?.unverified();
+        // 🔐 问题 35：**时间字段必须做范围校验**。
+        //
+        // 原实现把从文件里读出的秒数**直接采信**：
+        //   · `tag == 2`（还剩多久）→ `Instant::now() + Duration`；
+        //   · `tag == 5`（已过期多久）→ `Instant::now() - Duration`。
+        //
+        // ⚠️ **实测更正**：这两个运算**不会 panic** ——
+        // `Instant ± Duration` 在溢出时**饱和**处理（实测 `u32::MAX` 秒既不加爆也不减崩，
+        // 减法饱和到"约 136 年之前"）。报告原文也写明"不会造成崩溃"。
+        // 所以本项**不是崩溃类缺陷**，危害是**语义污染**：
+        //   · `tag == 2` 写入超大值 ⇒ 该条目在**极长时间内**都被当成"新鲜"，
+        //     永远不会被预取/清理，`serve-expired` 的判断也被带偏；
+        //   · `tag == 5` 写入超大值 ⇒ 条目一下子变成"远古数据"，
+        //     `serve-expired-ttl` 的窗口被瞬间跳过，本该还能喂的旧数据提前作废。
+        //
+        // 处置：**钳制到合理范围并告警**，而不是丢弃整条。
+        // 理由：越界值最可能来自"文件损坏/被改写"，而该条目其余部分（域名、答案）
+        // 往往仍然完好；直接丢弃会把还能用的数据一起扔掉。
+        //
+        // 上限取 `MAX_TTL`（= 86400），与写入侧 `min_ttl.min(MAX_TTL)` 对称 ——
+        // 正常写出的文件**不可能**超过它，所以超过就一定是异常。
         let valid_until = if tag == 2 {
-            let ttl_secs = decoder.read_u32()?.unverified();
-            Instant::now() + Duration::from_secs(ttl_secs as u64)
+            let ttl_secs = clamp_file_duration(decoder.read_u32()?.unverified(), "remaining TTL");
+            Instant::now() + Duration::from_secs(ttl_secs)
         } else if tag == 5 {
-            let dead_for_secs = decoder.read_u32()?.unverified();
-            Instant::now() - Duration::from_secs(dead_for_secs as u64)
+            let dead_for_secs =
+                clamp_file_duration(decoder.read_u32()?.unverified(), "expired duration");
+            Instant::now() - Duration::from_secs(dead_for_secs)
         } else {
             return Err(DecodeError::InsufficientBytes.into());
         };
@@ -1921,6 +2177,170 @@ mod cache_reload_tests {
         assert_eq!(cache.cache_size.load(Ordering::Relaxed), 4096);
     }
 
+    /// 🔐 问题 34：`cache-size` 与实际容量必须"**只会多、不会少**"。
+    ///
+    /// 原实现是 `size / 64`（向下取整），导致实得**少于**配置（1000 → 960）；
+    /// 现在向上取整到 64 的倍数。
+    #[test]
+    fn cache_size_rounds_up_to_shard_multiple() {
+        // 精确值保持不变
+        assert_eq!(effective_cache_size(64), 64);
+        assert_eq!(effective_cache_size(512), 512);
+        assert_eq!(effective_cache_size(4096), 4096);
+
+        // 非整倍：向上取整，**不得少于配置**
+        assert_eq!(effective_cache_size(1), 64);
+        assert_eq!(effective_cache_size(10), 64);
+        assert_eq!(effective_cache_size(32), 64);
+        assert_eq!(effective_cache_size(65), 128);
+        assert_eq!(effective_cache_size(1000), 1024);
+        assert_eq!(effective_cache_size(1025), 1088);
+
+        // 不变量：结果总是 64 的倍数，且 >= 配置值
+        for n in [1usize, 7, 10, 32, 63, 64, 100, 1000, 4096, 65536] {
+            let got = effective_cache_size(n);
+            assert_eq!(got % SHARD_COUNT, 0, "{n} → {got} 必须是 64 的倍数");
+            assert!(got >= n, "{n} → {got} 不得少于配置值（原实现会少）");
+            assert!(
+                got - n < SHARD_COUNT,
+                "{n} → {got} 向上取整最多多出一个分片"
+            );
+        }
+
+        // ⚠️ 0 是"关闭缓存"的哨兵值（调用方在 `cache_size() > 0` 时才建缓存），
+        // 这里不做特判，返回 64 只是为了不产生 0 容量的 LruCache；
+        // **绝不能**把它当成"用户要 64 条缓存"—— 关闭由调用方判断。
+        assert_eq!(effective_cache_size(0), 64);
+    }
+
+    /// 🔐 问题 34：实际分配的总容量要与 `effective_cache_size()` 一致 ——
+    /// 光算对不够，**真的按这个数分配**才算数。
+    #[test]
+    fn actual_capacity_matches_the_rounded_value() {
+        for (configured, expected) in [(10usize, 64usize), (512, 512), (1000, 1024), (4096, 4096)] {
+            let cache = DnsCache::new(configured, false, 0, 0, 0);
+            assert_eq!(
+                cache.actual_cache_size(),
+                expected,
+                "cache-size {configured} 的实际容量应为 {expected}"
+            );
+
+            // 逐片核对：每片容量 × 片数 == 实际总容量
+            let per_shard = expected / SHARD_COUNT;
+            for shard in cache.shards.iter() {
+                let s = shard.lock().unwrap_or_else(|e| e.into_inner());
+                assert_eq!(
+                    s.cap().get(),
+                    per_shard.max(1),
+                    "每片容量应为 {per_shard}（cache-size {configured}）"
+                );
+            }
+        }
+    }
+
+    /// 🔐 问题 34：`cache_size`（配置值）与 `actual_cache_size`（实际值）**是两个东西**，
+    /// 不许混用 —— 管理接口与日志要报后者。
+    #[test]
+    fn configured_and_actual_sizes_are_kept_distinct() {
+        let cache = DnsCache::new(1000, false, 0, 0, 0);
+        assert_eq!(
+            cache.cache_size.load(Ordering::Relaxed),
+            1000,
+            "配置值要原样保留（重载时比对用的是它）"
+        );
+        assert_eq!(
+            cache.actual_cache_size(),
+            1024,
+            "实际值要如实反映向上取整的结果"
+        );
+    }
+
+    /// 🔐 问题 35：缓存文件里的时间字段必须做范围校验。
+    ///
+    /// ⚠️ 危害是**语义污染**而非崩溃（`Instant ± Duration` 溢出会饱和、不 panic）：
+    /// 超大值会让条目"永不新鲜"（tag 2）或"瞬间远古"（tag 5），带偏 `serve-expired`。
+    #[test]
+    fn file_time_fields_are_range_checked() {
+        // 正常范围内：原样采信（不能把合法值也改掉）
+        assert_eq!(clamp_file_duration(0, "t"), 0);
+        assert_eq!(clamp_file_duration(60, "t"), 60);
+        assert_eq!(clamp_file_duration(MAX_TTL, "t"), MAX_TTL as u64);
+
+        // 越界：钳到上限（**不得**原样返回）
+        assert_eq!(clamp_file_duration(MAX_TTL + 1, "t"), MAX_TTL as u64);
+        assert_eq!(clamp_file_duration(u32::MAX, "t"), MAX_TTL as u64);
+    }
+
+    /// 🔐 问题 35 的核心回归：**越界时间必须被钳制，且异常可见**。
+    ///
+    /// ⚠️ **实测更正（重要）**：`Instant ± Duration` 溢出**不会 panic**（饱和处理），
+    /// 所以本项**不是崩溃类缺陷**。它挡的是**语义污染**：
+    /// 未钳制时该条目会变成"约 136 年之前的数据"，`serve-expired` 的窗口被整个跳过。
+    ///
+    /// 做法：先**正常序列化**一条真实条目（保证格式与实现一致、不随布局漂移），
+    /// 再把它的时间字段定点改成 `u32::MAX`。
+    #[test]
+    fn oversized_time_in_file_is_clamped_and_does_not_panic() {
+        // 造一条"刚过期 10 秒"的条目（tag 5 分支），正常序列化
+        let mut entry = make_test_entries(1).remove(0);
+        entry.valid_until = Instant::now() - Duration::from_secs(10);
+
+        let mut buf = Vec::new();
+        DnsCacheEntry::serialize_many(std::iter::once(&entry), &mut buf).unwrap();
+
+        // 定位 tag 5 后的 4 字节时间字段并改写为 u32::MAX。
+        //
+        // ⚠️ 不能只找"字节 == 5"：**域名/报文里本来就可能出现 0x05**（实测踩到过）。
+        // 可靠判据是"结构"：时间字段之后紧跟 `tag3`(0x03) + 组名长度(u16)。
+        // 因此要求 `buf[i]==5` 且 `buf[i+5]==3`，再从**后往前**找（时间字段更靠近尾部，
+        // 避免选中报文里的巧合字节）。
+        //
+        // ⚠️⚠️ 字节序：hickory 的 `emit_u32`/`read_u32` 是 **DNS 网络序（大端）**，
+        // 所以这里必须用 `from_be_bytes` / `to_be_bytes` ——
+        // 用 `ne_bytes` 会读出 0x0a000000 这种离谱值（实测就是这么踩到的）。
+        let pos = (0..buf.len().saturating_sub(5))
+            .rev()
+            .find(|&i| {
+                if buf[i] != 5 || buf[i + 5] != 3 {
+                    return false;
+                }
+                let v = u32::from_be_bytes([buf[i + 1], buf[i + 2], buf[i + 3], buf[i + 4]]);
+                // 刚设置成"过期 10 秒"，所以值应当很小（留足余量）
+                v < 600
+            })
+            .expect("应能定位到 tag5 的时间字段（tag5 + u32 + tag3 结构）");
+        buf[pos + 1..pos + 5].copy_from_slice(&u32::MAX.to_be_bytes());
+
+        // 读档：必须成功、条目必须保留（钳制而非丢弃）
+        let (entries, stopped) = deserialize_best_effort(&buf);
+        assert_eq!(entries.len(), 1, "越界时间不该让条目被丢弃（钳制后仍保留）");
+        assert!(stopped.is_none(), "不该被判成坏档：{stopped:?}");
+
+        // 🔐 核心断言：钳制后，"已过期时长"被压到 MAX_TTL 之内，
+        // 而不是原来的 u32::MAX 秒（≈136 年）。
+        let got = &entries[0];
+        let now = Instant::now();
+        let expired_for = now.saturating_duration_since(got.valid_until).as_secs();
+        assert!(
+            expired_for <= MAX_TTL as u64 + 5,
+            "已过期时长应被钳到 MAX_TTL({}) 之内，实际 {expired_for} 秒\
+             （未钳制会是 {} 秒 ⇒ serve-expired 窗口被整个跳过）",
+            MAX_TTL,
+            u32::MAX
+        );
+
+        // 对照：未钳制时确实会得到"远古"时间（证明这道校验不是多余的）
+        let unclamped = Instant::now() - Duration::from_secs(u32::MAX as u64);
+        let unclamped_expired = Instant::now()
+            .saturating_duration_since(unclamped)
+            .as_secs();
+        assert!(
+            unclamped_expired > MAX_TTL as u64 * 1000,
+            "未钳制的 u32::MAX 会得到约 136 年的'远古'值（{unclamped_expired} 秒），\
+             这正是钳制要挡住的情形"
+        );
+    }
+
     /// 造 n 条测试缓存记录（A 记录，TTL 300 秒）
     /// 🔐 A8：热重载时对"周期落盘任务"该做什么 —— 开 / 关 / 换路径 / 换节拍 四种转换都要对。
     #[test]
@@ -2081,7 +2501,10 @@ mod cache_reload_tests {
                 msg.add_answer(Record::from_rdata(
                     name,
                     300,
-                    RData::A(Ipv4Addr::new(10, 0, 0, i as u8 + 1).into()),
+                    // ⚠️ 原来写的是 `i as u8 + 1`：n > 255 时会**算术溢出 panic**
+                    // （debug 构建下）。翻页测试需要造几百条记录，所以改成不溢出的写法。
+                    // 语义不变（前 255 条地址与原来完全相同）。
+                    RData::A(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 255) as u8 + 1).into()),
                 ));
                 let res: DnsResponse = msg.into();
                 DnsCacheEntry::new(
@@ -2092,6 +2515,141 @@ mod cache_reload_tests {
                 )
             })
             .collect()
+    }
+
+    /// 把 n 条记录放进缓存（按各自的分片散开）
+    fn fill_cache(cache: &DnsCache, n: usize) {
+        for entry in make_test_entries(n) {
+            let key = test_key_of(&entry);
+            cache
+                .get_shard(&key)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .put(key, entry);
+        }
+    }
+
+    /// 🔐 问题 13-③：分页必须（a）结果正确、（b）`total` 如实、（c）**离谱 offset 不付出代价**。
+    ///
+    /// 原实现的两个毛病：
+    ///   · 收集够了用 `continue`（不是 `break`）⇒ 仍把 64 个分片跑完；
+    ///   · `offset` 无上限 ⇒ `?offset=1000000000` 会逐个走完缓存里的每一条。
+    ///
+    /// ⚠️ **这条测试怎么证明"没有白干活"**（第一版做不到，值得记）：
+    /// "结果对不对"是**测不出这个改动的** —— 退回旧实现，返回值**完全一样**，
+    /// 差别只在"多遍历了多少条目"。所以这里用 `DnsCacheEntry` 的**克隆计数**来计量工作量：
+    /// 只有"真的取了一条记录"才会克隆它，因此计数 = 实际取出的条数。
+    /// `offset` 超界时**不该克隆任何一条**；收满一页后**也不该再克隆**。
+    ///
+    /// 若把提前返回去掉，第二条断言就会失败（大 offset 会走完整个缓存）。
+    #[tokio::test]
+    async fn pagination_is_correct_and_bounded() {
+        let cache = DnsCache::new(4096, false, 0, 0, 0);
+        const N: usize = 100;
+        fill_cache(&cache, N);
+
+        // ① total 如实反映全量（翻页器依赖它）
+        let (total, first) = cache.cached_records_paginated(0, 10).await;
+        assert_eq!(total, N, "total 必须是缓存里的全部条数");
+        assert_eq!(first.len(), 10, "第一页应拿满 limit 条");
+
+        // ② 翻页不重不漏：把每页的名字收集起来，应当正好覆盖全部且无重复
+        let mut seen = std::collections::HashSet::new();
+        for offset in (0..N).step_by(10) {
+            let (t, page) = cache.cached_records_paginated(offset, 10).await;
+            assert_eq!(t, N, "每一页返回的 total 都应是全量");
+            for r in page {
+                assert!(
+                    seen.insert(r.name.to_ascii()),
+                    "第 {offset} 页出现了重复条目"
+                );
+            }
+        }
+        assert_eq!(seen.len(), N, "所有页合起来应当正好是全部条目、不重不漏");
+
+        // ③ 超界与极端值：必须返回空页
+        let (total_over, over) = cache.cached_records_paginated(N, 10).await;
+        assert_eq!(total_over, N, "超界时 total 仍要如实");
+        assert!(over.is_empty(), "offset == total 时应返回空页");
+
+        let (t_huge, huge) = cache.cached_records_paginated(usize::MAX, 10).await;
+        assert_eq!(t_huge, N);
+        assert!(huge.is_empty(), "offset=usize::MAX 应返回空页");
+
+        let (t0, none) = cache.cached_records_paginated(0, 0).await;
+        assert_eq!(t0, N);
+        assert!(none.is_empty(), "limit=0 应返回空页");
+
+        // ④ 最后一页（不足 limit）也要正确截断
+        let (_, tail) = cache.cached_records_paginated(N - 3, 10).await;
+        assert_eq!(tail.len(), 3, "末尾不足一页时应只返回剩下的条数");
+    }
+
+    /// 🔐 问题 13-③ 的**代价侧**断言：`offset` 超界时**不得遍历缓存条目**。
+    ///
+    /// ## ⚠️ 这条测试的判别力边界（实测得出，如实标注）
+    ///
+    /// 我一开始想用"时间"来测（超界那路应当更快），**实测两次都没能通过反向验证抓住**：
+    /// 把提前返回禁用之后它**仍然通过** —— 时间断言必须留足余量以免受调度噪声影响，
+    /// 而余量一留宽，就盖过了遍历 2000 条记录的代价。**用时间测"有没有白干活"不可靠。**
+    ///
+    /// 所以改成**确定性计量**：在被测函数内埋一个只在测试构建下生效的计数器，
+    /// 统计它**在第二趟里实际迭代了多少条**。断言于是变成"遍历条数"这种确定量：
+    ///   · `offset` 超界 ⇒ **必须 0**（旧实现会走完整个缓存 ⇒ 计数 = N）；
+    ///   · `limit=5`    ⇒ **必须 5**（旧实现收满后仍继续遍历 ⇒ 计数更大）。
+    ///
+    /// 这个计数**不依赖时间**，所以反向验证能稳定复现。
+    #[tokio::test]
+    async fn pagination_does_not_scan_entries_it_does_not_need() {
+        let cache = DnsCache::new(4096, false, 0, 0, 0);
+        const N: usize = 300;
+        fill_cache(&cache, N);
+
+        // ① offset 远超总数：应当**一条都不遍历**
+        PAGINATION_SCAN_COUNT.store(0, AtomicOrdering::SeqCst);
+        let (_, page) = cache.cached_records_paginated(usize::MAX, 10).await;
+        let scanned = PAGINATION_SCAN_COUNT.load(AtomicOrdering::SeqCst);
+        assert!(page.is_empty());
+        assert_eq!(
+            scanned, 0,
+            "offset 远超总数时不该遍历任何一条，实际遍历了 {scanned} 条\
+             （旧实现会走完整个缓存 —— 这正是问题 13-③ 要消除的可控消耗）"
+        );
+
+        // ② 收满一页就停：limit=5 时遍历量应当"恰好 5 + 至多 1 条用于发现该停"
+        //
+        // ⚠️ 实测得出的**真实语义**（第一版断言写 5、结果实际是 6，测试当场抓出来）：
+        // 循环是"先计数、再判断收满没有"，所以收满后还会**多探一条**才 break。
+        // 1 条的额外代价可以忽略；这里按真实行为断言，并同时钉住"**不能多探很多**" ——
+        // 旧实现会把整个缓存（300 条）走完，所以上界取 limit+1 就能区分两者。
+        PAGINATION_SCAN_COUNT.store(0, AtomicOrdering::SeqCst);
+        let (_, page) = cache.cached_records_paginated(0, 5).await;
+        let scanned = PAGINATION_SCAN_COUNT.load(AtomicOrdering::SeqCst);
+        assert_eq!(page.len(), 5);
+        assert!(
+            (5..=6).contains(&scanned),
+            "limit=5 时最多只应碰 6 条（5 条 + 1 条用来发现该停），实际 {scanned} 条 —— \
+             旧实现收满后仍继续遍历（用 `continue`），会碰 300 条"
+        );
+
+        // ③ 中间页：跳过 offset 条 + 取 limit 条（同样允许"多探 1 条"）
+        PAGINATION_SCAN_COUNT.store(0, AtomicOrdering::SeqCst);
+        let (_, page) = cache.cached_records_paginated(10, 7).await;
+        let scanned = PAGINATION_SCAN_COUNT.load(AtomicOrdering::SeqCst);
+        assert_eq!(page.len(), 7);
+        assert!(
+            (17..=18).contains(&scanned),
+            "offset=10 + limit=7 应当只碰约 17 条（跳过的 10 + 取的 7，至多多探 1 条），\
+             实际 {scanned} 条"
+        );
+
+        // ④ 对照：埋点必须真的在工作（防"计数恒为 0 导致上面断言假通过"）
+        PAGINATION_SCAN_COUNT.store(0, AtomicOrdering::SeqCst);
+        let _ = cache.cached_records_paginated(0, 3).await;
+        assert!(
+            PAGINATION_SCAN_COUNT.load(AtomicOrdering::SeqCst) > 0,
+            "埋点没有计数 —— 上面那些 0 的断言将毫无意义（假通过）"
+        );
     }
 
     /// 🔐 P2：缓存文件头 —— 写进去必须能原样认出来；旧版"无头"文件必须仍被判为旧格式。
@@ -2495,6 +3053,82 @@ mod prefetch_query_tests {
             })
     }
 
+    /// 🔐 问题 27-3：把"排序口径 == 准入口径"这个**不变量**钉住。
+    ///
+    /// ⚠️ **诚实标注**：这条测试**不具备判别力**，撤掉 27-3 的改动它照样通过 ——
+    /// 因为 `x.saturating_sub(1)` 单调非减，两种排序键的结果本来就恒等
+    /// （穷举证据见 `tests/e2e/_p27_3_monotonic.py`：4680 种组合，顺序不一致 0 种）。
+    /// 保留它是为了钉住**行为契约**：够格预取的门槛用的是**扣减前**的 hits，
+    /// 排序也必须用同一个量。将来若有人把门槛降到 `hits >= 1`，并列点才会出现，
+    /// 这条测试就能立刻拦住"低热度排前面"。
+    #[tokio::test]
+    async fn prefetch_order_follows_hits_at_decision_time() {
+        // serve_expired 打开、expired_prefetch_time = 0 ⇒ 走"够格即预取"那条分支
+        let cache = DnsCache::new(1024, true, 600, 5, 0);
+
+        let low = insert_expired_with_hits(&cache, "low.prefetch.test.", 2);
+        let high = insert_expired_with_hits(&cache, "high.prefetch.test.", 3);
+
+        let (order, _most_recent) = cache.get_expired(Instant::now(), Some(5)).await;
+        let names: Vec<String> = order.iter().map(|k| k.query.name().to_ascii()).collect();
+
+        assert_eq!(
+            names,
+            vec!["high.prefetch.test.", "low.prefetch.test."],
+            "热度的条目必须排在前面（排序键取判定时的 hits）"
+        );
+
+        // 扣减照旧发生 —— 它服务的是"这一轮已经安排过了"的热度衰减语义，
+        // 只是不再兼任排序键。
+        assert_eq!(hits_of(&cache, &high), 2, "hits=3 扣减一格 → 2");
+        assert_eq!(hits_of(&cache, &low), 1, "hits=2 扣减一格 → 1");
+    }
+
+    /// 造一条"已过期 + 指定热度"的 A 记录，放进缓存，返回它的标记
+    fn insert_expired_with_hits(cache: &DnsCache, name: &str, hits: usize) -> CacheKey {
+        use std::net::Ipv4Addr;
+
+        let name = Name::from_ascii(name).unwrap();
+        let mut msg = Message::query();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name,
+            300,
+            RData::A(Ipv4Addr::new(10, 0, 0, 1).into()),
+        ));
+        let res: DnsResponse = msg.into();
+
+        let mut entry = DnsCacheEntry::new(
+            res,
+            Instant::now() - Duration::from_secs(1), // 已过期
+            None,
+            AnswerAffectingOpts::default(),
+        );
+        entry.stats.hits = hits;
+
+        let key = CacheKey {
+            query: entry.data.query().clone(),
+            group: "default".to_string(),
+            ecs: None,
+            opts: entry.opts.clone(),
+        };
+        cache
+            .get_shard(&key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(key.clone(), entry);
+        key
+    }
+
+    /// 读回某条缓存记录当前的热度
+    fn hits_of(cache: &DnsCache, key: &CacheKey) -> usize {
+        let shard = cache
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        shard.peek(key).map(|e| e.stats.hits).unwrap_or(0)
+    }
+
     #[test]
     fn refresh_carries_the_records_ecs() {
         let msg = prefetch_query_for(&key(Some("203.0.113.0/24")));
@@ -2511,6 +3145,213 @@ mod prefetch_query_tests {
             ecs_of(&msg),
             None,
             "原记录不带 ECS 时，刷新不该凭空带上一段"
+        );
+    }
+}
+
+/// 🔐 问题 27-4：「正在预取」标记**不得**在任务结束后卡住。
+///
+/// ## 这组测试的定位：钉住**判定不成立**这个结论
+///
+/// 报告原文说：*「'正在预取'标记只靠任务收尾清除，任务在建立标记前被取消时该条目会一直卡住，
+/// 该记录在本进程内不再被预取」*。
+///
+/// 本轮**逐条走完了 `is_in_prefetching` 的全部读写点**，判定**该场景在当期代码里不可达**：
+///
+/// | 事件 | 位置 | 说明 |
+/// |---|---|---|
+/// | 置位 ① | `mark_prefetching` | 唯一的置位入口，成功即返回 true |
+/// | 置位 ② | `get_expired` 遍历时 | 与 `to_prefetch` 配对，随后由 guard 收尾 |
+/// | 复位 ① | `PrefetchGuard::drop` | **无条件**复位，是主要保障 |
+/// | 复位 ② | `insert_full_response` | 上游拿到新结果时清掉 |
+/// | 复位 ③ | `DnsCacheEntry::set_data` | 同上的另一条入口 |
+/// | 复位 ④ | `deserialize_many` | 读缓存文件时**强制**为 false（不落盘） |
+///
+/// **关键在于 `PrefetchGuard` 的构造时机**：两个调用点
+/// （`dns_mw_cache.rs` 的"过期复活"与 `spawn_prefetch_task`）都是
+/// **先 `mark_prefetching`、紧接着就构造 guard**，中间**没有** `?`、`return`
+/// 或可被取消的 `await`；而 guard 被 `async move` 捕获后，
+/// **任务无论正常结束、panic 还是被取消，`Drop` 都必然执行**。
+///
+/// 报告描述的"标记建立前就被取消"需要这样一个窗口：**置位之后、guard 构造之前**
+/// 存在一个可取消的挂起点。当期代码里**不存在**这样的窗口。
+///
+/// ## 所以这组测试不证明"修复有效"，而是：
+///
+///   1. 用**可执行的形式**记录这条结论（避免日后重复排查）；
+///   2. 钉住**不变量**：任何"标记过又被丢弃"的路径都必须让标记回到 false；
+///   3. 万一将来有人在置位与 guard 之间插入 `await`/`?`，这里的断言会立刻暴露风险。
+#[cfg(test)]
+mod prefetch_marker_tests {
+    use super::*;
+
+    /// 造一条**已过期**的 A 记录并放进缓存，返回它的键。
+    fn insert_expired(cache: &DnsCache, name: &str) -> CacheKey {
+        use std::net::Ipv4Addr;
+
+        let name = Name::from_ascii(name).unwrap();
+        let mut msg = Message::query();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name,
+            300,
+            RData::A(Ipv4Addr::new(10, 0, 0, 1).into()),
+        ));
+        let res: DnsResponse = msg.into();
+
+        let entry = DnsCacheEntry::new(
+            res,
+            Instant::now() - Duration::from_secs(1),
+            None,
+            AnswerAffectingOpts::default(),
+        );
+        let key = CacheKey {
+            query: entry.data.query().clone(),
+            group: "default".to_string(),
+            ecs: None,
+            opts: entry.opts.clone(),
+        };
+        cache
+            .get_shard(&key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(key.clone(), entry);
+        key
+    }
+
+    /// 读回"正在预取"标记
+    fn marker_of(cache: &DnsCache, key: &CacheKey) -> bool {
+        cache
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peek(key)
+            .map(|e| e.is_in_prefetching)
+            .unwrap_or(false)
+    }
+
+    /// 🔐 **核心不变量**：`PrefetchGuard` 一旦被丢弃，标记必须回到 false。
+    ///
+    /// 这是整套"不会卡死"结论的基石 —— guard 由 `async move` 捕获，
+    /// 因此**任务正常结束、panic、被取消，三种情况下 `Drop` 都会跑**。
+    ///
+    /// 判别力：把 `PrefetchGuard::drop` 里的复位去掉，本测试必然失败。
+    #[tokio::test]
+    async fn dropping_the_guard_always_clears_the_marker() {
+        let cache = Arc::new(DnsCache::new(1024, true, 600, 5, 0));
+        let key = insert_expired(&cache, "guard-drop.prefetch.test.");
+
+        // 标记成功
+        assert!(
+            cache.mark_prefetching(&key).await,
+            "首次标记应当成功（返回 true 表示'我来做这次预取'）"
+        );
+        assert!(
+            marker_of(&cache, &key),
+            "标记成功后，条目的 is_in_prefetching 必须是 true"
+        );
+
+        // 模拟"预取任务结束"：guard 被丢弃
+        {
+            let _guard = PrefetchGuard {
+                cache: cache.clone(),
+                key: key.clone(),
+            };
+        }
+
+        assert!(
+            !marker_of(&cache, &key),
+            "⚠️ guard 丢弃后标记必须复位 —— 否则该条目在本进程内再也不会被预取（问题 27-4）"
+        );
+    }
+
+    /// 🔐 标记**确实会拦住重复预取**，而复位之后又能重新预取。
+    ///
+    /// 这一条是"两面的"：既证明标记在起作用（不是个死字段），
+    /// 也证明**复位之后能恢复**（不会永久卡住）。
+    #[tokio::test]
+    async fn marker_blocks_then_recovers_after_reset() {
+        let cache = Arc::new(DnsCache::new(1024, true, 600, 5, 0));
+        let key = insert_expired(&cache, "recover.prefetch.test.");
+
+        assert!(cache.mark_prefetching(&key).await, "第一次应当成功");
+        assert!(
+            !cache.mark_prefetching(&key).await,
+            "标记还在时，第二次必须被拒（否则同一记录会被并发预取多次）"
+        );
+
+        // 任务收尾 → 复位
+        {
+            let _guard = PrefetchGuard {
+                cache: cache.clone(),
+                key: key.clone(),
+            };
+        }
+
+        assert!(
+            cache.mark_prefetching(&key).await,
+            "⚠️ 复位之后必须能再次预取 —— 这说明标记不会永久卡住（问题 27-4 的结论）"
+        );
+    }
+
+    /// 🔐 **异常路径**（guard 提前被丢弃，模拟"任务中途出错/被取消"）同样会复位。
+    ///
+    /// 报告描述的卡死前提是"任务在建立标记**之前**被取消"。当期代码里，
+    /// `mark_prefetching` 与 guard 构造**之间没有任何可取消的挂起点**，
+    /// 所以真实场景是"任务拿到标记后中途死掉" —— 而这种情况由 `Drop` 兜住。
+    ///
+    /// 本测试显式模拟后者（拿到标记后立刻丢弃 guard，就像任务刚起步就失败），
+    /// 断言标记回到 false。
+    #[tokio::test]
+    async fn early_drop_on_failure_path_still_resets() {
+        let cache = Arc::new(DnsCache::new(1024, true, 600, 5, 0));
+        let key = insert_expired(&cache, "early-drop.prefetch.test.");
+
+        assert!(cache.mark_prefetching(&key).await);
+
+        // 模拟"任务拿到标记后立刻失败退出"：构造 guard 后马上丢弃
+        let guard = PrefetchGuard {
+            cache: cache.clone(),
+            key: key.clone(),
+        };
+        drop(guard);
+
+        assert!(
+            !marker_of(&cache, &key),
+            "任务提前退出也必须复位标记（Drop 是无条件的，这是不卡死的依据）"
+        );
+    }
+
+    /// 🔐 **成对反证**：上游真的拿到新结果时，标记也会被清掉。
+    ///
+    /// `insert_full_response` 是复位点之一 —— 它保证"预取成功写入新数据"之后
+    /// 标记不会残留（否则下轮又会被误判为'正在预取中'）。
+    #[tokio::test]
+    async fn inserting_a_fresh_response_clears_the_marker() {
+        use std::net::Ipv4Addr;
+
+        let cache = Arc::new(DnsCache::new(1024, true, 600, 5, 0));
+        let key = insert_expired(&cache, "fresh.prefetch.test.");
+        assert!(cache.mark_prefetching(&key).await);
+
+        // 造一份"新鲜"的应答写回去（模拟预取成功）
+        let name = Name::from_ascii("fresh.prefetch.test.").unwrap();
+        let mut msg = Message::query();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name,
+            300,
+            RData::A(Ipv4Addr::new(10, 0, 0, 2).into()),
+        ));
+        let fresh: DnsResponse = msg.into();
+
+        cache
+            .insert_full_response(key.clone(), fresh, Instant::now())
+            .await;
+
+        assert!(
+            !marker_of(&cache, &key),
+            "写入新结果后必须清掉'正在预取'标记（否则下轮预取会被自己的残留标记挡住）"
         );
     }
 }

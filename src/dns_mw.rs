@@ -14,6 +14,20 @@ use crate::{
 
 pub type DnsMiddlewareHost = MiddlewareHost<DnsContext, DnsRequest, DnsResponse, DnsError>;
 
+/// IPv6 的 v4-mapped 地址先归一成 IPv4 —— 否则同一个设备会因为"用了哪种写法"
+/// 落到不同的客户端规则上（`::ffff:192.168.1.5` 与 `192.168.1.5` 必须同组）。
+///
+/// 抽成独立函数是为了让 `search` 与 `resolve_rule_group` **共用同一归一化**，
+/// 不再各写一遍（原先这两处就各写了一份同样的 8 行代码）。
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    if let IpAddr::V6(addr) = ip
+        && let Some(addr) = addr.to_ipv4_mapped()
+    {
+        return addr.into();
+    }
+    ip
+}
+
 pub struct DnsMiddlewareHandler {
     cfg: Arc<RuntimeConfig>,
     host: DnsMiddlewareHost,
@@ -24,6 +38,46 @@ impl DnsMiddlewareHandler {
     #[inline]
     pub fn cfg(&self) -> &Arc<RuntimeConfig> {
         &self.cfg
+    }
+
+    /// 🔐 算出**这次查询实际落在哪个规则组**（`None` = 默认组）。
+    ///
+    /// 为什么抽成公开方法：`app.rs` 在**中间件链之外**还有一处兜底答复
+    /// （上游回"不带 SOA 的 NXDOMAIN"时，自造 NOERROR+SOA），那里也要取组级参数
+    /// （例如 `rr-ttl-reply-max`）。如果让它在外面**自己再判一次**组，就会出现
+    /// "同一件事两处算法"——正是本项目反复吃亏的那类分叉（问题 24 就是两条路径各算各的）。
+    ///
+    /// 判据与 `search` 内部**完全共用这一份**：
+    ///   · 调用方已经指定了组 → 尊重它（预取会把"这条缓存属于哪组"带回来）；
+    ///   · 后台请求 → **不判组**（它的来源是程序自己，硬判只会把组抹成默认）；
+    ///   · 其余 → 按**归组地址**（`grouping_ip`，可来自可信代理）匹配客户端规则。
+    ///
+    /// ⚠️ 注意这里用的是 `grouping_ip`（可伪造）而不是 `client_ip`（真实对端）：
+    /// 选组不是安全边界，与 ACL 放行判定必须分开（见 `search` 里的详细说明）。
+    pub fn resolve_rule_group(&self, req: &DnsRequest, server_opts: &ServerOpts) -> Option<String> {
+        if let Some(g) = server_opts.rule_group.as_ref() {
+            return Some(g.clone());
+        }
+        if server_opts.is_background {
+            return None;
+        }
+
+        let grouping_ip = normalize_ip(req.forwarded_client().unwrap_or(req.src().ip()));
+        self.cfg
+            .client_rules()
+            .iter()
+            .find(|s| s.match_ip(&grouping_ip))
+            .map(|s| s.group.clone())
+    }
+
+    /// 与本次查询对应的规则组名（空串表示默认组），可直接喂给 `*_in_group()`。
+    ///
+    /// 只是 `resolve_rule_group` 的一个方便包装：调用方拿到的永远是"能用"的字符串，
+    /// 不必到处写 `unwrap_or_default()`。
+    #[inline]
+    pub fn rule_group_name(&self, req: &DnsRequest, server_opts: &ServerOpts) -> String {
+        self.resolve_rule_group(req, server_opts)
+            .unwrap_or_default()
     }
 
     pub async fn search(
@@ -37,12 +91,21 @@ impl DnsMiddlewareHandler {
 
         let client_rules = cfg.client_rules();
         // 🌟 修复：坚决剥夺 ECS 参与本地 ACL 控制的权利，只认真实的请求来源物理 IP
-        let mut client_ip = req.src().ip();
-        if let IpAddr::V6(addr) = client_ip
-            && let Some(addr) = addr.to_ipv4_mapped()
-        {
-            client_ip = addr.into();
-        }
+        let client_ip = normalize_ip(req.src().ip());
+
+        // 🔐 13-⑥：**归组地址**与上面的 `client_ip` 是两回事，不能混用。
+        //
+        //   · `client_ip`   = 真实对端（内核给出，**不可伪造**）→ 用于 **ACL 放行判定**；
+        //   · 归组地址       = 可信反向代理经 `X-Forwarded-For` 报来的真实客户端
+        //                     （**可伪造**）→ **只用于选规则组**。
+        //
+        // 为什么必须分开：`X-Forwarded-For` 是客户端能自己填的普通 HTTP 头。
+        // 若拿它做放行判定，攻击者只要伪造一个能匹配白名单的头就**绕过了 ACL**；
+        // 而拿它选规则组，最坏也只是"用了别人的策略"，不构成安全边界。
+        // 详见 `src/trusted_proxy.rs` 模块文档的"三条铁律"第 3 条。
+        //
+        // 📌 归组地址的计算与匹配已搬进 `resolve_rule_group`（下面调用），
+        // 因为它同时被 `app.rs` 的兜底答复路径需要 —— 两处必须共用同一份判据。
 
         // 🔐 Q10 `max-query-limit`：整机**同时处理**的查询数上限。
         //
@@ -58,7 +121,9 @@ impl DnsMiddlewareHandler {
         ) {
             crate::server::limit::QueryAdmission::Allowed(guard) => guard,
             crate::server::limit::QueryAdmission::Refused => {
-                crate::log::debug!("the number of concurrent queries has reached its limit; replying REFUSED");
+                crate::log::debug!(
+                    "the number of concurrent queries has reached its limit; replying REFUSED"
+                );
                 return Err(crate::libdns::proto::op::ResponseCode::Refused.into());
             }
         };
@@ -71,6 +136,10 @@ impl DnsMiddlewareHandler {
         //
         // 后台请求（预取、双栈探针、过期刷新）不是"某个客户端"，不参与 ACL 判定：
         // 否则一开 ACL，预取会被自己拒掉（来源是程序自己，永远匹配不到客户端规则）。
+        //
+        // 🔐 13-⑥：⚠️ 这里**必须用 `client_ip`（真实对端）**，不能用 `grouping_ip` ——
+        // 后者来自可伪造的 `X-Forwarded-For`，拿它做放行判定等于把 ACL 交给调用方自报。
+        // 这是本功能最要紧的一条安全约束。
         let matched_rule = client_rules.iter().find(|s| s.match_ip(&client_ip));
         if !server_opts.is_background
             && (cfg.acl_enable() || server_opts.acl())
@@ -88,8 +157,15 @@ impl DnsMiddlewareHandler {
         //   ② 后台请求（预取、双栈探针、过期刷新）不是"某个人"，不参与按来源 IP 判组
         //      （它的来源是程序自己，匹配不到任何客户端规则，硬判只会把组抹成默认）。
         // 只有"调用方没指定 + 不是后台请求"时，才按来源 IP 从客户端规则里推断。
+        //
+        // 🔐 13-⑥：这里用的是 **`grouping_ip`** —— 选规则组属于"归组"，
+        // 是可信代理功能的**正当用途**（比如"代理后面的访客设备按真实 IP 分到 guest 组"）。
+        // 与上面的 ACL 判定刻意分开，两者的分工见函数开头 `grouping_ip` 的说明。
+        //
+        // 📌 判据已抽到 `resolve_rule_group` —— `app.rs` 的兜底答复路径也要取组级参数，
+        // 两处**必须**共用同一份判据（否则又是"同一件事两处各算各的"）。
         if server_opts.rule_group.is_none() && !server_opts.is_background {
-            server_opts.rule_group = matched_rule.map(|s| s.group.clone());
+            server_opts.rule_group = self.resolve_rule_group(req, &server_opts);
         }
 
         let mut ctx = DnsContext::new(req.query().name().borrow(), cfg, server_opts.clone());
@@ -145,7 +221,7 @@ impl MiddlewareDefaultHandler<DnsContext, DnsRequest, DnsResponse, DnsError> for
     ) -> Result<DnsResponse, DnsError> {
         Err(DnsError::no_records_found(
             req.query().original().to_owned(),
-            ctx.cfg().rr_ttl().unwrap_or_default() as u32,
+            ctx.rr_ttl().unwrap_or_default() as u32,
         ))
     }
 }
@@ -406,6 +482,98 @@ mod tests {
         assert!(
             res.is_ok(),
             "后台请求不许被 ACL 拒掉（否则预取会自己废掉）：{res:?}"
+        );
+    }
+
+    /// 🔐 **13-⑥ 的安全底线（铁律 ③）**：`X-Forwarded-For` **绝不能**影响 ACL 放行。
+    ///
+    /// ## 为什么这条测试必须存在
+    ///
+    /// `X-Forwarded-For` 是**客户端能自己填的普通 HTTP 头**。如果拿它做放行判定，
+    /// 攻击者只要加一行 `X-Forwarded-For: <白名单里的地址>` 就**绕过了 ACL** ——
+    /// 那会把一个"限流不便"的问题升级成"访问控制被绕过"的安全问题。
+    ///
+    /// ## 本测试怎么证明这一点
+    ///
+    /// 场景设计成"两个地址分属不同规则"：
+    ///   * **真实对端** `10.9.9.9` —— 不属于白名单 `127.0.0.0/8`；
+    ///   * **转发地址** `127.0.0.1` —— **属于**白名单。
+    ///
+    /// 若实现错误地拿转发地址做 ACL 判定，请求就会被**放行**（测试失败）；
+    /// 正确实现下必须**拒绝**（因为真实对端不在白名单里）。
+    ///
+    /// 判别力：把 `dns_mw.rs` 里 ACL 判定的 `client_ip` 改成 `grouping_ip`，
+    /// 本测试**必然失败**。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forwarded_for_never_bypasses_acl() {
+        use crate::config::ServerOpts;
+        use crate::libdns::proto::op::ResponseCode;
+
+        let name = "trusted-proxy-acl.example.com";
+
+        // 白名单只放 127.0.0.0/8
+        let cfg = RuntimeConfig::builder()
+            .with("acl-enable yes")
+            .with("client-rules 127.0.0.0/8")
+            .build()
+            .unwrap();
+
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+
+        // 真实对端 10.9.9.9（不在白名单），但请求声称"转发自 127.0.0.1"（在白名单）
+        let req = req_from(name, "10.9.9.9:55010")
+            .with_forwarded_client(Some("127.0.0.1".parse().unwrap()));
+
+        let err = mw.search(&req, &ServerOpts::default()).await.expect_err(
+            "🔐 真实对端不在白名单时**必须拒绝** —— \
+                 即便 `X-Forwarded-For` 声称来自白名单地址。\
+                 若这里被放行，说明伪造一个 HTTP 头就能绕过 ACL",
+        );
+
+        assert_eq!(
+            err.explicit_response_code(),
+            Some(ResponseCode::Refused),
+            "被 ACL 拒掉时应当回 REFUSED（不是 SERVFAIL）"
+        );
+    }
+
+    /// 🔐 13-⑥：把"选组用的是哪个地址"这件事**直接钉在纯逻辑上**。
+    ///
+    /// 上一条测试没法把选组结果读回来（`search` 内部用的是副本），
+    /// 所以这里改成**直接验证地址选择逻辑**：给定 `forwarded_client` 时，
+    /// 归组地址必须是它、而不是真实对端。
+    ///
+    /// 这条与 `forwarded_for_never_bypasses_acl` 合起来构成本功能的完整契约：
+    ///   * 归组 → 用 `forwarded_client`（本条）；
+    ///   * ACL  → 用真实对端（上一条）。
+    #[test]
+    fn grouping_address_prefers_the_forwarded_client() {
+        let name = "grouping.example.com";
+
+        // 没有转发信息 → 归组地址就是真实对端
+        let req = req_from(name, "10.0.0.1:55012");
+        assert_eq!(
+            req.forwarded_client().unwrap_or(req.src().ip()),
+            req.src().ip(),
+            "没有转发信息时，归组地址必须等于真实对端（行为与改动前一致）"
+        );
+
+        // 有转发信息 → 归组地址取它
+        let req = req_from(name, "10.0.0.1:55013")
+            .with_forwarded_client(Some("192.168.1.50".parse().unwrap()));
+        assert_eq!(
+            req.forwarded_client().unwrap_or(req.src().ip()),
+            "192.168.1.50".parse::<std::net::IpAddr>().unwrap(),
+            "🔐 有转发信息时，**归组**必须用转发来的真实客户端地址 —— \
+             否则代理后面的设备全都归到代理那一组（这正是本功能要解决的问题）"
+        );
+        // 同时确认 `src()`（ACL 用的那个）**没有被改掉**
+        assert_eq!(
+            req.src().ip(),
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "🔐 `src()` 必须保持**真实对端**不变 —— ACL 与审计依赖它不可伪造"
         );
     }
 

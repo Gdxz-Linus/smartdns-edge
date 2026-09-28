@@ -91,6 +91,9 @@ impl App {
         .map_err(|e| anyhow::anyhow!("Background config reload task panicked: {}", e))??;
 
         *self.cfg.write().await = new_cfg;
+        // 🔐 13-⑥：热重载可能改了 `trusted-proxy`，管理后台的全局清单也要跟着更新 ——
+        // 否则会出现"改了配置不生效"（而那正是本项目反复治理的一类问题）。
+        crate::api::init_trusted_proxies(self.cfg.read().await.trusted_proxies());
         self.update_middleware_handler().await;
         self.update_listeners().await;
         *self.loaded_at.write().await = Instant::now();
@@ -158,7 +161,9 @@ impl App {
                     continue;
                 };
 
-                log::info!("domain list scheduled refresh: reloading configuration per -interval (minimum {secs} s)");
+                log::info!(
+                    "domain list scheduled refresh: reloading configuration per -interval (minimum {secs} s)"
+                );
                 if let Err(err) = app.reload_reusing_set_cache().await {
                     log::error!("domain list scheduled refresh failed: {err}");
                 }
@@ -232,6 +237,31 @@ impl App {
             let idle_time = cfg.tcp_idle_time();
             let certificate_file = cfg.bind_cert_file();
             let certificate_key_file = cfg.bind_cert_key_file();
+
+            // 🔐 热重载新增监听之前，必须重跑启动时那套「管理后台暴露」检查。
+            //
+            // 为什么：启动时若「后台绑到非本机地址 + 没设 api-token」会直接拒绝启动；
+            // 但那条检查只在启动与 `smartdns test` 时执行，热重载会**新增监听**
+            // 却不复查 —— 于是运行期重载一条 `bind-http 0.0.0.0:8000`，
+            // 后台就对外可用了，而口令只在本机控制台/日志里，恰好绕过这道防线。
+            //
+            // 处理方式：**只跳过不安全的那条监听**，其余监听照常启动。
+            // 若整个重载都失败，会把用户其它正常改动一起废掉，那反而更糟。
+            let layer: Vec<_> = cfg.binds().to_vec();
+            let _ = crate::api::warn_plaintext_api(&layer);
+
+            let mut safe_bind_addrs = Vec::with_capacity(new_bind_addrs.len());
+            for bind_addr in new_bind_addrs {
+                let single = [bind_addr.clone()];
+                if let Err(msg) = crate::api::check_exposure(&single, cfg.api_token()) {
+                    log::error!(
+                        "refusing to start this listener after a configuration reload: {msg}"
+                    );
+                    continue;
+                }
+                safe_bind_addrs.push(bind_addr);
+            }
+            let new_bind_addrs = safe_bind_addrs;
 
             for bind_addr in new_bind_addrs {
                 let serve_handle = server::serve(
@@ -355,7 +385,10 @@ impl App {
             // 配置里已经不要这个监听了（例如用户改完配置并 reload 过）→ 放弃重试
             if !cfg.binds().contains(&bind_addr) {
                 self.bind_retry.write().await.remove(&bind_addr);
-                log::info!("listener {} is no longer in the current configuration; retry abandoned", bind_addr.sock_addr());
+                log::info!(
+                    "listener {} is no longer in the current configuration; retry abandoned",
+                    bind_addr.sock_addr()
+                );
                 continue;
             }
 
@@ -800,13 +833,13 @@ pub(crate) fn response_material(
     use crate::libdns::proto::op::Message;
 
     match message {
-        SerialMessage::Raw(raw, addr, protocol) => Some((
+        SerialMessage::Raw(raw, addr, protocol, _) => Some((
             raw.header().clone(),
             raw.queries().to_vec(),
             *addr,
             *protocol,
         )),
-        SerialMessage::Bytes(bytes, addr, protocol) => {
+        SerialMessage::Bytes(bytes, addr, protocol, _) => {
             // ① 能完整解析：连问题段一起带走（客户端对号最稳）
             if let Ok(parsed) = Message::from_vec(bytes.as_ref()) {
                 return Some((
@@ -946,6 +979,14 @@ async fn process_inner(
                                                 // 🔐 P2：还要受 rr-ttl-reply-max（对客户端展示的最大 TTL）约束 ——
                                                 // 这条响应是在中间件链之外（app 层兜底）生成的，不经过地址中间件的裁剪，
                                                 // 所以必须在这里自己收一次口，否则否定缓存的寿命会比配置的上限更长。
+                                                //
+                                                // 📌 甲类（2026-09-26）：`rr-ttl-reply-max` 现在**可按规则组区分**，
+                                                // 所以这里必须先算出"本次查询落在哪个组"。
+                                                // ⚠️ 组判据**走 `handler.rule_group_name()`**，与 `search` 内部
+                                                // 共用同一份 —— 绝不在这里自己再判一次（那会变成"同一件事两处各算各的"，
+                                                // 正是问题 24 那类分叉的成因）。
+                                                let group =
+                                                    handler.rule_group_name(&request, &server_opts);
                                                 let soa_ttl = handler
                                                     .cfg()
                                                     .rr_ttl()
@@ -954,7 +995,7 @@ async fn process_inner(
                                                     .min(
                                                         handler
                                                             .cfg()
-                                                            .rr_ttl_reply_max()
+                                                            .rr_ttl_reply_max_in_group(&group)
                                                             .map(|v| v as u32)
                                                             .unwrap_or(u32::MAX),
                                                     );
@@ -1143,6 +1184,7 @@ fn build_middleware(
     use crate::dns_mw_dns64::Dns64Middleware;
     use crate::dns_mw_dnsmasq::DnsmasqMiddleware;
     use crate::dns_mw_dualstack::DnsDualStackIpSelectionMiddleware;
+    use crate::dns_mw_force_no_cname::DnsForceNoCNameMiddleware;
     use crate::dns_mw_hosts::DnsHostsMiddleware;
     use crate::dns_mw_ns::NameServerMiddleware;
     use crate::dns_mw_zone::DnsZoneMiddleware;
@@ -1166,13 +1208,29 @@ fn build_middleware(
             ));
         }
 
+        // 🔐 `force-no-CNAME`：必须挂在**最外层**（只比客户端分流与审计靠内）。
+        //
+        // 理由：中间件是洋葱模型，注册得越早 = 越外层 = `next.run()` 之后的收尾代码
+        // 执行得越晚，看到的是最"终态"的应答；而且**无论内层是否继续深入都会执行**。
+        // 这一条至关重要 —— 缓存命中时 `DnsCacheMiddleware` 是直接 `return`、**不调
+        // `next.run()`** 的，如果本中间件挂在缓存内层，缓存命中路径就会整个绕过它
+        // （非 A/AAAA 类型会在缓存命中时把 CNAME 漏给客户端）。
+        // 挂在最外层也就覆盖了规则组 CNAME（`DnsCNameMiddleware`）产生的 CNAME。
+        if cfg.force_no_cname() {
+            builder = builder.with(DnsForceNoCNameMiddleware);
+        }
+
         if cfg.rule_groups().values().any(|x| !x.cnames.is_empty()) {
             builder = builder.with(DnsCNameMiddleware);
         }
 
-        if let Some(dns64_prefix) = cfg.dns64_prefix {
-            builder = builder.with(Dns64Middleware::new(dns64_prefix));
-        }
+        // 📌 丙-2a：DNS64 中间件**无条件挂载**，前缀改为逐查询取值。
+        //
+        // 原先这里是 `if let Some(prefix) = cfg.dns64_prefix { ...with(Dns64Middleware::new(prefix)) }`
+        // —— 那在"只有某个规则组配了 dns64"时会彻底失效：中间件压根没挂。
+        // 现在无条件挂上，由中间件内部按 `ctx.dns64_prefix()` 判断本查询要不要合成
+        // （没有配置时它直接放行，行为与旧版一致）。
+        builder = builder.with(Dns64Middleware::new());
 
         builder = builder.with(DnsZoneMiddleware::new());
 
@@ -1272,7 +1330,19 @@ impl
             crate::dns::DnsError,
         >,
     ) -> Result<crate::dns::DnsResponse, crate::dns::DnsError> {
-        let client_ip = req.src().ip();
+        // 🔐 13-⑥：这个中间件**只做归组**（给请求打上"用哪个规则组"的标记），
+        // 所以它可以、也应该使用**归组地址** —— 即"可信反向代理报来的真实客户端"。
+        //
+        // 这是可信代理功能的**正当用途**：代理后面的访客设备按真实 IP 分到 guest 组。
+        // （ACL 的放行判定在 `dns_mw.rs`，那里仍用真实对端，两者刻意分开。）
+        let client_ip = req.forwarded_client().unwrap_or(req.src().ip());
+
+        // ⚠️ 但 **MAC 规则必须用真实对端地址**：MAC 是从本机 ARP/邻居表查出来的，
+        // 而 ARP 表里只有**真实局域网地址**。拿一个"代理报来的公网地址"去查 ARP
+        // 必然查不到，那会让所有 MAC 规则在挂代理的部署里静默失效 ——
+        // 属于"配了不生效"，正是本项目反复治理的一类问题。
+        let arp_ip = req.src().ip();
+
         let mut matched_group = None;
 
         // 🌟 局部懒加载：确保即使配置文件里有几百条 MAC 规则，当前请求也只向系统或缓存查一次！
@@ -1291,7 +1361,7 @@ impl
                             let cached_mac = {
                                 let mut cache =
                                     self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
-                                if let Some((mac, expire_at)) = cache.get(&client_ip) {
+                                if let Some((mac, expire_at)) = cache.get(&arp_ip) {
                                     if now < *expire_at {
                                         Some(mac.clone()) // 命中且未过期
                                     } else {
@@ -1308,7 +1378,7 @@ impl
                                 // 2. 缓存穿透：
                                 // 🌟 核心修复：把极耗时的系统调用（查底层 ARP 表 / 执行系统命令）扔给专属的阻塞线程池。
                                 // 彻底杜绝使用 block_in_place 导致 Tokio 核心工作线程被挂起和引发线程重建雪崩！
-                                let ip = client_ip;
+                                let ip = arp_ip;
                                 let fetched_mac = tokio::task::spawn_blocking(move || {
                                     crate::infra::arp::lookup_client_mac_from_arp(ip)
                                 })
@@ -1319,7 +1389,7 @@ impl
                                 let mut cache =
                                     self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
                                 cache.put(
-                                    client_ip,
+                                    arp_ip,
                                     (
                                         fetched_mac.clone(),
                                         now + std::time::Duration::from_secs(60),
@@ -1391,8 +1461,8 @@ mod p0_2_tests {
     /// 从应答里取出 Message（SerialMessage 是本项目自己的枚举，直接匹配即可）
     fn unwrap_message(response: SerialMessage) -> Box<Message> {
         match response {
-            SerialMessage::Raw(message, _, _) => message,
-            SerialMessage::Bytes(_, _, _) => panic!("本测试期望 Raw 应答"),
+            SerialMessage::Raw(message, ..) => message,
+            SerialMessage::Bytes(..) => panic!("本测试期望 Raw 应答"),
         }
     }
 

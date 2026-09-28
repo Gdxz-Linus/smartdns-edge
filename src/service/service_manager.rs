@@ -27,6 +27,14 @@ impl ServiceDefinition {
             commands,
         }
     }
+
+    /// 🔐 问题 48：只读访问器 —— 让 `service::windows` 的单元测试能
+    /// 校验**真实生成的** PowerShell 命令（语法、以及"三处静默"是否还在）。
+    ///
+    /// 加访问器而不是把字段改成 `pub`：保持封装，同时给测试留一个明确的入口。
+    pub fn commands(&self) -> &ServiceCommands {
+        &self.commands
+    }
 }
 
 #[derive(Debug)]

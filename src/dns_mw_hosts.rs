@@ -21,7 +21,11 @@ struct HostsCache {
     has_content: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// hosts 文件的"签名"：一组文件的路径 + 修改时间。
+///
+/// `Default`（空列表）用于"签名任务失败且尚无缓存"时的退化值 ——
+/// 见 `cached_hosts` 里问题 27-5 的处理。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct HostsFileSignature {
     files: Vec<HostsFileMeta>,
 }
@@ -53,12 +57,42 @@ impl DnsHostsMiddleware {
         let pattern_str = hosts_file_pattern.map(|p| p.as_str().to_string());
 
         // 🌟 核心修复：外包签名收集（含阻塞的 fs::metadata）
-        let signature = tokio::task::spawn_blocking({
+        //
+        // 🔐 问题 27-5：**不能把后台任务的失败 unwrap 给请求任务**。
+        //
+        // 原来这里是 `.await.unwrap()`：`spawn_blocking` 的任务一旦 panic
+        // （例如正则回溯、被取消、或将来有人往 `collect_hosts_signature` 里加了会 panic 的东西），
+        // `unwrap` 就会把 panic **抛进正在处理客户端查询的任务** ——
+        // 表现是"这个客户端超时/被兜底成 SERVFAIL"，而真正的原因在后台线程，日志里对不上。
+        //
+        // 注意 `collect_hosts_signature` **自身已经吞掉了所有 IO 错误**
+        // （glob 失败、metadata 失败都只记日志），所以走到这里的 `Err` 只可能是
+        // 任务 panic 或被取消 —— 这两种情况都应当"保持现状"，而不是让请求失败。
+        //
+        // 处理：拿不到新签名就**沿用缓存里已有的签名**（继续用上次的 hosts 内容），
+        // 没有缓存则退化为"空签名"，并限流告警一次让人知道 hosts 刷新出了问题。
+        let signature = match tokio::task::spawn_blocking({
             let p_str = pattern_str.clone();
             move || collect_hosts_signature(p_str.as_deref())
         })
         .await
-        .unwrap();
+        {
+            Ok(sig) => sig,
+            Err(err) => {
+                if crate::log::warn_once("hosts-signature-task-failed") {
+                    crate::log::warn!(
+                        "the hosts-file signature task failed ({}); keeping the previously loaded hosts content. \
+                         If this repeats, check the hosts file pattern and the log for a task panic",
+                        err
+                    );
+                }
+                // 沿用已有签名，让后续比较不会误判成"文件变了"而触发无谓的重新读取
+                match self.0.read().await.as_ref() {
+                    Some(cache) => cache.signature.clone(),
+                    None => HostsFileSignature::default(),
+                }
+            }
+        };
 
         {
             let mut cache = self.0.write().await;
@@ -82,7 +116,9 @@ impl DnsHostsMiddleware {
         let (mut refreshed, mut has_content) = read_hosts_blocking(pattern_str.clone()).await;
 
         if !has_content && prev_has_content {
-            log::debug!("the hosts file read as empty this time; it will be read once more shortly (the file may be mid-replacement)");
+            log::debug!(
+                "the hosts file read as empty this time; it will be read once more shortly (the file may be mid-replacement)"
+            );
             tokio::time::sleep(Duration::from_millis(200)).await;
             let (hosts2, content2) = read_hosts_blocking(pattern_str.clone()).await;
             refreshed = hosts2;
@@ -108,13 +144,30 @@ impl DnsHostsMiddleware {
 }
 
 /// 在阻塞线程里读 hosts（`read_hosts` 里有文件 IO）。
+///
+/// 🔐 问题 27-5：任务失败时**退回"没有 hosts"**，而不是把 panic 抛给请求任务。
+/// 语义上这是安全的降级：hosts 读不出来时，查询照常走上游解析
+/// （`handle` 里 `hosts.lookup_static_host(...)` 返回 `None` 就会 `next.run(...)`），
+/// 比"让客户端超时"好得多；同时限流告警，让人知道 hosts 没生效。
 async fn read_hosts_blocking(pattern: Option<String>) -> (Hosts, bool) {
-    tokio::task::spawn_blocking(move || match pattern {
+    match tokio::task::spawn_blocking(move || match pattern {
         Some(ref pattern) => read_hosts(pattern),
         None => (Hosts::default(), false),
     })
     .await
-    .unwrap()
+    {
+        Ok(v) => v,
+        Err(err) => {
+            if crate::log::warn_once("hosts-read-task-failed") {
+                crate::log::warn!(
+                    "the hosts-file read task failed ({}); falling back to no static hosts for now \
+                     (queries still go to the upstreams). If this repeats, check the log for a task panic",
+                    err
+                );
+            }
+            (Hosts::default(), false)
+        }
+    }
 }
 
 const HOSTS_FILE_STAT_INTERVAL: Duration = Duration::from_secs(2);

@@ -111,6 +111,11 @@ impl IDomainSetProvider for DomainSetHttpProvider {
             .and_then(|proxy_name| crate::proxy::resolve_proxy(proxies, proxy_name))
             .map(|p| p.to_string());
 
+        // 🔐 问题 39：下载前先做协议白名单校验（默认仅 https）。
+        // 放在这里而不是只依赖 http_client 内部，是为了让"为什么被拒"直接指向是哪个名单地址，
+        // 而不是抛出一句底层的传输层错误。
+        http_client::check_download_url(self.url.as_str())?;
+
         let res = http_client::get(self.url.to_string(), proxy_str.as_deref())?;
 
         let text = res.text()?;
@@ -159,33 +164,71 @@ mod tests {
     };
     use std::time::Duration;
 
-    /// 迷你 HTTP 名单服务器：返回 `list` 里的内容，`hits` 记请求次数，
+    /// 迷你 **HTTPS** 名单服务器：返回 `list` 里的内容，`hits` 记请求次数，
     /// `stop` 置位后一律不应答（模拟"刷新时取用失败"）。
+    ///
+    /// 🔐 问题 39：从明文 http 改为 HTTPS —— 生产侧已收紧为「仅 https」，
+    /// 再用 http 服务器测就等于绕开了 `https_only` 真正生效的那条路径。
+    /// 证书用 `tests/test_data/tls/` 里的自签证书（仅测试用），
+    /// 由 `http_client::test_tls` 在当前线程注入信任。
     fn spawn_list_server(
         list: Arc<Mutex<String>>,
         hits: Arc<AtomicUsize>,
         stop: Arc<AtomicBool>,
     ) -> u16 {
+        use crate::rustls::{TlsServerCertResolver, tls_server_config};
+        use rustls::server::ResolvesServerCert;
+        use std::sync::Arc as StdArc;
+
+        // 本线程的下载要信任这份自签证书
+        crate::infra::http_client::test_tls::trust_test_ca_for_this_thread();
+
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
+        let resolver = TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"))
+            .expect("测试证书应当能加载");
+        let tls = tls_server_config(
+            b"http/1.1",
+            StdArc::new(resolver) as StdArc<dyn ResolvesServerCert>,
+        )
+        .expect("测试 TLS 服务端配置应当能建立");
+        let tls = StdArc::new(tls);
+
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                if stop.load(Ordering::SeqCst) {
-                    // 直接关掉连接：客户端拿不到响应，按"取用失败"处理
-                    continue;
-                }
-                hits.fetch_add(1, Ordering::SeqCst);
-                let body = list.lock().unwrap().clone();
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.flush();
+                let Ok(stream) = stream else { continue };
+                let tls = tls.clone();
+                let list = list.clone();
+                let hits = hits.clone();
+                let stop = stop.clone();
+
+                // 每个连接单独处理：TLS 握手是阻塞的，不能卡住 accept 循环
+                std::thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(tls) else {
+                        return;
+                    };
+                    let mut conn = rustls::StreamOwned::new(conn, stream);
+
+                    let mut buf = [0u8; 1024];
+                    let _ = conn.read(&mut buf);
+
+                    if stop.load(Ordering::SeqCst) {
+                        // 直接关掉连接：客户端拿不到响应，按"取用失败"处理
+                        return;
+                    }
+
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let body = list.lock().unwrap().clone();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = conn.write_all(resp.as_bytes());
+                    let _ = conn.flush();
+                });
             }
         });
         port
@@ -194,7 +237,7 @@ mod tests {
     fn http_provider(name: &str, port: u16, interval: Option<usize>) -> DomainSetHttpProvider {
         DomainSetHttpProvider {
             name: name.to_string(),
-            url: Url::parse(&format!("http://127.0.0.1:{port}/list.txt")).unwrap(),
+            url: Url::parse(&format!("https://127.0.0.1:{port}/list.txt")).unwrap(),
             interval,
             content_type: Default::default(),
             proxy: None,
@@ -285,5 +328,123 @@ mod tests {
             never.get_domain_set_cached(&proxies, false).is_err(),
             "没有任何可用旧名单时，取用失败应如实报错"
         );
+    }
+
+    // ================= 🔐 问题 39：仅 https / 禁止降级跳转 =================
+
+    /// 🔐 问题 39 的端到端回归：**禁止 https → http 降级跳转**。
+    ///
+    /// 这条比单纯断言常量更有价值：它真的起两个服务器 ——
+    /// 一个 HTTPS（回 `302` 跳到明文），一个**明文的 HTTP 服务器真的在监听**并在那里
+    /// 放了一份"恶意名单"（含通配规则 `*.evil.test`）。然后断言下载**失败**。
+    ///
+    /// 之所以让明文服务器真的在监听：如果只是跳到一个没人监听的端口，
+    /// 撤掉修复后失败的原因会是"连不上"——那就证明不了"降级被拦住"。
+    /// 明文服务器真的可用时，**撤掉修复就会下载成功、并把恶意通配规则吃进去**，
+    /// 这条断言才真正钉住了降级这个攻击面。
+    #[test]
+    fn https_to_http_downgrade_redirect_is_refused() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        crate::infra::http_client::test_tls::trust_test_ca_for_this_thread();
+
+        // ① 明文 HTTP 服务器：真的能提供一份含通配规则的恶意名单
+        let plain_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let plain_port = plain_listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in plain_listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "*.evil.test\n";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        // ② HTTPS 服务器：无论请求什么都回一个跳到 ① 的明文地址
+        let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tls_port = tls_listener.local_addr().unwrap().port();
+        let downgrade_to = format!("http://127.0.0.1:{plain_port}/plain.txt");
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
+        let resolver =
+            crate::rustls::TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"))
+                .expect("测试证书应当能加载");
+        let tls = crate::rustls::tls_server_config(
+            b"http/1.1",
+            Arc::new(resolver) as Arc<dyn rustls::server::ResolvesServerCert>,
+        )
+        .expect("测试 TLS 服务端配置应当能建立");
+        let tls = Arc::new(tls);
+
+        std::thread::spawn(move || {
+            for stream in tls_listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let tls = tls.clone();
+                let downgrade = downgrade_to.clone();
+                std::thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(tls) else {
+                        return;
+                    };
+                    let mut conn = rustls::StreamOwned::new(conn, stream);
+
+                    let mut buf = [0u8; 1024];
+                    let _ = conn.read(&mut buf);
+
+                    let resp = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {downgrade}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = conn.write_all(resp.as_bytes());
+                    let _ = conn.flush();
+                });
+            }
+        });
+
+        let provider = DomainSetHttpProvider {
+            name: "downgrade-test".to_string(),
+            url: Url::parse(&format!("https://127.0.0.1:{tls_port}/list.txt")).unwrap(),
+            interval: None,
+            content_type: Default::default(),
+            proxy: None,
+        };
+
+        // 关键断言：必须失败，且**不能**拿到明文服务器上那份含通配规则的名单
+        match provider.get_domain_set(&Default::default()) {
+            Err(err) => {
+                let shown = format!("{err:#}").to_lowercase();
+                assert!(
+                    shown.contains("https") || shown.contains("scheme"),
+                    "失败原因应当指向『仅允许 https』，实际是: {shown}"
+                );
+            }
+            Ok(set) => panic!(
+                "https→http 的降级跳转必须被拒绝：下载从明文 http 成功了，\
+                 并吃进了 {} 条规则（含通配注入面）",
+                set.len()
+            ),
+        }
+    }
+
+    /// 🔐 问题 39：正常的 HTTPS 下载必须照常工作，
+    /// 防止"为了拦截降级把正常路径也一起拦掉"。
+    #[test]
+    fn plain_https_download_still_works() {
+        let list = Arc::new(Mutex::new("ok.example.com\n".to_string()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let port = spawn_list_server(list.clone(), hits.clone(), stop);
+
+        let p = http_provider("plain-https-test", port, None);
+        let set = p
+            .get_domain_set(&Default::default())
+            .expect("正常 https 名单必须能下载");
+        assert!(set.contains(&"ok.example.com".parse().unwrap()));
     }
 }

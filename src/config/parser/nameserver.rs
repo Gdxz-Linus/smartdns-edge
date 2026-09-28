@@ -81,6 +81,24 @@ impl NomParser for NameServerInfo {
                     "interface" => {
                         nameserver.interface = v.map(|p| p.to_string());
                     }
+                    // 🔐 兼容别名：`-device` 等价于 `-interface`，但**会告警提示改用后者**。
+                    //
+                    // 为什么容忍这个写法：`-device` 是一个很容易写出来的猜测 ——
+                    // 文档站（中英文）与代码都用 `-interface`，但项目基点 §2 的功能清单里
+                    // 误写成了 `-device`，我自己写测试配置时就照抄踩过一次。
+                    // 在加这个别名之前，用户的写法会落到"未识别选项"分支，
+                    // 只得到一句 `unknown server options: device`（且**只是告警**）——
+                    // 于是"以为绑定了网卡、实际完全没生效"，属于最伤信任的静默无效。
+                    //
+                    // 现在：**照常生效**（避免用户白排查），同时明确提示正确写法。
+                    // 提示词刻意带上"please use `-interface`"，让用户在日志里就能改对。
+                    "device" => {
+                        log::warn!(
+                            "`-device` is a deprecated alias of `-interface`; please use `-interface {}` instead (the setting is applied either way)",
+                            v.unwrap_or("<name>")
+                        );
+                        nameserver.interface = v.map(|p| p.to_string());
+                    }
                     "subnet" => match v {
                         Some(s) => {
                             match IpNet::parse(s) {
@@ -305,6 +323,59 @@ mod tests {
         let (_, server) =
             NameServerInfo::parse("server tls://dot.example.com -host-ip 不是IP").unwrap();
         assert_eq!(server.server.ip(), None);
+    }
+
+    // ============ `-device` 兼容别名（问题 50 延伸） ============
+
+    /// 🔐 `-device` 必须与 `-interface` **解析结果完全一致**。
+    ///
+    /// 背景：文档站（中英文）与代码都写 `-interface`，但项目基点 §2 的功能清单里
+    /// 误写成了 `-device`。在加别名之前，按那份文档写配置的用户会落到
+    /// "未识别选项"分支，只得到一句告警 —— **网卡绑定完全没生效**，
+    /// 属于"以为配了、实际没配"的静默无效（与问题 50 同一类危害，只是触发点更早：
+    /// 连解析都没过）。
+    ///
+    /// 这条测试钉住"两种写法等价"，避免日后有人只改一处导致行为漂移。
+    #[test]
+    fn test_device_is_an_alias_of_interface() {
+        let (rest_a, via_interface) =
+            NameServerInfo::parse("server 8.8.8.8:53 -interface eth0").unwrap();
+        let (rest_b, via_device) = NameServerInfo::parse("server 8.8.8.8:53 -device eth0").unwrap();
+
+        assert_eq!(rest_a, "", "`-interface` 写法应当被完整消费");
+        assert_eq!(
+            rest_b, "",
+            "`-device` 写法应当被完整消费（不是「未识别选项」）"
+        );
+
+        assert_eq!(
+            via_interface.interface,
+            Some("eth0".to_string()),
+            "`-interface` 应当生效"
+        );
+        assert_eq!(
+            via_device.interface,
+            Some("eth0".to_string()),
+            "🔐 `-device` 是 `-interface` 的别名，必须同样生效 —— \
+             否则按项目基点旧写法配置的用户会「配了不生效」"
+        );
+
+        // 两者除了这个字段，其余应当完全一致
+        assert_eq!(
+            via_interface, via_device,
+            "两种写法解析出的 NameServerInfo 应当完全相同"
+        );
+    }
+
+    /// 🔐 别名不能"只认值、不认开关语义"：`-device` 后面没值时仍应产出 `None`
+    /// （与 `-interface` 的既有行为一致，不能因为加了别名就凭空造出一个网卡名）。
+    #[test]
+    fn test_device_without_value_leaves_interface_none() {
+        let (_, s) = NameServerInfo::parse("server 8.8.8.8 -device").unwrap();
+        assert_eq!(
+            s.interface, None,
+            "`-device` 不带值时不应设置网卡（与 `-interface` 保持一致）"
+        );
     }
 
     /// 上游本身就写的 IP 时，`-host-ip` 无意义 → 保持原地址（不覆盖）

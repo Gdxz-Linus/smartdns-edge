@@ -116,6 +116,9 @@ impl IpSetHttpProvider {
             .and_then(|proxy_name| crate::proxy::resolve_proxy(proxies, proxy_name))
             .map(|p| p.to_string());
 
+        // 🔐 问题 39：下载前先做协议白名单校验（默认仅 https），与 `domain-set` 同款。
+        http_client::check_download_url(self.url.as_str())?;
+
         let res = http_client::get(self.url.to_string(), proxy_str.as_deref())?;
         let text = res.text()?;
         Ok(parse_ip_set_file(&text).collect())
@@ -163,30 +166,54 @@ asdfghjkl
             atomic::{AtomicUsize, Ordering},
         };
 
+        // 🔐 问题 39：与 `domain-set` 一致，改用 HTTPS 服务器（生产已收紧为「仅 https」）。
+        crate::infra::http_client::test_tls::trust_test_ca_for_this_thread();
+
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_srv = hits.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
+        let resolver =
+            crate::rustls::TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"))
+                .expect("测试证书应当能加载");
+        let tls = crate::rustls::tls_server_config(
+            b"http/1.1",
+            Arc::new(resolver) as Arc<dyn rustls::server::ResolvesServerCert>,
+        )
+        .expect("测试 TLS 服务端配置应当能建立");
+        let tls = Arc::new(tls);
+
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                hits_srv.fetch_add(1, Ordering::SeqCst);
-                let body = "1.2.3.0/24\n203.0.113.9\n# 注释\n";
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.flush();
+                let Ok(stream) = stream else { continue };
+                let tls = tls.clone();
+                let hits_srv = hits_srv.clone();
+                std::thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(tls) else {
+                        return;
+                    };
+                    let mut conn = rustls::StreamOwned::new(conn, stream);
+
+                    let mut buf = [0u8; 1024];
+                    let _ = conn.read(&mut buf);
+                    hits_srv.fetch_add(1, Ordering::SeqCst);
+                    let body = "1.2.3.0/24\n203.0.113.9\n# 注释\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = conn.write_all(resp.as_bytes());
+                    let _ = conn.flush();
+                });
             }
         });
 
         let provider = IpSetProvider::Http(IpSetHttpProvider {
             name: "ipset-http-test".to_string(),
-            url: Url::parse(&format!("http://127.0.0.1:{port}/list.txt")).unwrap(),
+            url: Url::parse(&format!("https://127.0.0.1:{port}/list.txt")).unwrap(),
             interval: Some(3600),
             proxy: None,
         });

@@ -246,6 +246,21 @@ impl FromStr for ProxyConfig {
 
         let password = url.password();
 
+        // 🔐 问题 38：`socks5://:口令@主机` 这种「只有口令、没有用户名」的写法必须**拒绝**。
+        //
+        // 原先的后果是**静默走无认证连接**：用户名被置成 `None`，而认证流程只在
+        // `username.is_some()` 时才发起（见本文件 handshake_tcp / handshake_udp），
+        // 于是用户以为配好了认证、实际一条凭据都没发出去，且没有任何告警。
+        // 「配了却静默不生效」正是本次整改要消灭的一类问题，所以在**解析阶段**直接判为配置错误。
+        //
+        // 注意这里**只拒绝这一种**：
+        //   * 纯匿名 `socks5://主机` —— 合法，保留；
+        //   * 只有用户名 `socks5://用户名@主机` —— 合法（口令为空串），认证照常发起，保留。
+        // 也就是说本改动不会让任何原先「真正生效」的配置开始报错。
+        if username.is_none() && password.is_some() {
+            return Err(ProxyParseError::PasswordWithoutUsername);
+        }
+
         Ok(Self {
             proto,
             server,
@@ -269,6 +284,17 @@ pub enum ProxyParseError {
     Addr(#[from] AddrParseError),
     #[error("{0:?}")]
     Parse(#[from] ParseError),
+    /// 🔐 问题 38：`scheme://:口令@主机` —— 写了口令却没有用户名。
+    ///
+    /// 这种写法原先会被**静默地**当成匿名代理（认证只在用户名存在时才发起），
+    /// 用户以为配好了认证、实际没走。这里判为配置错误，让问题在启动时就暴露出来，
+    /// 而不是在"代理认证莫名失败"时才发现。正确写法是 `scheme://用户名:口令@主机`。
+    #[error(
+        "a password was given without a username (e.g. `socks5://:password@host`); \
+         authentication is only performed when a username is present, so this password would be \
+         silently ignored -- write `socks5://username:password@host` instead"
+    )]
+    PasswordWithoutUsername,
 }
 
 #[cfg(test)]
@@ -346,6 +372,66 @@ mod tests {
                 proto: ProxyProtocol::Http,
                 server: "1.2.3.4:8080".parse().unwrap(),
                 username: None,
+                password: None
+            })
+        );
+    }
+
+    // ================= 🔐 问题 38：拒绝「只有口令、没有用户名」 =================
+
+    /// 核心回归：`socks5://:口令@主机` 必须**在解析阶段**报配置错误。
+    ///
+    /// 原先它会得到 `username: None, password: Some(..)` —— 而认证只在用户名存在时才发起，
+    /// 于是口令被静默丢弃、实际走无认证连接。这里断言它不再被静默接受。
+    #[test]
+    fn password_without_username_is_rejected() {
+        for input in [
+            "socks5://:mypassword@1.2.3.4:1080",
+            "http://:mypassword@1.2.3.4:8080",
+        ] {
+            let err = ProxyConfig::from_str(input)
+                .expect_err("只有口令没有用户名的写法必须被拒绝（否则口令会被静默丢弃）");
+            assert_eq!(
+                err,
+                ProxyParseError::PasswordWithoutUsername,
+                "错误类型必须能指明原因，实际得到: {err:?}（输入 {input}）"
+            );
+            // 错误文案要能指导用户改正，且**绝不能**把口令本身带出去
+            let shown = err.to_string();
+            assert!(
+                shown.contains("username"),
+                "错误文案应当说明缺的是用户名: {shown}"
+            );
+            assert!(
+                !shown.contains("mypassword"),
+                "错误文案不得回显口令: {shown}"
+            );
+        }
+    }
+
+    /// 反向保护：这次只收紧「只有口令」这一种，另外两种合法写法**必须保持原样**，
+    /// 否则会把既有部署一起改坏。
+    #[test]
+    fn anonymous_and_username_only_are_still_accepted() {
+        // ① 纯匿名：完全不带凭据，合法
+        assert_eq!(
+            ProxyConfig::from_str("socks5://1.2.3.4:1080"),
+            Ok(ProxyConfig {
+                proto: ProxyProtocol::Socks5,
+                server: "1.2.3.4:1080".parse().unwrap(),
+                username: None,
+                password: None
+            })
+        );
+
+        // ② 只有用户名、口令为空串：合法 —— 认证**照常发起**（username 存在即可），
+        //    不存在"静默丢弃"的问题，所以不能一并拒绝。
+        assert_eq!(
+            ProxyConfig::from_str("socks5://user123@1.2.3.4:1080"),
+            Ok(ProxyConfig {
+                proto: ProxyProtocol::Socks5,
+                server: "1.2.3.4:1080".parse().unwrap(),
+                username: Some("user123".to_string()),
                 password: None
             })
         );

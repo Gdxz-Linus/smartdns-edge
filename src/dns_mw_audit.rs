@@ -96,7 +96,18 @@ impl DnsAuditMiddleware {
                             // 🌟 核心修复 1：把 block_in_place 替换为 spawn_blocking。
                             // 相当于给写磁盘开辟了一条专属的“系统辅道”，绝不霸占 Tokio 的高速主干道！
                             // 利用 Rust 的 Move 语义将文件句柄带进辅道，写完再带出来，完美绕过借用检查。
-                            audit_file = tokio::task::spawn_blocking(move || {
+                            //
+                            // 🔐 问题 53-②：**不能 `.await.unwrap()`**。
+                            // `spawn_blocking` 的任务一旦 panic（磁盘满、I/O 错误等），
+                            // `JoinHandle` 会返回 `Err(JoinError)`；原来那个 `.unwrap()` 会让
+                            // **整个审计后台循环当场 panic 退出** ⇒ 审计功能**永久失效**，
+                            // 而且只在日志里留下一片沉默（审计本来就是"出事了要看的东西"）。
+                            // 现在改为：拿不到句柄就**重建一个**继续用，并明确告警 ——
+                            // 一次 I/O 故障不该让审计彻底停摆。
+                            // 先取出路径：闭包 `move` 会把 `audit_file` 整个搬走，
+                            // 而 panic 分支需要用它**重新打开**（句柄被辅道任务带走、拿不回来）。
+                            let audit_path = audit_file.path().to_path_buf();
+                            match tokio::task::spawn_blocking(move || {
                                 if syslog {
                                     // 🔐 Q8：改送系统日志（C 版 `audit.c:145-166` 也是"送 syslog 就不写文件"）
                                     write_audit_to_syslog(&records_to_write, console);
@@ -104,7 +115,23 @@ impl DnsAuditMiddleware {
                                     warn!("log audit failed {}", err);
                                 }
                                 audit_file // 活干完了，把文件句柄交还给主循环
-                            }).await.unwrap();
+                            }).await {
+                                Ok(f) => audit_file = f,
+                                Err(join_err) => {
+                                    // 辅道任务 panic 了：句柄被它带走，只能重新打开一个。
+                                    // 如实告警（这是"审计可能缺了几行"的信号，必须看得见）。
+                                    crate::log::error!(
+                                        "the audit writer task panicked ({join_err}); \
+                                         reopening the audit file and continuing"
+                                    );
+                                    audit_file = MappedFile::open(
+                                        audit_path,
+                                        audit_size,
+                                        Some(audit_num),
+                                        mode,
+                                    );
+                                }
+                            }
                         }
                     }
                     msg = audit_rx.recv() => {
@@ -115,14 +142,30 @@ impl DnsAuditMiddleware {
                                     let records_to_write = std::mem::replace(&mut buf, Vec::with_capacity(BUF_SIZE));
 
                                     // 🌟 核心修复 2：同上，转移至系统辅道执行磁盘 I/O
-                                    audit_file = tokio::task::spawn_blocking(move || {
+                                    // 🔐 问题 53-②：同样**不能 unwrap**（理由见上一处）。
+                                    let audit_path = audit_file.path().to_path_buf();
+                                    match tokio::task::spawn_blocking(move || {
                                         if syslog {
                                             write_audit_to_syslog(&records_to_write, console);
                                         } else if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write, console) {
                                             warn!("log audit failed {}", err);
                                         }
                                         audit_file
-                                    }).await.unwrap();
+                                    }).await {
+                                        Ok(f) => audit_file = f,
+                                        Err(join_err) => {
+                                            crate::log::error!(
+                                                "the audit writer task panicked ({join_err}); \
+                                                 reopening the audit file and continuing"
+                                            );
+                                            audit_file = MappedFile::open(
+                                                audit_path,
+                                                audit_size,
+                                                Some(audit_num),
+                                                mode,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             None => break, // 通道关闭，安全退出

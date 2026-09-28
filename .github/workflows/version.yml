@@ -17,17 +17,38 @@ permissions:
   packages: write
 
 jobs:
+  # 🔐 问题 18：**测试必须在 bump 之前跑**。
+  #
+  # 原顺序是 `bump`（里面就 `git push --follow-tags`）→ `test` → `build`，
+  # 于是测试失败时远端**已经**多了一个 bump 提交和一个标签 ——
+  # 而 `build` 没跑 ⇒ 出现「**有标签、没有 Release**」的状态：版本号已被占用，
+  # 想重发只能再升一版或删远端标签（后者是危险操作）。
+  #
+  # 现在把门禁提到最前：**测试不过，就不会有任何远端痕迹**（连提交都不会产生）。
+  #
+  # 为什么这样是等价的（已核对）：
+  #   · `workflow_dispatch` 触发时，本工作流里各任务 checkout 的都是**同一个提交**
+  #     （`github.sha`），所以"先测"测的就是将要被 bump 的那份代码；
+  #   · `just bump` **只改 `Cargo.toml` / `Cargo.lock` 里的版本号**，不动任何源代码；
+  #   · 仓库里**没有任何测试断言具体的包版本号**
+  #     （`CACHE_FORMAT_VERSION` 是缓存文件格式版本，与包版本无关）。
+  #   因此"先测再改版本号"与"改完版本号再测"在**覆盖范围上等价**，
+  #   却省掉了把 bump 结果当 artifact 传来传去的复杂度（改动面更小 = 更不容易出错）。
+  test:
+    uses: ./.github/workflows/test.yml
+
   bump:
+    needs: [ "test" ]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump_step.outputs.version }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         # 🌟 核心：删除了原来的 persist-credentials: false。
         # 这样 GitHub 会自动把登录凭证注入到本地 Git 中，不需要任何第三方插件！
-        fetch-depth: 0 
+        fetch-depth: 0
 
     - name: Setup
       uses: ./.github/actions/setup
@@ -44,6 +65,8 @@ jobs:
         echo "NEW_VERSION=$NEW_VER" >> "$GITHUB_ENV"
         
     - name: Commit and Push changes
+      # 🔐 问题 18：**只有测试通过（见上面的 `needs`）才会走到这里**。
+      # 这一步是整条发布链上**唯一**会写远端的地方：提交 + 打标签 + 推送。
       run: |
         # 配置机器人身份
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -58,15 +81,10 @@ jobs:
         # 🌟 直接使用原生 git 命令推送！安全、省心，100% 成功
         git push origin HEAD:${{ github.ref_name }} --follow-tags
 
-  # 🔐 P2：发布前门禁 —— 先把测试跑一遍，测试不过就不打包、不发布。
-  # 原流程是 bump 之后直接 build & 发布到 GitHub Releases / ghcr.io，
-  # 中间没有任何测试环节：只要代码能编译就能发版，这正是当初 6 个 P0 能长期潜伏的原因。
-  test:
-    needs: [ "bump" ]
-    uses: ./.github/workflows/test.yml
-
   build:
-    needs: [ "bump", "test" ]
+    # `bump` 已经依赖 `test`（见上），因此这里只需依赖 `bump` 即可保证
+    # "测试 → 升版本并推送 → 打包发布"这条顺序。
+    needs: [ "bump" ]
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.bump.outputs.version }}

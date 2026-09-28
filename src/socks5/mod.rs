@@ -732,7 +732,16 @@ where
 
     // ======= 🌟 下面是为 smartdns 同步轮询机制补充的底层方法 =======
 
-    fn write_header_sync(bytes: &mut [u8], addr: &AddrKind) -> usize {
+    /// 把 SOCKS5 头部写进 `bytes`，返回写入了多少字节。
+    ///
+    /// 🔐 返回 `Result` 而不是裸 `usize`：域名字段只有 1 个字节表示长度，
+    /// 超过 255 字节的域名**写不下**。原实现在这里直接 `len as u8` ——
+    /// 长度被静默截断（写入一个错误的长度值），随后的 `copy_from_slice`
+    /// 按真实长度拷贝，就会越过按 262 预留的缓冲区边界而 panic。
+    ///
+    /// 同文件的 `write_string`（走 TCP 认证/请求路径）**是有这个校验的**
+    /// （见 `Error::TooLongString`），两条路径以前不一致，现在对齐。
+    fn write_header_sync(bytes: &mut [u8], addr: &AddrKind) -> Result<usize> {
         bytes[0] = 0x00; // RSV
         bytes[1] = 0x00; // RSV
         bytes[2] = 0x00; // FRAG
@@ -755,9 +764,14 @@ where
                 offset += 2;
             }
             AddrKind::Domain(domain, port) => {
+                let domain_bytes = domain.as_bytes();
+                // 🔐 必须在校验通过后再往缓冲区写：这是本次修复的核心。
+                if domain_bytes.len() > u8::MAX as usize {
+                    return Err(Error::TooLongString(StringKind::Domain));
+                }
+
                 bytes[offset] = 0x03; // ATYP: Domain
                 offset += 1;
-                let domain_bytes = domain.as_bytes();
                 let len = domain_bytes.len();
                 bytes[offset] = len as u8;
                 offset += 1;
@@ -767,7 +781,7 @@ where
                 offset += 2;
             }
         }
-        offset
+        Ok(offset)
     }
 
     fn parse_header_sync(bytes: &[u8]) -> Result<(usize, AddrKind)> {
@@ -875,7 +889,12 @@ where
             &mut heap_buf[..]
         };
 
-        let header_len = Self::write_header_sync(target_buf, &addr);
+        // 🔐 头部写入现在可能失败（域名超长）。这里返回的是 `Poll<...>`，
+        // 不能直接写 `?`，要显式包成 `Poll::Ready(Err(..))`。
+        let header_len = match Self::write_header_sync(target_buf, &addr) {
+            Ok(len) => len,
+            Err(err) => return std::task::Poll::Ready(Err(err)),
+        };
         let packet_len = header_len + buf.len();
         target_buf[header_len..packet_len].copy_from_slice(buf);
 
@@ -1289,7 +1308,8 @@ mod p1_9_source_validation_tests {
         let addr = AddrKind::Ip(src.parse().unwrap());
         let mut buf = vec![0u8; payload.len() + 262];
         let header_len =
-            SocksDatagram::<tokio::io::DuplexStream>::write_header_sync(&mut buf, &addr);
+            SocksDatagram::<tokio::io::DuplexStream>::write_header_sync(&mut buf, &addr)
+                .expect("IP 地址的头部写入不会失败");
         buf[header_len..header_len + payload.len()].copy_from_slice(payload);
         buf.truncate(header_len + payload.len());
         buf
@@ -1370,5 +1390,32 @@ mod p1_9_source_validation_tests {
             addr,
             AddrKind::Ip("8.8.8.8:53".parse::<SocketAddr>().unwrap())
         );
+    }
+
+    /// 问题 37：超长域名必须**明确报错**，不能静默截断长度、越界拷贝导致崩溃。
+    ///
+    /// SOCKS5 的域名字段只有 1 个字节表示长度，所以超过 255 字节根本写不下。
+    /// 修复前的代码是 `bytes[offset] = len as u8`（长度被截断成错误的值），
+    /// 紧接着按**真实长度** `copy_from_slice`，越过按 262 预留的缓冲区边界 → panic。
+    ///
+    /// 这条测试直接覆盖那个边界：255 正好放得下、256 必须报错。
+    #[test]
+    fn test_oversized_domain_is_rejected_not_panicking() {
+        // ① 255 字节：恰好是上限，必须正常写入
+        //    头部 = 3(RSV+FRAG) + 1(ATYP) + 1(长度) + 255(域名) + 2(端口) = 262
+        let addr = AddrKind::Domain("a".repeat(255), 53);
+        let mut buf = vec![0u8; 262];
+        let len = SocksDatagram::<tokio::io::DuplexStream>::write_header_sync(&mut buf, &addr)
+            .expect("255 字节的域名正好放得下，不应失败");
+        assert_eq!(len, 262, "255 字节域名 + 端口应当刚好占满头部");
+        assert_eq!(buf[4], 255, "长度字段应当如实写入 255");
+
+        // ② 256 字节：超出上限，必须返回错误而不是 panic
+        let addr = AddrKind::Domain("a".repeat(256), 53);
+        let mut buf = vec![0u8; 262];
+        match SocksDatagram::<tokio::io::DuplexStream>::write_header_sync(&mut buf, &addr) {
+            Err(Error::TooLongString(StringKind::Domain)) => {}
+            other => panic!("超长域名必须返回 TooLongString(Domain)，实际得到: {other:?}"),
+        }
     }
 }

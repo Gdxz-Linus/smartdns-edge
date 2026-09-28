@@ -56,7 +56,21 @@ pub(crate) trait NomParser: Sized {
 impl NomParser for usize {
     #[inline]
     fn parse(input: &str) -> IResult<&str, Self> {
-        map(u64, |v| v as usize).parse(input)
+        // 🔐 问题 53-①：**不能 `as` 截断**。
+        //
+        // 原来写的是 `map(u64, |v| v as usize)`。在 64 位平台上两者同宽、看不出问题；
+        // 但在 **32 位平台**上，`u64 → usize` 的 `as` 会**静默截断**：
+        //   `-interval 4294967296`（2³²）→ 截成 **0** → 而 0 的语义是"关闭定时刷新"
+        //   ⇒ **用户配了刷新，却得到了完全相反的效果**，而且没有任何提示。
+        // 这属于"静默失效"里最坏的一类：配置看起来生效了。
+        //
+        // 改成 `map_res`：超出 `usize` 表示范围时返回解析错误
+        // （配置解析处会把它变成"这一行不认识"的告警/致命错误，用户看得见）。
+        map_res(u64, |v| {
+            usize::try_from(v)
+                .map_err(|_| format!("the value {v} does not fit in usize on this platform"))
+        })
+        .parse(input)
     }
 }
 
@@ -91,6 +105,11 @@ pub enum ConfigItem {
     AuditEnable(bool),
     /// `acl-enable yes|no`：访问控制总开关（配合 client-rules 当白名单用）
     AclEnable(bool),
+    /// 🔐 13-⑥：`trusted-proxy <IP|CIDR>`（可重复）—— 可信反向代理清单。
+    ///
+    /// 只有来自这些地址的请求，才会去解析 `X-Forwarded-For` 还原真实客户端。
+    /// **不配 = 完全保持现状**（不信任任何代理头）。
+    TrustedProxy(IpNet),
     AuditFile(PathBuf),
     AuditFileMode(FileMode),
     /// 🔐 Q9：审计行同时打到控制台
@@ -128,6 +147,7 @@ pub enum ConfigItem {
     ExpandPtrFromAddress(bool),
     ForceAAAASOA(bool),
     ForceHTTPSSOA(bool),
+    ForceNoCNAME(bool),
     ForceQtypeSoa(RecordType),
     ForwardRule(ForwardRule),
     HostsFile(glob::Pattern),
@@ -295,12 +315,14 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         ),
         map(config("ca-file"), ConfigItem::CaFile),
         map(config("ca-path"), ConfigItem::CaPath),
+        // `client-rule`（单数）是 `client-rules` 的**兼容别名**，同一配置项。
         map(config("client-rules"), ConfigItem::ClientRule),
         map(config("client-rule"), ConfigItem::ClientRule),
         map(config("conf-file"), ConfigItem::ConfFile),
     ));
 
     let group2 = alt((
+        // `domain-rule`（单数）同样是别名；文档只列复数形式 `domain-rules`。
         map(config("domain-rules"), ConfigItem::DomainRule),
         map(config("domain-rule"), ConfigItem::DomainRule),
         map(config("domain-set"), ConfigItem::DomainSetProvider),
@@ -326,6 +348,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("force-AAAA-SOA"), ConfigItem::ForceAAAASOA),
         map(config("force-HTTPS-SOA"), ConfigItem::ForceHTTPSSOA),
         map(config("force-qtype-soa"), ConfigItem::ForceQtypeSoa),
+        // ⚠️ `response` 是 `response-mode` 的**别名**（上游历史上两种写法都有），
+        // 文档只列 `response-mode` 一种。
         map(config("response"), ConfigItem::ResponseMode),
         // 🔐 Q18：`group-begin <组> [-inherit ...]`（自带前缀，放通用项之前）
         map(NomParser::parse, ConfigItem::GroupBegin),
@@ -339,6 +363,10 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
 
     let group3 = alt((
         map(config("https-record"), ConfigItem::HttpsRecord),
+        // 🔐 注意：`force-no-CNAME` 没有放进 group2 —— 那一组**已经满 21 个元素**
+        // （`nom` 的 `alt` 实现上限就是 21），再加会**编译不过**。
+        // 这里并入元素较少的 group3，语义上同样只是"多认一个关键字"，没有顺序含义。
+        map(config("force-no-CNAME"), ConfigItem::ForceNoCNAME),
         map(config("ignore-ip"), ConfigItem::IgnoreIp),
         map(config("local-ttl"), |v: u64| {
             ConfigItem::LocalTtl(sanitize_ttl("local-ttl", v))
@@ -372,6 +400,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     let group4 = alt((
         // 注意：nom 的 alt 元组最多 21 项，加新指令前先数一下（当前 14 项）
         map(config("api-token"), ConfigItem::ApiToken),
+        // ⚠️ `resolv-hostanme` 是**拼写错误的兼容别名**（正确写法见下方 `resolv-hostname`）。
+        // 保留它是为了不破坏既有配置，**不要写进文档**、也不要"顺手删掉"。
         map(config("resolv-hostanme"), ConfigItem::ResolvHostname),
         map(config("response-mode"), ConfigItem::ResponseMode),
         map(config("server-name"), ConfigItem::ServerName),
@@ -402,6 +432,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("user"), ConfigItem::User),
         // `acl-enable`：访问控制总开关（放在 group4 —— 它离 21 项上限还有余量）
         map(config("acl-enable"), ConfigItem::AclEnable),
+        // 🔐 13-⑥：`trusted-proxy <IP|CIDR>`（可重复，多条累加成一个可信清单）
+        map(config("trusted-proxy"), ConfigItem::TrustedProxy),
         // ⚠️ 注意：每个 groupN 最多只能有 21 个入口——这是 nom 对 alt/Choice 元组
         // 元素数量的硬上限（group2 已达 21 个）。以后新增配置指令时，请放到元素较少的组。
         map(config("group-match"), ConfigItem::GroupMatch),
@@ -467,7 +499,9 @@ pub fn parse_config(input: &str) -> IResult<&str, Option<ConfigItem>> {
 /// 放这里是因为域名集合与 IP 集合共用同一套判断与提醒。
 pub(crate) fn warn_if_interval_too_short(kind: &str, name: &str, interval: Option<usize>) {
     if let Some(secs) = interval.filter(|secs| *secs > 0 && *secs < 10) {
-        crate::log::warn!("{kind} {name}: -interval {secs} s is too short and will reload the configuration frequently (10 s or more is recommended)");
+        crate::log::warn!(
+            "{kind} {name}: -interval {secs} s is too short and will reload the configuration frequently (10 s or more is recommended)"
+        );
     }
 }
 
@@ -477,6 +511,70 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// 🔐 问题 53-①：`usize` 解析**不得静默截断**。
+    ///
+    /// 原实现是 `map(u64, |v| v as usize)`：在 32 位平台上，
+    /// `-interval 4294967296`（2³²）会被截成 **0**，而 0 的语义是"关闭定时刷新" ——
+    /// 用户配了刷新却得到相反效果，且没有任何提示。
+    ///
+    /// ⚠️ **平台差异（如实说明）**：64 位平台上 `u64` 全都在 `usize` 范围内，
+    /// 因此**无法在这里构造真实的溢出** —— 下面用 `usize::MAX` 做上界校验，
+    /// 并显式断言"`usize::MAX` 解析出来必须等于它本身"（而不是被截断或以其它方式变化）。
+    /// 真正的 32 位行为由那段 `try_from` 保证；本测试钉住的是"**没有截断**"这个不变量。
+    #[test]
+    fn usize_parsing_does_not_truncate() {
+        // 正常值：原样解析
+        assert_eq!(usize::parse("0"), Ok(("", 0)));
+        assert_eq!(usize::parse("4294967295"), Ok(("", 4294967295)));
+
+        // usize::MAX 必须原样返回 —— 若实现里有 `as usize` 截断，这里就会不等
+        let max_str = usize::MAX.to_string();
+        let (rest, got) = usize::parse(&max_str).expect("usize::MAX 应当能解析");
+        assert_eq!(rest, "");
+        assert_eq!(
+            got,
+            usize::MAX,
+            "解析结果必须与字面值完全一致（截断会在这里露馅）"
+        );
+
+        // 超出 u64 的写法仍然要报错（这不是本问题的范畴，但顺手钉住）
+        assert!(usize::parse("99999999999999999999999999").is_err());
+
+        // 非数字要报错，不能被当成 0
+        assert!(usize::parse("abc").is_err());
+    }
+
+    /// 🔐 问题 53-①（补强）：**直接验证"转换失败会报错"这条逻辑本身**。
+    ///
+    /// 上一条测试只能证明"64 位下没截断"，**证明不了 32 位下会怎样** ——
+    /// 那台机器上 `u64` 全都在 `usize` 范围内，构造不出真实溢出。
+    ///
+    /// 所以这里换成**模拟 32 位的语义**：拿一个"假装是 32 位 usize"的窄类型
+    /// 去复现同一套 `try_from` 逻辑，断言"超出范围必须失败、而不是变成 0"。
+    /// 这证明了**我们用的转换方式是对的**（`try_from` 会拒绝而不是截断），
+    /// 只是它在本机 64 位下不会触发。
+    #[test]
+    fn narrow_usize_conversion_rejects_instead_of_wrapping_to_zero() {
+        // 这就是 32 位平台上 `usize::try_from(u64)` 会遇到的情形
+        let too_big: u64 = 4294967296; // 2^32，在 32 位 usize 上装不下
+
+        // ① 模拟 32 位：用 u32 作为"窄 usize"
+        assert!(
+            u32::try_from(too_big).is_err(),
+            "2^32 装不进 32 位，try_from 必须报错"
+        );
+
+        // ② 对照：`as` 转换会**静默截断成 0** —— 这正是原实现的缺陷
+        //    （0 的语义是"关闭定时刷新"，于是"配了刷新"变成"关掉刷新"）
+        assert_eq!(
+            too_big as u32, 0,
+            "`as` 把 2^32 截断成 0 —— 这就是原实现让 -interval 语义反转的原因"
+        );
+
+        // ③ 边界：恰好装得下时不报错
+        assert_eq!(u32::try_from(4294967295u64).unwrap(), u32::MAX);
+    }
 
     /// 🔐 P2：`parse_config` 的"剩余输入"必须能被上层看见 —— 配置加载就靠它告警。
     ///
@@ -596,9 +694,17 @@ mod tests {
 
     #[test]
     fn test_parse_speed_check_mode() {
+        // 🔐 问题 24：`none` 现在是 `Some([None])`，**不再**折叠成 `Default`（即 `None`）。
+        // 折叠的后果见 `config/parser/speed_mode.rs` 里 `test_speed_mode_none` 的说明。
         assert_eq!(
             parse_config("speed-check-mode none").unwrap(),
-            ("", ConfigItem::SpeedMode(Default::default()).into())
+            (
+                "",
+                ConfigItem::SpeedMode(Some(crate::config::SpeedCheckModeList(vec![
+                    crate::config::SpeedCheckMode::None
+                ])))
+                .into()
+            )
         );
     }
 
@@ -610,6 +716,22 @@ mod tests {
                 "",
                 ConfigItem::ResponseMode(ResponseMode::FastestResponse).into()
             )
+        );
+    }
+
+    /// 🔐 `force-no-CNAME` 必须真的被解析器认出来。
+    ///
+    /// 它先前只写在文档里、程序完全不认识（问题 12）。这条测试锁住"配置能被认出"，
+    /// 免得将来又变成"配了不生效"。
+    #[test]
+    fn test_parse_force_no_cname() {
+        assert_eq!(
+            parse_config("force-no-CNAME yes").unwrap(),
+            ("", ConfigItem::ForceNoCNAME(true).into())
+        );
+        assert_eq!(
+            parse_config("force-no-CNAME no").unwrap(),
+            ("", ConfigItem::ForceNoCNAME(false).into())
         );
     }
 

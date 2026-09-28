@@ -405,9 +405,18 @@ impl Installer {
 
                 match &install_file {
                     InstallContentOrPath::Content(bytes) => {
+                        // 🔐 记下「打开之前是否已存在」：`opts.mode()` 只在**新建**文件时生效，
+                        // 对已存在的文件无效，所以这条信息决定后面要不要显式校正权限。
+                        // （权限校正在 Unix 上才做，其它平台用不到这个变量。）
+                        #[cfg(unix)]
+                        let existed = dest_path.exists();
+
                         let opts = {
                             let mut opts = OpenOptions::new();
-                            opts.create(true).write(true);
+                            // 🔐 必须带 truncate：只写 write(true) 而不截断时，新内容比旧的短
+                            // 就会在文件末尾留下旧内容的尾巴，把 systemd 单元 / init 脚本 /
+                            // launchd plist 写坏。服务文件平时不变长变短，所以升级一次才可能踩到。
+                            opts.create(true).write(true).truncate(true);
                             #[cfg(unix)]
                             if let Some(mode) = *mode {
                                 use std::os::unix::fs::OpenOptionsExt;
@@ -420,6 +429,16 @@ impl Installer {
 
                         // Ensure that the data/metadata is synced and catch errors before dropping
                         file.sync_all()?;
+                        drop(file);
+
+                        // 🔐 已存在的文件：`opts.mode()` 不起作用，显式把权限校正过来。
+                        // 否则旧文件带着过宽或过窄的权限被沿用（例如从一个 0644 的旧版本
+                        // 升级到要求 0640 的新版本），排障时很难联想到这里。
+                        #[cfg(unix)]
+                        if existed && let Some(mode) = *mode {
+                            use std::os::unix::fs::PermissionsExt;
+                            fs::set_permissions(dest_path, fs::Permissions::from_mode(mode))?;
+                        }
                     }
                     InstallContentOrPath::Path(p) => {
                         fs::copy(p.as_path(), dest_path)?;
@@ -537,5 +556,56 @@ mod tests {
         assert!(file_path.exists());
         installer.uninstall(true).unwrap();
         assert!(!file_path.exists());
+    }
+
+    /// 🔐 问题 15：写服务文件时必须**先清空** —— 新内容比旧的短时，不能留下旧尾巴。
+    ///
+    /// 原实现用「覆盖」方式打开但没有 `truncate`，于是：
+    /// 新版本的服务定义比旧的短时，旧内容会残留在文件末尾，把 systemd 单元 /
+    /// init 脚本 / launchd plist **写坏**，服务可能起不来或行为异常。
+    ///
+    /// 这类文件平时不变长变短，所以**升级一次才可能踩到** —— 正因如此，
+    /// 这条测试要显式做"先写长、再写短"，否则测不出问题。
+    ///
+    /// ⚠️ 本测试只用**系统临时目录**里的普通文件，不触碰任何真实服务注册
+    /// （服务名 `smartdns-rs` 是编译期常量，无法隔离，因此绝不在这里执行 service 命令）。
+    #[test]
+    fn rewrite_must_truncate_stale_tail() {
+        let file_path = std::env::temp_dir().join(format!(
+            "smartdns-installer-trunc-{}-{:#x}.txt",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&file_path);
+
+        // ① 先写一段**长**内容（模拟旧版服务文件）
+        let long = b"[Unit]\nDescription=old long unit file\nExecStart=/usr/sbin/smartdns run\nRestart=always\n";
+        let installer_long = Installer::builder()
+            .add_item((file_path.as_path(), long.as_ref(), 0o644))
+            .build();
+        installer_long.install().unwrap();
+        assert_eq!(
+            std::fs::read(&file_path).unwrap().len(),
+            long.len(),
+            "长内容应当被写入"
+        );
+
+        // ② 再用**短**内容覆盖（模拟新版服务文件变短）
+        let short = b"[Unit]\nDescription=new\n";
+        let installer_short = Installer::builder()
+            .add_item((file_path.as_path(), short.as_ref(), 0o644))
+            .build();
+        installer_short.install().unwrap();
+
+        let got = std::fs::read(&file_path).unwrap();
+        assert_eq!(
+            got,
+            short,
+            "🔐 问题 15：新内容比旧的短时，文件里不得残留旧尾巴。\
+             实际内容: {:?}",
+            String::from_utf8_lossy(&got)
+        );
+
+        let _ = std::fs::remove_file(&file_path);
     }
 }

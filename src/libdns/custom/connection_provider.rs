@@ -11,7 +11,6 @@
 // 的需要做了修改（例如为补上"上游把 UDP 的 connect() 注释掉"这个安全缺口，见下面 P1-9 的改动）。
 use crate::dns_client::{BootstrapResolver, GenericResolverExt};
 use crate::dns_url::{DnsUrl, Host, HttpsPrefer, ProtocolConfig};
-use crate::libdns::custom::warmup::DnsHandleWarmpup;
 use crate::log;
 use crate::proxy::{self, ProxyConfig};
 use crate::proxy::{TcpStream, UdpSocket};
@@ -111,11 +110,49 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
             let bind_addr = if let Some(dev) = &runtime_proviver.device {
                 #[cfg(not(any(target_os = "android", target_os = "linux")))]
                 {
-                    local_ip_address::list_afinet_netifas().ok().and_then(|interfaces| {
-                        interfaces.into_iter()
-                            .find(|(name, _)| name == dev)
-                            .map(|(_, ip)| std::net::SocketAddr::new(ip, 0))
-                    })
+                    // 🔐 问题 50：**网卡找不到时必须告警**，不能静默继续。
+                    //
+                    // 原来这里是 `.ok().and_then(...)`：只要网卡名对不上，
+                    // 就得到 `None`，然后调用方照常发起连接 ——
+                    // **流量从默认网卡出去了，而配置里明明写了 `-device`**，
+                    // 用户以为分流生效了，日志里却一句提示都没有。
+                    //
+                    // 这类"配了没生效"的静默失败正是本轮整改的重点
+                    // （同一层 Linux 侧的 `setup_socket` 至少会打一条告警，
+                    // 两边口径还曾经不一致）。现在两边都告警。
+                    //
+                    // ⚠️ 注意：**告警后仍继续连接**（`bind_addr` 保持 `None`）。
+                    // 这里刻意不返回错误：`-device` 指错网卡时，
+                    // 让整条上游彻底不可用，比"退回默认网卡但仍能解析"伤害更大 ——
+                    // 后者至少 DNS 还能工作，而用户能从日志知道分流没生效。
+                    match local_ip_address::list_afinet_netifas() {
+                        Ok(interfaces) => {
+                            match interfaces
+                                .into_iter()
+                                .find(|(name, _)| name == dev)
+                                .map(|(_, ip)| std::net::SocketAddr::new(ip, 0))
+                            {
+                                Some(addr) => Some(addr),
+                                None => {
+                                    log::warn!(
+                                        "network device `{dev}` was not found: the upstream connection \
+                                         will leave through the default interface and `-device` has no effect. \
+                                         Check the interface name (`-device` needs an existing interface)"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            // 枚举网卡本身失败（权限/平台不支持）：同样不能静默
+                            log::warn!(
+                                "cannot list network interfaces to resolve `-device {dev}`: {err}. \
+                                 The upstream connection will leave through the default interface \
+                                 and `-device` has no effect"
+                            );
+                            None
+                        }
+                    }
                 }
                 #[cfg(any(target_os = "android", target_os = "linux"))]
                 { None } // Linux / Android 使用底层的 SO_BINDTODEVICE，无需在此绑定 IP
@@ -295,10 +332,38 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
 
                             let conn = new_connection(&server_owned, server_addr_val, bind_addr, &options, runtime_proviver).await?;
 
-                            // 🌟 严格校验 warmup，防止坏连接成为盲区
-                            if !conn.warmup().await.is_ok() {
-                                return Err(ProtoErrorKind::Io(Arc::new(io::Error::other("warmup failed, connection broken"))).into());
-                            }
+                            // 🔐 问题 46：**不再做 `example.com` 预热试探**。
+                            //
+                            // 原来这里紧跟一句 `conn.warmup()` —— 与上游建立连接后，
+                            // 先发一条固定的 `example.com` A 查询，并**要求必须收到应答**
+                            // 才算这个上游可用。三个后果：
+                            //
+                            //   1. **内网上游被永久判死**：内网权威 DNS 通常只服务自己的
+                            //      内网域名，`example.com` 一律 NXDOMAIN/REFUSED；
+                            //      屏蔽该域名的上游也一样。这些上游**明明能正常解析
+                            //      真正要查的域名**，却因为"答不出 example.com"被判定不可用。
+                            //   2. **隐私暴露**：每次（重）建连都往外发一条固定查询，
+                            //      泄露"这台机器在跑 DNS 代理"这一事实。
+                            //   3. **审计噪声**：上游侧与日志里都多出一条与用户无关的查询。
+                            //
+                            // 为什么可以直接去掉（**"协议层握手成功"这个判据本来就在**）：
+                            // 上一行的 `new_connection` 内部是 `DnsExchange::connect(...).await?`，
+                            // 它已经完成各协议真正的建连 ——
+                            //   · TCP/TLS：三次握手 + TLS 握手；
+                            //   · HTTPS：以上 + HTTP/2 连接建立；
+                            //   · QUIC/H3：QUIC 握手 + 流建立；
+                            //   · UDP：socket 创建、绑定与 `connect()`。
+                            // 任何一步失败都会在这里返回 `Err`（由 `?` 传播），
+                            // 因此"连接是否真的建立起来"已经被如实判定，
+                            // warmup 只是**叠在它之上的一道多余且有害**的应用层试探。
+                            //
+                            // 那"坏连接会不会成为盲区"？**不会**：
+                            // 连接建立后若实际不可用，首次真实查询就会失败，
+                            // 上层随即把该上游置为 `Failed`（并计入 `connection_failure` 统计），
+                            // 下次查询自动重连（见 hickory `name_server.rs` 的
+                            // `connected_mut_client`）。也就是说，发现问题的时机
+                            // 从"建连时"平移到"第一次真用它时" —— 而那一次查询
+                            // 本来就是用户真正需要的，不是额外开销。
 
                             Ok(conn)
                         }.boxed());
@@ -706,7 +771,23 @@ impl crate::libdns::proto::runtime::RuntimeProvider for TokioRuntimeProvider {
                 };
 
                 if let Some(addr) = bind_addr {
-                    let _ = socket.bind(addr);
+                    // 🔐 问题 50：**绑定本地地址失败不能静默吞掉**。
+                    //
+                    // 原来这里是 `let _ = socket.bind(addr);` ——
+                    // 绑定失败（网卡 IP 已变化、地址已被占用、权限不足）时
+                    // 一声不响地继续，SYN 从**默认网卡**发出去，
+                    // 而配置里写了 `-device`：用户以为分流生效了，实际没有。
+                    //
+                    // 这是"另一处同类操作至少会打告警，口径不一致"里的那个反例 ——
+                    // 现在统一告警。同样**只告警不中断**：让上游仍可用，
+                    // 同时把"分流没生效"这件事明确写进日志。
+                    if let Err(err) = socket.bind(addr) {
+                        log::warn!(
+                            "failed to bind the local address {addr} (requested by `-device`): {err}. \
+                             The upstream connection will leave through the default interface \
+                             and `-device` has no effect"
+                        );
+                    }
                 }
 
                 // 🌟 核心修复 1：建立 TCP 连接前，提前打上防火墙 SO_MARK 和网卡标签！

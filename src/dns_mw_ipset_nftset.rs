@@ -92,15 +92,14 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsIpsetNftse
         }
 
         // 🔐 Q2/Q4：写进集合的条目带不带过期时间（`ipset-timeout` / `nftset-timeout`）
-        let ipset_expiry =
-            set_expiry_seconds(lookup, ctx.cfg().ipset_timeout(), ctx.cfg().rr_ttl());
+        // 📌 甲类：这两个开关**可按规则组区分**，所以走 `ctx` 而不是 `ctx.cfg()`
+        let ipset_expiry = set_expiry_seconds(lookup, ctx.ipset_timeout(), ctx.rr_ttl());
         // 非 Linux 或不带 nft 特性的构建里，下面那两个写入块不参与编译，这个值也就没人用
         #[cfg_attr(
             not(all(feature = "nft", target_os = "linux")),
             allow(unused_variables)
         )]
-        let nftset_expiry =
-            set_expiry_seconds(lookup, ctx.cfg().nftset_timeout(), ctx.cfg().rr_ttl());
+        let nftset_expiry = set_expiry_seconds(lookup, ctx.nftset_timeout(), ctx.rr_ttl());
         #[cfg_attr(
             not(all(feature = "nft", target_os = "linux")),
             allow(unused_variables)
@@ -292,12 +291,20 @@ fn report_nftset_result(
     match nftset::add_batch(family, table, set_name, addrs, timeout) {
         Ok(n) => {
             if debug {
+                // 🔐 问题 49（真机测试补漏）：**格式串与实参的顺序必须对上**。
+                //
+                // 原来格式串写的是 `set {} of {}/{}`（集合名 of 族/表），
+                // 实参却按 `(family, table, set_name)` 传 —— 真机日志因此打成
+                // `wrote ... into set inet of p49ok/good_set`：族名跑到了集合名的位置，
+                // 三个字段整体错位。排查时按日志去找 `set inet` 是找不到的。
+                //
+                // 现在格式串与实参统一按 `集合名 of 族/表` 排列。
                 crate::log::debug!(
                     "nftset: wrote {} addresses into set {} of {}/{} (timeout {} s, 0 = no expiry)",
                     n,
+                    set_name,
                     family,
                     table,
-                    set_name,
                     timeout
                 );
             }

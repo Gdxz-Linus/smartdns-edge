@@ -30,9 +30,28 @@ enum SourceKey {
     V6([u8; 8]),
 }
 
+/// 🔐 把「IPv4 映射到 IPv6」的地址还原成普通 IPv4 地址。
+///
+/// 为什么必须做：监听写成 `[::]:53` 这类双栈形式时（`net.rs` 会关闭 v6only），
+/// **IPv4 客户端在程序内部会以 `::ffff:a.b.c.d` 的形式出现**。这种地址的前 8 字节恒为 0，
+/// 而下面的 `SourceKey` 对 IPv6 取的正是前 8 字节 —— 于是**所有 IPv4 客户端会归进同一个桶**：
+///
+///   · `max-connections-per-ip`（单来源上限）退化成「全体 IPv4 客户端共享一个额度」，
+///     任何一台机器开满连接就能让全网 IPv4 解析不了；
+///   · `is_loopback()` 对 `::ffff:127.0.0.1` 返回 false（它只认 `::1`），
+///     于是「本机不占额度」的豁免失效 —— 被连接洪水打满时，正好进不去后台。
+///
+/// 本仓库的其它位置（客户端身份识别、MAC 查询）早就做了同样的还原，只有这里漏了。
+fn normalize_client_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(addr) => addr.to_ipv4_mapped().map_or(IpAddr::V6(addr), IpAddr::V4),
+        IpAddr::V4(addr) => IpAddr::V4(addr),
+    }
+}
+
 impl SourceKey {
     fn from_ip(ip: IpAddr) -> Self {
-        match ip {
+        match normalize_client_ip(ip) {
             IpAddr::V4(v4) => Self::V4(v4),
             IpAddr::V6(v6) => {
                 let o = v6.octets();
@@ -119,8 +138,13 @@ impl ConnectionLimiter {
     /// ⚠️ 本机环回地址（127.0.0.1 / ::1）**不占配额**：管理后台通常就是通过本机或
     /// SSH 隧道访问的，如果它也被算进限额，一旦被人用连接洪泛打满，
     /// 运维就再也进不去后台看情况了——那是最需要它的时候。
+    ///
+    /// 🔐 判定必须基于**还原后的**地址：双栈监听下本机是 `::ffff:127.0.0.1`，
+    /// 而 `is_loopback()` 只认 `::1`，直接判会让这道豁免对 IPv4 本机完全失效。
     pub fn acquire(self: &Arc<Self>, addr: IpAddr) -> Option<ConnectionGuard> {
-        if addr.is_loopback() {
+        let normalized = normalize_client_ip(addr);
+
+        if normalized.is_loopback() {
             return Some(ConnectionGuard {
                 limiter: self.clone(),
                 key: SourceKey::from_ip(addr),
@@ -131,7 +155,17 @@ impl ConnectionLimiter {
         let key = SourceKey::from_ip(addr);
 
         {
-            let mut map = self.per_source.lock().unwrap();
+            // 🔐 问题 13-①：锁中毒后**继续用**，不能让一次偶发 panic 升级成"整体不可用"。
+            //
+            // 原来这里是 `.lock().unwrap()`：只要有任何线程在持有这把锁时 panic，
+            // 锁就被标记为"中毒"，此后**每一次新连接**都会在这行 panic ——
+            // 一次偶发故障直接把服务打死，而且是在最需要它的时候。
+            //
+            // 为什么"继续用"是安全的：这把锁只保护一个 `HashMap<SourceKey, usize>`
+            // （每个来源当前占用的连接数）。即使前一个持有者 panic 到一半，
+            // 最坏情况也只是某个计数不准 —— 远好过"所有连接都进不来"。
+            // 全仓库另外 52 处也是这么处理的，这里保持一致。
+            let mut map = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
             let entry = map.entry(key).or_insert(0);
             if *entry >= self.max_per_source
                 || self.current.load(Ordering::Relaxed) >= self.max_connections
@@ -212,20 +246,68 @@ pub fn register_listener(
         max_connections,
         max_per_source
     );
-    listeners().lock().unwrap().insert(
-        addr,
-        Arc::new(ConnectionLimiter::new(max_connections, max_per_source)),
-    );
+    // 🔐 问题 13-①：同上 —— 锁中毒后继续用，不让"注册监听限额"这一步成为单点崩溃。
+    listeners()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            addr,
+            Arc::new(ConnectionLimiter::new(max_connections, max_per_source)),
+        );
 }
 
 /// 取某个监听的独立限额（没登记就返回 None，表示只受全局限制）
 pub fn for_listener(addr: std::net::SocketAddr) -> Option<Arc<ConnectionLimiter>> {
-    listeners().lock().unwrap().get(&addr).cloned()
+    // 🔐 问题 13-①：这是**每个请求**都要走的一次查询，更不能因为锁中毒就崩。
+    listeners()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&addr)
+        .cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔐 问题 13-①：**锁中毒之后，限流器仍必须继续工作**。
+    ///
+    /// 原实现用 `.lock().unwrap()`：只要有任何线程在持锁期间 panic，
+    /// 此后**每一次新连接**都会在这一行 panic —— 一次偶发故障把服务彻底打死。
+    ///
+    /// 这条测试故意把锁弄中毒，然后断言 `acquire` 仍然正常。
+    #[test]
+    fn poisoned_lock_does_not_break_the_limiter() {
+        let limiter = Arc::new(ConnectionLimiter::new(Some(2), Some(2)));
+
+        // 制造中毒：拿住锁、然后在持锁状态下 panic
+        let poisoner = {
+            let limiter = limiter.clone();
+            std::thread::spawn(move || {
+                let _guard = limiter.per_source.lock().unwrap();
+                panic!("deliberately poisoning the lock");
+            })
+        };
+        assert!(
+            poisoner.join().is_err(),
+            "辅助线程应当 panic（用来把锁弄中毒）"
+        );
+        assert!(
+            limiter.per_source.lock().is_err(),
+            "锁此时应当处于中毒状态，否则这条测试没测到东西"
+        );
+
+        // 关键断言：中毒之后**仍然可用**，而不是 panic
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let g1 = limiter.acquire(ip).expect("锁中毒后第 1 条仍应通过");
+        let g2 = limiter.acquire(ip).expect("锁中毒后第 2 条仍应通过");
+        assert!(
+            limiter.acquire(ip).is_none(),
+            "锁中毒后限额仍应生效（第 3 条被拒）"
+        );
+        drop(g1);
+        drop(g2);
+    }
 
     #[test]
     fn test_source_key_groups_ipv6_by_64() {
@@ -275,6 +357,101 @@ mod tests {
             "环回应始终放行（且不占配额）"
         );
         assert_eq!(limiter.stats().0, 1, "环回不应计入当前连接数");
+    }
+
+    /// 🔐 双栈监听回归：IPv4 映射形式的地址必须与普通 IPv4 地址归为同一个来源。
+    ///
+    /// 以前 `SourceKey` 对 IPv6 取前 8 字节，而 `::ffff:a.b.c.d` 的前 8 字节恒为 0，
+    /// 于是**所有 IPv4 客户端被归进同一个桶**：任何一台机器开满 `max-connections-per-ip`
+    /// 就能让全网 IPv4 解析不了。
+    #[test]
+    fn dup_stack_mapped_ipv4_shares_the_bucket_with_plain_ipv4() {
+        assert_eq!(
+            SourceKey::from_ip("::ffff:192.168.1.10".parse().unwrap()),
+            SourceKey::from_ip("192.168.1.10".parse().unwrap()),
+            "映射形式与普通形式必须是同一个来源"
+        );
+
+        // 两台不同的设备不能撞进同一个桶
+        assert_ne!(
+            SourceKey::from_ip("::ffff:192.168.1.10".parse().unwrap()),
+            SourceKey::from_ip("::ffff:192.168.1.11".parse().unwrap()),
+            "不同设备必须各算各的额度"
+        );
+
+        // 真正的 IPv6 仍按 /64 前缀聚合（这个设计是对的，别改坏）
+        assert_eq!(
+            SourceKey::from_ip("2001:db8::1".parse().unwrap()),
+            SourceKey::from_ip("2001:db8::ffff".parse().unwrap()),
+            "同一 /64 内的 IPv6 应当聚合"
+        );
+        assert_ne!(
+            SourceKey::from_ip("2001:db8::1".parse().unwrap()),
+            SourceKey::from_ip("2001:db9::1".parse().unwrap()),
+            "不同 /64 应当分开"
+        );
+    }
+
+    /// 🔐 双栈监听回归：单来源上限必须按「每台设备」生效，而不是「全体 IPv4 共用」。
+    #[test]
+    fn dup_stack_per_source_limit_is_per_device() {
+        let limiter = Arc::new(ConnectionLimiter::new(Some(100), Some(2)));
+
+        // 设备 A（映射形式）占满自己的额度
+        let a1 = limiter
+            .acquire("::ffff:192.168.1.10".parse().unwrap())
+            .unwrap();
+        let _a2 = limiter
+            .acquire("::ffff:192.168.1.10".parse().unwrap())
+            .unwrap();
+        assert!(
+            limiter
+                .acquire("::ffff:192.168.1.10".parse().unwrap())
+                .is_none(),
+            "设备 A 超出自身额度应被拒"
+        );
+
+        // 设备 B 必须不受影响 —— 这正是修复前会失败的地方
+        assert!(
+            limiter
+                .acquire("::ffff:192.168.1.11".parse().unwrap())
+                .is_some(),
+            "设备 A 占满额度不应影响设备 B"
+        );
+
+        // 同一台设备用普通 IPv4 形式访问，应与映射形式共享额度
+        assert!(
+            limiter.acquire("192.168.1.10".parse().unwrap()).is_none(),
+            "同一设备的两种地址形式必须共用额度"
+        );
+
+        drop(a1);
+        assert!(
+            limiter.acquire("192.168.1.10".parse().unwrap()).is_some(),
+            "释放后应能再接入"
+        );
+    }
+
+    /// 🔐 双栈监听回归：本机以 `::ffff:127.0.0.1` 出现时，也必须享受「不占额度」的豁免。
+    ///
+    /// 修复前 `is_loopback()` 只认 `::1`，于是被连接洪水打满时，
+    /// 管理员恰好进不去本机后台/SSH 隧道——与这个豁免的设计意图正好相反。
+    #[test]
+    fn dup_stack_mapped_loopback_is_exempt() {
+        let limiter = Arc::new(ConnectionLimiter::new(Some(1), Some(1)));
+
+        // 用尽唯一的额度
+        let _hold = limiter.acquire("203.0.113.9".parse().unwrap()).unwrap();
+        assert!(
+            limiter.acquire("203.0.113.9".parse().unwrap()).is_none(),
+            "额度确实已经用尽"
+        );
+
+        // 本机的映射形式仍应放行，且不占额度
+        let lo: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(limiter.acquire(lo).is_some(), "映射形式的本机应放行");
+        assert!(limiter.acquire(lo).is_some(), "且可以重复放行");
+        assert_eq!(limiter.stats().0, 1, "本机不应计入当前连接数");
     }
 
     #[test]

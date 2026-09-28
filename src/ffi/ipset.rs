@@ -59,6 +59,79 @@ fn align(len: usize) -> usize {
     (len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)
 }
 
+/// `nlmsghdr` 的固定长度（len/type/flags/seq/pid 各 4 字节）
+const NLMSG_HDR_LEN: usize = 16;
+/// `NLMSG_ERROR`
+const NLMSG_ERROR: u16 = 2;
+/// 读**错误码**所需的最小长度：`nlmsghdr`(16) + `nlmsgerr.error`(4)。
+///
+/// 内核发出的完整回执通常是 **36** 字节（还要带上原请求的 16 字节头），
+/// 但那 16 字节我们并不使用 —— 所以这里按"**真正要读的字段**"定门槛。
+/// 详见 [`classify_ack`] 的说明。
+const NLMSG_ERROR_MIN_LEN: usize = NLMSG_HDR_LEN + 4;
+
+/// 一条netlink 报文对本次写入的裁决结果。
+///
+/// 抽成独立类型 + [`classify_ack`] 这个**纯函数**，是为了能在**任意平台**上单测
+/// （与 `encode_add` 同样的理由：这份逻辑不该只有 Linux 才验证得了）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum AckOutcome {
+    /// 不是我们要的那条回执（类型/序号不符，或长度不合法）→ 继续读下一条
+    NotMine,
+    /// 内核确认成功（错误码为 0）
+    Success,
+    /// 内核明确拒绝，携带 **errno（正数）**
+    Failed(i32),
+}
+
+/// 判定一条已收到的 netlink 报文是不是我们要的回执、以及它说了什么。
+///
+/// 🔐 问题 42：长度必须**按报文自述的长度**校验，且必须覆盖到我们真正要读的字段。
+///
+/// 原实现只查 `n < 16`，而错误码位于偏移 **16..20** —— 一旦收到偏短的回执，
+/// `buf[16..20]` 读到的就是缓冲区里的**残留零值**，于是 `code == 0` 被当成
+/// "写入成功"。这恰好退化成"**配了不生效还没人知道**"，
+/// 与本次整改强调的"失败要看得见"完全相悖。
+///
+/// 三个条件缺一不可：
+///   ① `msg_len >= 20` —— 报文**自称**的长度要够装下错误码；
+///   ② `msg_len <= n`  —— 自称长度不得超出**本次实收**字节数（截断的报文不可信）；
+///   ③ `n >= 20`       —— 实收字节也要够（防御自述长度与实际不符的情况）。
+///
+/// 任一条不满足就当作"这条报文我们不认识"，丢弃并继续读下一条 ——
+/// 套接字带 500ms 收超时，因此不可能是死循环（真收不到最后会返回超时错误）。
+fn classify_ack(buf: &[u8], n: usize, seq: u32) -> AckOutcome {
+    // 连头部都读不全：无法解释，丢弃
+    if n < NLMSG_HDR_LEN || buf.len() < NLMSG_HDR_LEN {
+        return AckOutcome::NotMine;
+    }
+
+    let msg_len = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let msg_type = u16::from_ne_bytes([buf[4], buf[5]]);
+    let msg_seq = u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]);
+
+    // ①②③：长度三重校验（见函数文档）
+    if msg_len < NLMSG_ERROR_MIN_LEN || msg_len > n || n < NLMSG_ERROR_MIN_LEN {
+        return AckOutcome::NotMine;
+    }
+
+    // 不是我们要的那条回执（比如别的线程的、或通知消息）：跳过继续读
+    if msg_type != NLMSG_ERROR || msg_seq != seq {
+        return AckOutcome::NotMine;
+    }
+
+    let code = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+    if code == 0 {
+        AckOutcome::Success
+    } else if code < 0 {
+        // 内核给的是负 errno
+        AckOutcome::Failed(-code)
+    } else {
+        // 协议上不该出现正数；真出现了也要**如实报失败**，不能当成功
+        AckOutcome::Failed(code)
+    }
+}
+
 /// 拼一条 `IPSET_CMD_ADD` 报文（返回值就是 `sendto` 要发的字节）。
 ///
 /// 布局与 C 版 `_ipset_operate()` 逐字段对齐：
@@ -234,7 +307,7 @@ mod imp {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-    use super::{NFNL_SUBSYS_IPSET, encode_add};
+    use super::{AckOutcome, NFNL_SUBSYS_IPSET, classify_ack, encode_add};
 
     /// 复用一个 netlink 套接字（C 版也是全局复用一个 fd）
     static IPSET_FD: AtomicI32 = AtomicI32::new(-1);
@@ -243,7 +316,6 @@ mod imp {
     /// 收/发配对的锁：netlink 套接字不适合多线程同时 send/recv
     static SOCKET_LOCK: Mutex<()> = Mutex::new(());
 
-    const NLMSG_ERROR: u16 = 2;
     /// 等回执的上限：内核处理一条 ADD 是微秒级，超过这个时间就当没回执（不阻塞查询线程）
     const ACK_TIMEOUT_MS: i64 = 500;
 
@@ -291,6 +363,11 @@ mod imp {
     }
 
     /// 读一条回执；成功返回 Ok(())，失败把内核给的 errno 变成 io::Error。
+    ///
+    /// 判定逻辑在 [`classify_ack`]（纯函数、两平台可单测）；这里只负责收包与循环。
+    /// 🔐 问题 42：原实现只查 `n >= 16` 就取偏移 16..20 的错误码，
+    /// 偏短回执会读到缓冲区残留的零值 ⇒ **被当成写入成功**。
+    /// 现在长度不够的报文一律判为"不认识"，继续读；真读不到最终由收超时报错。
     fn read_ack(fd: RawFd, seq: u32) -> io::Result<()> {
         let mut buf = [0u8; 1024];
         loop {
@@ -300,28 +377,14 @@ mod imp {
                 // 超时/被打断：拿不到回执就当"内核没理我们"，直接报错，不无限等
                 return Err(err);
             }
-            if (n as usize) < 16 {
-                continue;
-            }
 
-            let msg_len = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            let msg_type = u16::from_ne_bytes([buf[4], buf[5]]);
-            let msg_seq = u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]);
-
-            // 不是我们要的那条回执（比如别的线程的、或通知消息）：跳过继续读
-            if msg_type != NLMSG_ERROR || msg_seq != seq {
-                if msg_len < 16 || msg_len > buf.len() {
-                    continue;
+            match classify_ack(&buf, n as usize, seq) {
+                AckOutcome::NotMine => continue,
+                AckOutcome::Success => return Ok(()),
+                AckOutcome::Failed(errno) => {
+                    return Err(io::Error::from_raw_os_error(errno));
                 }
-                continue;
             }
-
-            let code = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
-            if code == 0 {
-                return Ok(());
-            }
-            // 内核给的是负 errno
-            return Err(io::Error::from_raw_os_error(-code));
         }
     }
 
@@ -367,12 +430,6 @@ mod imp {
 mod imp {
     use std::io;
     use std::net::IpAddr;
-
-    const NLMSG_ERROR: u16 = 0;
-    #[allow(dead_code)]
-    pub fn _unused() -> u16 {
-        NLMSG_ERROR
-    }
 
     /// ipset 是 Linux 内核的特性，其它平台明确报"不支持"（由调用方限流告警一次），
     /// 绝不假装成功 —— 那会变成"配了不生效还没人知道"。
@@ -616,7 +673,10 @@ mod tests {
 
         let err = encode_add(&"a".repeat(32), addr, 0, 1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("too long"), "must state the reason: {err}");
+        assert!(
+            err.to_string().contains("too long"),
+            "must state the reason: {err}"
+        );
     }
 
     /// add_batch：能分开报"成了几条、第一条错是什么"
@@ -633,5 +693,102 @@ mod tests {
             let (_, err) = r.first_error.as_ref().expect("要有原因");
             assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         }
+    }
+
+    // ==================== 🔐 问题 42：回执长度校验 ====================
+
+    /// 拼一条 `NLMSG_ERROR` 回执（按内核的真实布局）。
+    ///
+    /// ```text
+    /// nlmsghdr { len, type = NLMSG_ERROR(2), flags, seq, pid }
+    /// nlmsgerr { error: i32, msg: <原请求头> }
+    /// ```
+    /// `total_len` 用于**故意**把自述长度写小/写大，构造畸形报文。
+    fn ack_packet(seq: u32, error: i32, declared_len: usize, actual_len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; actual_len.max(20)];
+        // nlmsghdr
+        buf[0..4].copy_from_slice(&(declared_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        // nlmsgerr.error
+        buf[16..20].copy_from_slice(&error.to_ne_bytes());
+        buf
+    }
+
+    /// 🔐 问题 42 的核心：**偏短的回执绝不能被当成写入成功**。
+    ///
+    /// 修复前只查 `n >= 16` 就取偏移 16..20 —— 偏短报文的这四个字节是**残留零值**，
+    /// 于是 `code == 0` ⇒ "成功"。表现为"ipset 写入静默失败"，
+    /// 正是本次整改最要消灭的那类问题。
+    #[test]
+    fn short_ack_is_not_treated_as_success() {
+        // 恰好在旧门槛上：16 字节，够旧代码取"错误码"（其实是缓冲区残留的 0）
+        let mut short = vec![0u8; 16];
+        short[0..4].copy_from_slice(&16u32.to_ne_bytes()); // 自述长度也是 16
+        short[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        short[8..12].copy_from_slice(&7u32.to_ne_bytes());
+
+        assert_eq!(
+            classify_ack(&short, 16, 7),
+            AckOutcome::NotMine,
+            "16 字节的回执装不下错误码（需 20 字节），必须判为不认识而不是成功"
+        );
+
+        // 19 字节：只差一个字节，同样不可信
+        let nearly = ack_packet(7, 0, 19, 19);
+        assert_eq!(
+            classify_ack(&nearly, 19, 7),
+            AckOutcome::NotMine,
+            "19 字节仍不足以读完整错误码"
+        );
+
+        // 刚好 20 字节：可以读错误码了 ⇒ 这才是合法的"成功"回执
+        let ok = ack_packet(7, 0, 20, 20);
+        assert_eq!(classify_ack(&ok, 20, 7), AckOutcome::Success);
+    }
+
+    /// 自述长度 > 实收字节数（被截断的报文）不可信 —— 必须丢弃。
+    #[test]
+    fn truncated_ack_is_rejected() {
+        // 自称 36 字节（内核完整回执的长度），实际只收到 20 字节
+        let lying = ack_packet(7, 0, 36, 20);
+        assert_eq!(
+            classify_ack(&lying, 20, 7),
+            AckOutcome::NotMine,
+            "自述长度超出实收字节数 ⇒ 报文被截断，不能采信"
+        );
+
+        // 对照：实收 36（与自述一致）⇒ 正常采信
+        let honest = ack_packet(7, 0, 36, 36);
+        assert_eq!(classify_ack(&honest, 36, 7), AckOutcome::Success);
+    }
+
+    /// 内核拒绝时要把**真实 errno** 带回去（这是"失败可见"的根据）。
+    #[test]
+    fn failed_ack_reports_the_real_errno() {
+        // 内核给的是负 errno：-ENOENT(2) = 集合不存在
+        let denied = ack_packet(7, -2, 36, 36);
+        assert_eq!(classify_ack(&denied, 36, 7), AckOutcome::Failed(2));
+
+        // -EPERM(1) = 权限不足
+        let perm = ack_packet(7, -1, 36, 36);
+        assert_eq!(classify_ack(&perm, 36, 7), AckOutcome::Failed(1));
+
+        // 协议上不该出现的正数：也要**如实报失败**，绝不能当成功
+        let weird = ack_packet(7, 5, 36, 36);
+        assert_eq!(classify_ack(&weird, 36, 7), AckOutcome::Failed(5));
+    }
+
+    /// 不是我们要的回执（别人的序号 / 别的类型）要跳过，不能误判成本次的结果。
+    #[test]
+    fn foreign_ack_is_skipped() {
+        // 序号对不上 → 丢弃（否则会拿别的线程的结果回答自己）
+        let other_seq = ack_packet(99, -2, 36, 36);
+        assert_eq!(classify_ack(&other_seq, 36, 7), AckOutcome::NotMine);
+
+        // 类型不是 NLMSG_ERROR → 丢弃
+        let mut other_type = ack_packet(7, 0, 36, 36);
+        other_type[4..6].copy_from_slice(&3u16.to_ne_bytes());
+        assert_eq!(classify_ack(&other_type, 36, 7), AckOutcome::NotMine);
     }
 }

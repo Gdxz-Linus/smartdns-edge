@@ -1,6 +1,7 @@
-#[cfg(all(feature = "nft", target_os = "linux"))]
-mod nftset_sys;
-
+// 🔐 B-②：nftset 原本是 `include/nftset.c`（C）＋ build.rs 的 cc/bindgen，
+// 现已是**纯 Rust**（与 ipset 一样是裸 libc 走 nfnetlink）。
+// 仍挂 `feature = "nft"` + `target_os = "linux"`：
+// **去掉这层 gating 属于独立的行为变更，不在 B-② 范围内**（会让非 Linux 平台的提示行为变化）。
 #[cfg(all(feature = "nft", target_os = "linux"))]
 pub mod nftset;
 

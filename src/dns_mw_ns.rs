@@ -21,6 +21,7 @@ use crate::{
 };
 
 use crate::libdns::proto::rr::domain::usage::LOCAL;
+use crate::libdns::proto::rr::rdata::opt::ClientSubnet;
 use crate::libdns::proto::{op::ResponseCode, rr::rdata::opt::EdnsCode};
 use futures::FutureExt;
 use rr::rdata::opt::EdnsOption;
@@ -78,6 +79,16 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             // 无论客户端带不带 DO 标志，向外网查询时一律填 false，拒绝向上游索要加密签名！
             is_dnssec: false,
             record_type: rtype,
+            // 📌 丙-2b：EDNS Client Subnet 的完整取值链 ——
+            //   ① 客户端自己在 EDNS 里带的（最高优先，尊重调用方）；
+            //   ② 域名规则级 `-subnet`；
+            //   ③ **组级**（本次新增）；
+            //   ④ 全局 —— 它在 `NameServer` 里做兜底（见 `dns_client.rs` 的
+            //      `options.client_subnet.or(self.options().client_subnet)`）。
+            //
+            // ⚠️ 第 ④ 档**不能**在这里补：全局值是**启动期定型**烧进每个 `NameServer` 的
+            // 默认值，不是逐查询读配置。组级之所以插得进去，正是因为它排在第 ④ 档**之前**
+            // —— 只要这里能给出值，`dns_client` 那次 `.or()` 就不会用到默认值。
             client_subnet: req
                 .extensions()
                 .as_ref()
@@ -87,7 +98,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                         _ => None,
                     })
                 })
-                .or_else(|| ctx.domain_rule.get_ref(|r| r.subnet.as_ref()).cloned()),
+                .or_else(|| ctx.domain_rule.get_ref(|r| r.subnet.as_ref()).cloned())
+                .or_else(|| {
+                    ctx.edns_client_subnet()
+                        .map(|net| ClientSubnet::new(net.addr(), net.prefix_len(), 0))
+                }),
         };
 
         // skip nameserver rule
@@ -162,15 +177,38 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         let ip_opts = rtype.is_ip_addr().then(|| {
             let cfg = ctx.cfg();
 
+            // 🔐 问题 24（用户定调）：测速模式**只能有一个口径**。
+            //
+            // 原来这里与双栈各算各的：
+            //   · 本处：域名规则没写 → 取全局；全局也没写 → 得到 `None`
+            //     ⇒ 下面判 `speed_check_mode.is_none()` 就变成"**不测速**"。
+            //   · 双栈：同样两层读不到时 `unwrap_or_default()` ⇒ "**用默认模式测速**"。
+            // 于是**同一份"未配置"的配置，两条路径给出相反答案**。
+            //
+            // 现在两条路径共用 `config::resolve_speed_check_mode`，
+            // 口径是"未配置 = 默认模式 = 要测速"（与上游 C 版一致）。
+            //
+            // ⚠️ 这意味着**默认部署的行为变化**：以前"不写 speed-check-mode"
+            // 会让上游选 IP 直接跳过测速（谁先回有效答案用谁），现在会用
+            // `ping`+`tcp:443` 挑最快 IP —— 这正是本项目"选最快 IP"的主打能力，
+            // 也是 C 版的默认行为，属用户明确要求对齐的方向。
+            //
+            // ⚠️ 注意 `None` 与 `Some([None])` 的区别仍然保留：
+            // 用户**显式**写 `none` 得到 `Some([None])`，下面 `any(is_none)` 判为不测速；
+            // 而"没写"得到的是**默认模式列表**（不含 `None`），照常测速。
+            // 📌 乙类：中间那档（组级）由 `ctx.speed_check_mode()` 负责 ——
+            // 它内部是"组级 > 全局"，所以这里仍然只用传两参。
+            let resolved_speed_check_mode = crate::config::resolve_speed_check_mode(
+                ctx.domain_rule.get_ref(|r| r.speed_check_mode.as_ref()),
+                ctx.speed_check_mode().as_ref(),
+            );
+
             let mut opts = match ctx.domain_rule.as_ref() {
                 Some(rule) => LookupIpOptions {
                     response_strategy: rule
                         .get(|n| n.response_mode)
-                        .unwrap_or_else(|| cfg.response_mode()),
-                    speed_check_mode: match rule.speed_check_mode.as_ref() {
-                        Some(mode) => Some(mode.clone()),
-                        None => cfg.speed_check_mode().cloned(),
-                    },
+                        .unwrap_or_else(|| ctx.response_mode()),
+                    speed_check_mode: Some(resolved_speed_check_mode.clone()),
                     no_speed_check: ctx.server_opts.no_speed_check(),
                     ignore_ip: cfg.ignore_ip().clone(),
                     blacklist_ip: cfg.blacklist_ip().clone(),
@@ -179,8 +217,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                     lookup_options: lookup_options.clone(),
                 },
                 None => LookupIpOptions {
-                    response_strategy: cfg.response_mode(),
-                    speed_check_mode: cfg.speed_check_mode().cloned(),
+                    response_strategy: ctx.response_mode(),
+                    speed_check_mode: Some(resolved_speed_check_mode.clone()),
                     no_speed_check: ctx.server_opts.no_speed_check(),
                     ignore_ip: cfg.ignore_ip().clone(),
                     blacklist_ip: cfg.blacklist_ip().clone(),
@@ -202,18 +240,63 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         // 🌟 【底层收费站合并器】：彻底终结 Dualstack 和 Cache 带来的 4 倍风暴！
         //
         // 折叠键必须覆盖**所有会影响这次上游查询结果的请求级差异**，否则等待者会拿到
-        // "为别人算出来"的答案（P1-4）。进键的四类差异：
+        // "为别人算出来"的答案（P1-4）。进键的六类差异：
         //   1. name/type —— 查询本身；
         //   2. group —— 客户端规则能带来的差异只有"选哪个分组"，已经在这里；
         //   3. ecs —— 客户端自带的 EDNS0 Client Subnet（读不到时用域规则的 -subnet）。
         //      不区分它，不同网段的客户端会共用一次上游查询、拿到别人地区的 IP，而且这个错答案
         //      还会被缓存层按自己的 ECS 键存下来，在整个 TTL 内持续污染；
         //   4. 处理选项（响应模式 / 测速模式 / 绑定级 -no-speed-check）—— 它们会被"固化"进
-        //      共享答案（测速排序、按模式挑选 IP），所以不同绑定的客户端也不能互相借用。
+        //      共享答案（测速排序、按模式挑选 IP），所以不同绑定的客户端也不能互相借用；
+        //   5. 🔐 **上游级的 IP 黑白名单开关**（`server ... -blacklist-ip` / `-whitelist-ip`）
+        //      —— 见下面 `fold_ns_filter` 的说明。
+        //   6. 🔐 **规则组名**（`rule_group`）—— 见下面 `fold_rule_group` 的说明。
         let fold_ecs = lookup_options
             .client_subnet
             .map(|subnet| format!("{}/{}", subnet.addr(), subnet.source_prefix()))
             .unwrap_or_default();
+
+        // 🔐 甲类遗留修复（2026-09-26）：**规则组名必须进折叠键**。
+        //
+        // ## 原来的假设为什么失效了
+        //
+        // 折叠键第 2 项 `group_name` 是 `ctx.server_group_name()`，那是**上游分组**，
+        // 不是规则组（`rule_group`）。原注释写的是"客户端规则能带来的差异只有选哪个分组，
+        // 已经在这里" —— 这句话在**甲类铺开之后不再成立**：
+        // 规则组现在能改变 TTL 裁剪（`rr-ttl-min` / `rr-ttl-max` / `rr-ttl-reply-max`）、
+        // 本机 TTL（`local-ttl`）、应答条数（`max-reply-ip-num`）等**答案内容**。
+        //
+        // ## 后果（与问题 25 完全同型）
+        //
+        // 同一个域名、同一个上游组、两个**不同规则组**的并发查询会算出同一个折叠键
+        // ⇒ 被合并成一次上游查询；而裁剪是在折叠**之后**按**赢家自己的 ctx** 做的，
+        // 于是等待者拿到"按对方规则组裁剪过"的答案。
+        // 更糟的是：缓存中间件在**外层**，会把这答案按**等待者自己的规则组**键存下来，
+        // 污染在整个 TTL 内持续存在。
+        //
+        // ## 为什么用名字而不是直接哈希参数值
+        //
+        // 规则组名是**组级参数的唯一来源**（同名即同参数），所以名字进键等价于
+        // "所有组级参数差异"进键，而且**将来再铺开别的组级参数也不用回来改这里**
+        // （乙类、丙类都会受益）。这与 `AnswerAffectingOpts.rule_group` 进缓存键
+        // 是同一个思路。
+        //
+        // 代价：不同规则组的并发查询不再互相合并。这是**正确性优先**的取舍 ——
+        // 宁可少合并，也不能串答案。
+        let fold_rule_group = ctx.effective_rule_group();
+
+        // 🔐 问题 25：**上游级的黑白名单开关必须进折叠键**。
+        //
+        // 为什么：IP 过滤发生在 `per_nameserver_lookup_ip` 里，判据是**每个上游自己的**
+        // `-blacklist-ip` / `-whitelist-ip` 开关（`ns_opts.blacklist_ip` / `ns_opts.whitelist_ip`），
+        // 而不是全局的 `LookupIpOptions`。原来的折叠键（`fold_proc`）只哈希了后者里的
+        // 响应模式 / 测速模式 / `-no-speed-check`，**完全没包含这两个开关**。
+        //
+        // 后果：同一个上游组里，若上游 A 配了 `-blacklist-ip`、上游 B 没配，
+        // 两条**本该各自过滤**的查询会被折叠成一次上游查询，等待者拿到的是
+        // "按对方口径过滤过的答案"（反之亦然）—— 也就是串答案。
+        let fold_ns_filter = fold_nameserver_filter(name_server.iter());
+
         let fold_proc = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -222,11 +305,19 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                 opts.speed_check_mode.hash(&mut hasher);
                 opts.no_speed_check.hash(&mut hasher);
             }
+            fold_ns_filter.hash(&mut hasher); // 🔐 问题 25
             hasher.finish()
         };
-        let cache_key = format!(
-            "{}:{}:{}:{}:{:x}",
-            name, rtype, group_name, fold_ecs, fold_proc
+
+        // 拼接抽成纯函数：这样"规则组不同 ⇒ 键不同"这个不变量能被**直接单测**
+        // （原先这段在 async 闭包与 async 块之间，测不到）。
+        let cache_key = build_inflight_key(
+            &name.to_string(),
+            rtype,
+            &group_name,
+            &fold_ecs,
+            fold_proc,
+            fold_rule_group,
         );
 
         let rx = {
@@ -305,25 +396,26 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         // 这样 Dualstack 和 Cache 拿到的就是天然合规的包裹，倒计时完美生效！
         if let Ok(ref mut res) = actual_result {
             // 🌟 提取 rr-ttl (如果配置了，它拥有最高统治权)
+            // 📌 乙类：中间那档（组级）由 `ctx.rr_ttl()` 负责（组级 > 全局）
             let rr_ttl = ctx
                 .domain_rule
                 .as_ref()
                 .and_then(|r| r.rr_ttl)
                 .map(|i| i as u32)
-                .or_else(|| ctx.cfg().rr_ttl().map(|i| i as u32));
+                .or_else(|| ctx.rr_ttl().map(|i| i as u32));
 
             let rr_ttl_min = ctx
                 .domain_rule
                 .as_ref()
                 .and_then(|r| r.rr_ttl_min)
                 .map(|i| i as u32)
-                .unwrap_or_else(|| ctx.cfg().rr_ttl_min().unwrap_or(0) as u32);
+                .unwrap_or_else(|| ctx.rr_ttl_min().unwrap_or(0) as u32);
             let rr_ttl_max = ctx
                 .domain_rule
                 .as_ref()
                 .and_then(|r| r.rr_ttl_max)
                 .map(|i| i as u32)
-                .unwrap_or_else(|| ctx.cfg().rr_ttl_max().unwrap_or(86400) as u32);
+                .unwrap_or_else(|| ctx.rr_ttl_max().unwrap_or(86400) as u32);
 
             // 裁剪逻辑抽成独立函数 clamp_record_ttl（见本文件末尾），便于单元测试直接覆盖。
             let clamp_ttl =
@@ -356,6 +448,82 @@ struct LookupIpOptions {
     blacklist_ip: Arc<IpSet>,
     ip_alias: Arc<IpMap<Arc<[IpAddr]>>>,
     lookup_options: LookupOptions,
+}
+
+/// 拼"并发折叠"用的键。
+///
+/// ## 抽成纯函数的理由
+///
+/// 与 [`fold_nameserver_filter`] 同一个理由：这段逻辑原本散在一个长 `async` 函数里，
+/// 没法直接单测。而它守卫的是一个**正确性不变量** ——
+/// **凡能改变答案的请求级差异，都必须体现在键上**。
+/// 这个不变量只能用"两组只差一个维度，键必须不同"来钉，所以必须抽出来。
+///
+/// ## 六个维度
+///
+/// `name` / `rtype` / 上游分组 `group` / `ecs` / `proc`（处理选项哈希）/ `rule_group`。
+///
+/// 🔐 最后那个 `rule_group` 是 2026-09-26 补的（甲类遗留修复）：
+/// 规则组能改变 TTL 裁剪、本机 TTL、应答条数等**答案内容**，
+/// 不带它就会让两个不同规则组的并发查询互相复用结果（与问题 25 同型）。
+///
+/// ## 为什么把 `rule_group` 明写而不是折进 `proc` 哈希
+///
+/// 明写在键里**可读、可断言**（测试能直接看到"两个组键不同"），
+/// 而且它是"该组全部组级参数"的代理 —— 将来再铺开别的组级参数不必回来改这里。
+fn build_inflight_key(
+    name: &str,
+    rtype: RecordType,
+    group: &str,
+    ecs: &str,
+    fold_proc: u64,
+    rule_group: &str,
+) -> String {
+    format!("{name}:{rtype}:{group}:{ecs}:{rule_group}:{fold_proc:x}")
+}
+
+/// 🔐 问题 25：把一组上游的「IP 黑白名单开关」汇总成一个哈希值，供折叠键使用。
+///
+/// ## 为什么需要它
+///
+/// IP 过滤（`per_nameserver_lookup_ip`）用的是**每个上游自己的**
+/// `-blacklist-ip` / `-whitelist-ip` 开关，而"并发查询合并"（`inflight` 折叠）是按
+/// **上游组**做的。折叠键若不含这两个开关，组内两个开关不同的上游就会互相复用结果 ——
+/// 等待者拿到按**对方**口径过滤过的答案（串答案）。
+///
+/// ## 为什么抽成独立函数
+///
+/// 折叠键是在一大段 `async` 闭包里拼出来的，那里没法直接单测。
+/// 抽成只依赖迭代器的纯函数之后，"开关不同 → 哈希不同"这个**核心不变量**
+/// 才能被直接验证（见模块内的 `fold_nameserver_filter_*` 测试）。
+///
+/// ## 必须**先排序**再哈希（否则同一配置会算出不同的键）
+///
+/// 组内上游是从 HashSet 展开的（见 dns_client.rs），因此迭代顺序在不同次构建之间可能不同。
+/// 我第一版直接按迭代顺序哈希，被测试当场抓住：同一配置构造两次，折叠键居然不一样 ——
+/// 那会让并发合并彻底失效（每个请求都算出新键、各查一次上游）。
+///
+/// 语义上真正有意义的量是组内各上游开关的组合，与排列无关，
+/// 所以把每个上游的 (blacklist, whitelist) 排序后再哈希：既不依赖迭代顺序，
+/// 又保留完整信息（异或或布尔 OR 都会丢失 [true,false] 与 [false,true] 的区别）。
+fn fold_nameserver_filter<'a, I>(servers: I) -> u64
+where
+    I: Iterator<Item = &'a Arc<NameServer>>,
+{
+    use std::hash::{Hash, Hasher};
+
+    let mut switches: Vec<(bool, bool)> = servers
+        .into_iter()
+        .map(|ns| {
+            let o = ns.options();
+            (o.blacklist_ip, o.whitelist_ip)
+        })
+        .collect();
+    switches.sort_unstable();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    switches.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Deref for LookupIpOptions {
@@ -421,7 +589,24 @@ async fn lookup_ip_with(
     use ResponseMode::*;
     use futures_util::future::{Either, select, select_all};
 
-    assert!(options.record_type.is_ip_addr());
+    // 🔐 问题 27-6：**不能在请求路径上 `assert!`**。
+    //
+    // 原来是 `assert!(options.record_type.is_ip_addr())` —— 在 release 构建下同样会执行，
+    // 一旦断言失败就是**panic**。而这条路径由客户端查询驱动：
+    // panic 会被崩溃兜底接住（记日志 + 回 SERVFAIL），但它终究是
+    // **一个远程可触发的异常路径入口**，而且会把"参数用错了"这种内部问题
+    // 表现成"服务端炸了一下"。
+    //
+    // 当前所有调用点都满足这个前提（`ip_opts` 与 `rtype.is_ip_addr()` 是同一个条件构造的），
+    // 所以这是**将来复用时的隐患**、而不是现在的故障。
+    // 改为返回错误：语义清楚（这是"没有可用连接"级别的内部错误），且不会 panic。
+    if !options.record_type.is_ip_addr() {
+        crate::log::warn!(
+            "lookup_ip_with called with a non-address record type {:?}; this is an internal misuse, returning no-connections",
+            options.record_type
+        );
+        return Err(ProtoErrorKind::NoConnections.into());
+    }
 
     let mut query_tasks = servers
         .iter()
@@ -433,7 +618,19 @@ async fn lookup_ip_with(
     }
 
     // ignore speed check
-    let mut response_strategy = if options.no_speed_check || options.speed_check_mode.is_none() {
+    //
+    // 🔐 问题 24（用户定调）：判据里**去掉了 `speed_check_mode.is_none()`**。
+    //
+    // 那个条件原先的含义是"配置里没写 speed-check-mode ⇒ 不测速"，
+    // 也就是说 `None` 同时承担了两种意思：**"没写"**与**"写了 none"**。
+    // 现在两层含义已经分家（见上面 `resolve_speed_check_mode` 的说明）：
+    //   · "没写"   → 得到**默认模式列表**（要测速）—— 与上游 C 版一致；
+    //   · "写了 none" → 得到 `Some([None])`，由下面那个 `any(is_none)` 判为不测速。
+    // 因此 `is_none()` 这个条件已经**没有任何输入能命中**（上游传进来的
+    // 永远是 `Some(...)`），留着只会让读代码的人以为"没写就是不测速"。
+    //
+    // 仍然保留的是 bind 级 `-no-speed-check`（逐监听，优先级最高）。
+    let mut response_strategy = if options.no_speed_check {
         FastestResponse
     } else {
         options.response_strategy
@@ -560,7 +757,6 @@ async fn lookup_ip_with(
             // 【阶段一：Gather (等待上游返回)】
             // 设定全局最大等待时间 800ms (等待上游交卷的时间，保持不变)
             let mut gather_timeout = sleep(Duration::from_millis(800)).boxed();
-
             loop {
                 // 如果所有上游都返回了，提前跳出，不再死等
                 if query_tasks.is_empty() {
@@ -582,7 +778,11 @@ async fn lookup_ip_with(
                         }
                     }
                     Either::Right(_) => {
-                        // 500ms 到达！不再等剩下的上游，直接发车！
+                        // 🔐 问题 27-7：这里原来是「500ms 到达！」，与上面设定的
+                        // **800ms**（`gather_timeout`）自相矛盾 —— 注释与代码不符会让后来者
+                        // 以为存在一个"500ms 先发车"的中间阈值，从而误判这段逻辑。
+                        // 实际只有**一个**超时：800ms 到点就停止等待剩下的上游。
+                        // 800ms 到达！不再等剩下的上游，直接发车！
                         break;
                     }
                 }
@@ -678,35 +878,13 @@ async fn lookup_ip_with(
     // =================================================================================
     // 🌟 全局统一的“降级与防污染兜底”策略：
     // 当所有上游都没有测出最快 IP，或者处于 FastestResponse 模式且没有上游能给出完美答卷时，进行质量评优。
+    //
+    // 🔐 评分标准已抽到 `dns_client::response_rank`，与**非 IP 类查询的竞速路径**
+    // 共用同一套判据 —— 原先这里有一份、非 IP 路径没有，两条路的口径会各自漂移。
     // =================================================================================
-    let best_fallback = ok_tasks.into_iter().min_by_key(|res| {
-        let code = res.response_code();
-        let has_answers = !res.answers().is_empty();
-
-        // 🌟 提取包裹中是否携带了珍贵的 SOA 权威记录
-        let has_soa = res
-            .authorities()
-            .iter()
-            .any(|r| r.record_type() == RecordType::SOA)
-            || res
-                .answers()
-                .iter()
-                .any(|r| r.record_type() == RecordType::SOA)
-            || res
-                .additionals()
-                .iter()
-                .any(|r| r.record_type() == RecordType::SOA);
-
-        // 🌟 优先级降维打击排序：
-        match (code, has_answers, has_soa) {
-            (ResponseCode::NoError, true, _) => 0, // 0级：有 Answer 的完美合法包
-            (ResponseCode::NoError, false, true) => 1, // 🌟 1级：【极品空包】带有真实 SOA 的合法 NoData，无情碾压太监包！
-            (ResponseCode::NoError, false, false) => 2, // 🌟 2级：【太监空包】没有 SOA 的残缺空包（如本地代理抢答的阉割包）。
-            (ResponseCode::NXDomain, _, true) => 3,     // 3级：带有 SOA 的规范 NXDOMAIN
-            (ResponseCode::NXDomain, _, false) => 4,    // 4级：光秃秃的虚假 NXDOMAIN
-            _ => 5,
-        }
-    });
+    let best_fallback = ok_tasks
+        .into_iter()
+        .min_by_key(|res| crate::dns_client::response_rank(res));
 
     match best_fallback {
         Some(lookup) => Ok(lookup),
@@ -911,7 +1089,15 @@ async fn per_nameserver_lookup_ip(
     name: Name,
     options: &LookupIpOptions,
 ) -> Result<DnsResponse, LookupError> {
-    assert!(options.lookup_options.record_type.is_ip_addr());
+    // 🔐 问题 27-6：同 `lookup_ip_with` —— 请求路径上不 panic，
+    // 改用明确的错误 + 告警（这两处断言是同一个隐患的两个入口）。
+    if !options.lookup_options.record_type.is_ip_addr() {
+        crate::log::warn!(
+            "per_nameserver_lookup_ip called with a non-address record type {:?}; this is an internal misuse, returning no-connections",
+            options.lookup_options.record_type
+        );
+        return Err(ProtoErrorKind::NoConnections.into());
+    }
 
     // 🌟 核心修复：洗白底层误伤的 SOA！
     let res = match server.lookup(name.clone(), options).await {
@@ -1171,6 +1357,129 @@ mod tests {
                 }
                 assert!(success);
             });
+    }
+
+    /// 🔐 问题 25：上游级黑白名单开关必须进折叠键。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fold_ns_filter_differs_when_switches_differ() {
+        async fn hash_of(cfg_lines: &[&str]) -> u64 {
+            let mut b = RuntimeConfig::builder();
+            for line in cfg_lines {
+                b = b.with(line);
+            }
+            let client = b.build().unwrap().create_dns_client().await;
+            let group = client.get_server_group("default").await.unwrap();
+            fold_nameserver_filter(group.iter())
+        }
+
+        let with_switch = hash_of(&["server 1.1.1.1 -blacklist-ip", "server 8.8.8.8"]).await;
+        let without = hash_of(&["server 1.1.1.1", "server 8.8.8.8"]).await;
+
+        assert_ne!(
+            with_switch, without,
+            "开关不同，折叠键必须不同，否则组内不同过滤口径的上游会互相复用结果（串答案）"
+        );
+    }
+
+    /// 🔐 对照：开关相同时折叠键必须相同，否则并发合并不起作用。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fold_ns_filter_is_stable_for_identical_switches() {
+        async fn hash_of() -> u64 {
+            let cfg = RuntimeConfig::builder()
+                .with("server 1.1.1.1 -whitelist-ip")
+                .with("server 8.8.8.8")
+                .build()
+                .unwrap();
+            let client = cfg.create_dns_client().await;
+            let group = client.get_server_group("default").await.unwrap();
+            fold_nameserver_filter(group.iter())
+        }
+
+        assert_eq!(
+            hash_of().await,
+            hash_of().await,
+            "相同配置必须得到相同的折叠键"
+        );
+    }
+
+    // ==================== 🔐 甲类遗留：规则组必须进折叠键 ====================
+
+    /// 🔐 **规则组不同 ⇒ 折叠键必须不同**。
+    ///
+    /// ## 为什么这条必须有
+    ///
+    /// 甲类铺开后，规则组能改变**答案内容**（TTL 裁剪、本机 TTL、应答条数……）。
+    /// 而 TTL 裁剪发生在折叠**之后**、按**赢家自己的 ctx** 执行，
+    /// 所以两个不同规则组的并发查询一旦被折叠，等待者会拿到"按对方规则组裁剪过"的答案；
+    /// 缓存中间件在**外层**，还会把它按等待者自己的规则组键存下来 —— 污染持续整个 TTL。
+    ///
+    /// 这与问题 25（上游级黑白名单没进键）是**完全同型**的缺陷，故照同样的方式钉住。
+    ///
+    /// ## 判据成对
+    ///
+    /// 既要有"不同组 → 键不同"，也要有"同组 → 键相同"（否则并发合并彻底失效，
+    /// 每个请求都算出新键、各查一次上游）。后者见下一条测试。
+    #[test]
+    fn inflight_key_differs_per_rule_group() {
+        let base = build_inflight_key(
+            "a.com",
+            RecordType::A,
+            "default",
+            "",
+            0xabc,
+            "", // 默认组（未匹配任何 client-rule）
+        );
+        let office = build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "office");
+        let guest = build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "guest");
+
+        assert_ne!(
+            base, office,
+            "默认组与 office 组的折叠键必须不同，否则两个组的答案会互相串（甲类遗留）"
+        );
+        assert_ne!(office, guest, "两个不同规则组的折叠键必须不同");
+        // 顺带确认抽取过程中没把原有维度弄丢
+        assert_ne!(
+            build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "office"),
+            build_inflight_key("b.com", RecordType::A, "default", "", 0xabc, "office"),
+            "域名仍是键的一部分"
+        );
+        assert_ne!(
+            build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "office"),
+            build_inflight_key("a.com", RecordType::AAAA, "default", "", 0xabc, "office"),
+            "类型仍是键的一部分"
+        );
+        assert_ne!(
+            build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "office"),
+            build_inflight_key("a.com", RecordType::A, "group2", "", 0xabc, "office"),
+            "上游分组仍是键的一部分"
+        );
+        assert_ne!(
+            build_inflight_key(
+                "a.com",
+                RecordType::A,
+                "default",
+                "1.2.3.0/24",
+                0xabc,
+                "office"
+            ),
+            build_inflight_key("a.com", RecordType::A, "default", "", 0xabc, "office"),
+            "ECS 仍是键的一部分"
+        );
+    }
+
+    /// 🔐 对照：**同一规则组必须得到相同键**，否则并发合并会彻底失效。
+    ///
+    /// 没有这一条，"不同组不同键"可以靠"每次都生成新键"轻松满足 ——
+    /// 而那样等于关掉了折叠器，双栈与缓存带来的 4 倍上游风暴会原样回来。
+    #[test]
+    fn inflight_key_is_stable_for_the_same_rule_group() {
+        for group in ["", "office", "guest"] {
+            assert_eq!(
+                build_inflight_key("a.com", RecordType::A, "default", "", 7, group),
+                build_inflight_key("a.com", RecordType::A, "default", "", 7, group),
+                "同一规则组（{group:?}）必须得到相同的折叠键"
+            );
+        }
     }
 }
 

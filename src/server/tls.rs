@@ -79,7 +79,9 @@ pub fn serve(
             // 🔐 P0-5：连接数上限。超出预算就拒绝新连接（不影响已有连接），保护进程内存。
             // 默认上限按物理内存自动推算：家庭小机器自动收紧，企业大机器自动放宽。
             let Some(conn_guard) = crate::server::limit::global().acquire(src_addr.ip()) else {
-                log::debug!("global connection limit reached; refusing the new connection from {src_addr}");
+                log::debug!(
+                    "global connection limit reached; refusing the new connection from {src_addr}"
+                );
                 continue;
             };
 
@@ -88,7 +90,9 @@ pub fn serve(
                 Some(l) => match l.acquire(src_addr.ip()) {
                     Some(guard) => Some(guard),
                     None => {
-                        log::debug!("per-listener connection limit reached; refusing the new connection from {src_addr}");
+                        log::debug!(
+                            "per-listener connection limit reached; refusing the new connection from {src_addr}"
+                        );
                         continue;
                     }
                 },
@@ -142,16 +146,15 @@ pub fn serve(
                     let message = match next {
                         Ok(Some(Ok(message))) => message,
                         Ok(Some(Err(e))) => {
-                            log::debug!(
-                                "DNS request stream from {} failed: {}",
-                                src_addr,
-                                e
-                            );
+                            log::debug!("DNS request stream from {} failed: {}", src_addr, e);
                             return; // 网络中断，断开连接
                         }
                         Ok(None) => break,
                         Err(_) => {
-                            log::debug!("timed out waiting for a DNS message; closing the connection: {}", src_addr);
+                            log::debug!(
+                                "timed out waiting for a DNS message; closing the connection: {}",
+                                src_addr
+                            );
                             return;
                         }
                     };

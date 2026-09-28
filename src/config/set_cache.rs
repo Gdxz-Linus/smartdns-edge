@@ -74,7 +74,9 @@ impl<T: Clone> SetCache<T> {
             && let Some((fetched_at, value)) = self.lookup(&key)
             && fetched_at.elapsed() < Duration::from_secs(secs as u64)
         {
-            crate::log::debug!("{label} {name}: not yet due under -interval {secs} s; using the previous list");
+            crate::log::debug!(
+                "{label} {name}: not yet due under -interval {secs} s; using the previous list"
+            );
             return Ok(value);
         }
 
@@ -86,7 +88,9 @@ impl<T: Clone> SetCache<T> {
             }
             Err(err) => match self.lookup(&key) {
                 Some((_, value)) => {
-                    crate::log::warn!("{label} {name}: fetch failed ({err}); keeping the previous list");
+                    crate::log::warn!(
+                        "{label} {name}: fetch failed ({err}); keeping the previous list"
+                    );
                     Ok(value)
                 }
                 None => Err(err),

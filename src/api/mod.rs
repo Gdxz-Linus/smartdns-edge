@@ -166,12 +166,21 @@ impl IntoResponse for ApiError {
         // 其余回裸字符串，前端/脚本没法用同一个结构解析错误。状态码语义保持不变。
         let (status, message) = match self {
             ApiError::Internal(error) => {
-                // 详情写给服务端日志，响应里也保留（本机管理后台，排障需要）；
-                // 关键是不能把它当成"客户端错误"的状态码糊弄过去。
+                // 🔐 问题 13-②：详情**只写服务端日志，不回给调用方**。
+                //
+                // 原来响应体里带 `Something went wrong: {error}`，而 `{error}` 是
+                // `anyhow::Error` 的 Display —— 里面会带出**服务器路径、配置细节、
+                // 甚至上游地址**（例如 "failed to open /etc/smartdns/managed/x.conf: ..."）。
+                // 虽然调用方已经通过鉴权（所以报告把它定为"低"），但：
+                //   ① 管理口令可能在多个设备上复用，拿到口令的人不该顺带拿到服务器内部结构；
+                //   ② 这些细节对**服务端排障**有用（所以照写日志），对**调用方**没用 ——
+                //      调用方真正需要的是"服务器出错了，去看服务端日志"。
+                // 因此这里回一句稳定、可操作的话；完整错误仍在下面那行日志里。
                 crate::log::error!("API internal error: {error:?}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Something went wrong: {error}"),
+                    "Something went wrong on the server; see the server log for details"
+                        .to_string(),
                 )
             }
             ApiError::BadRequest(err) => (StatusCode::BAD_REQUEST, err),
@@ -299,24 +308,138 @@ pub fn api_token_configured() -> bool {
     API_TOKEN_FROM_USER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 口令错误次数限制（防暴力破解）：同一来源 IP 在窗口期内错太多次，就暂时拒之门外。
+/// 🔐 13-⑥：可信反向代理清单，供鉴权中间件做**归组**用。
+///
+/// ## 为什么用全局存储而不是每次去捞配置
+///
+/// 鉴权中间件是 `middleware::from_fn` 形式的**无状态**函数，
+/// 手上只有 `Request` —— 拿不到 `ServeState`（那是各路由的 `State` 提取器，
+/// 中间件层取不到）。所以与 `api_token()` 同样走全局。
+///
+/// ## 默认值必须落在**安全的一侧**
+///
+/// 未经 `init_trusted_proxies` 初始化时返回**空清单** ——
+/// 空清单 = 不信任任何代理头 = 与本项目原本的行为**完全一致**。
+/// 这个默认方向很要紧：万一将来有人忘了初始化，退化的结果只是"功能不生效"，
+/// 而不是"谁都可信"。
+///
+/// ## 为什么用 `RwLock` 而不是 `OnceLock`
+///
+/// 因为**热重载可能改这个清单**（用户改完 `trusted-proxy` 后 `POST /api/config/reload`，
+/// 或 `-interval` 定时刷新）。`OnceLock` 只生效第一次，热重载后清单会一直是旧的 ——
+/// 那会造成"改了配置不生效"，而这类"配了不生效"正是本项目反复在治理的问题。
+/// 所以每次重载都覆盖一遍。
+static TRUSTED_PROXIES: std::sync::LazyLock<
+    std::sync::RwLock<crate::trusted_proxy::TrustedProxies>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::RwLock::new(crate::trusted_proxy::TrustedProxies::default())
+});
+
+/// 由配置初始化/更新可信代理清单（启动时调用一次，之后每次热重载再调用）。
+///
+/// 锁中毒时用 `into_inner()` 继续 —— 与全仓库其它 50 余处保持一致：
+/// 这里最坏只是清单短暂不准，远好过"因为一次偶发 panic 就让管理后台再也起不来"。
+pub fn init_trusted_proxies(proxies: crate::trusted_proxy::TrustedProxies) {
+    *TRUSTED_PROXIES.write().unwrap_or_else(|e| e.into_inner()) = proxies;
+}
+
+/// 取可信代理清单；未初始化时是空清单（安全默认，见上）。
+fn api_trusted_proxies() -> crate::trusted_proxy::TrustedProxies {
+    TRUSTED_PROXIES
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 口令错误次数限制（防暴力破解）：同一来源在窗口期内错太多次，就暂时拒之门外。
+///
+/// 🔐 键必须按「来源网段」而不是「单个地址」来算，理由与连接数上限完全一致
+/// （见 `server/limit.rs` 的 `SourceKey`）：
+///
+///   * **IPv6 按 /64 前缀聚合**。运营商与云厂商普遍按 /64 成段分配地址，一个 /64 里
+///     有约 1800 亿亿个地址。若按单地址计数，攻击者每换一个地址计数就归零，
+///     「60 秒内 10 次」形同虚设 —— 这正好是这道防线要防的事。
+///   * **IPv4 按单个地址**（IPv4 地址稀缺，一个地址基本代表一个人）；
+///     同时把 IPv4 映射到 IPv6 的地址（`::ffff:a.b.c.d`，双栈监听下的 IPv4 客户端）
+///     还原成普通 IPv4，否则它们会全部落进 `::/64` 这一个桶里互相牵连。
 static AUTH_FAILS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+    std::sync::Mutex<std::collections::HashMap<AuthSourceKey, (u32, std::time::Instant)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 const AUTH_FAIL_LIMIT: u32 = 10;
 const AUTH_FAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 口令失败计数的键：IPv4 按地址、IPv6 按 /64 前缀。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum AuthSourceKey {
+    V4(std::net::Ipv4Addr),
+    /// IPv6 的 /64 前缀（前 8 字节）
+    V6([u8; 8]),
+}
+
+impl AuthSourceKey {
+    fn from_ip(ip: std::net::IpAddr) -> Self {
+        // 先还原「IPv4 映射到 IPv6」的形式，避免双栈监听下的 IPv4 客户端全挤进 ::/64
+        let ip = match ip {
+            std::net::IpAddr::V6(addr) => addr
+                .to_ipv4_mapped()
+                .map_or(std::net::IpAddr::V6(addr), std::net::IpAddr::V4),
+            std::net::IpAddr::V4(addr) => std::net::IpAddr::V4(addr),
+        };
+
+        match ip {
+            std::net::IpAddr::V4(v4) => Self::V4(v4),
+            std::net::IpAddr::V6(v6) => {
+                let o = v6.octets();
+                Self::V6([o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]])
+            }
+        }
+    }
+}
+
+/// 记录一次失败，返回该来源在窗口内的累计失败次数。
+///
+/// 🔐 清理过期记录**不是每次都做**：以前每来一次失败就 `retain` 全表扫一遍，
+/// 而未认证请求就能触发这条路径 —— 地图越大、每次失败的固定开销越高，属可被放大的开销。
+/// 现在按次数节流（每 64 次清一次），并且地图本身有容量上限兜底。
 fn auth_record_failure(ip: std::net::IpAddr) -> u32 {
-    let mut map = AUTH_FAILS.lock().unwrap();
-    map.retain(|_, (_, since)| since.elapsed() < AUTH_FAIL_WINDOW); // 顺手清理过期记录
-    let entry = map.entry(ip).or_insert((0, std::time::Instant::now()));
+    /// 清理节流：每来这么多条失败才扫一次全表
+    const PRUNE_EVERY: u64 = 64;
+    /// 地图条目上限。正常部署远达不到；到了说明有人在用海量网段试探，
+    /// 此时整表作废重来（而不是无限增长），保证内存可控。
+    const MAX_ENTRIES: usize = 4096;
+
+    let key = AuthSourceKey::from_ip(ip);
+    let mut map = AUTH_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+
+    let seen = AUTH_FAILS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if seen.is_multiple_of(PRUNE_EVERY) {
+        map.retain(|_, (_, since)| since.elapsed() < AUTH_FAIL_WINDOW);
+    }
+
+    if map.len() >= MAX_ENTRIES {
+        // 极端情况：地图被撑满。直接整表作废，避免内存无上限增长。
+        // 代价是被攻击期间限流精度下降，但总好过内存被吃光。
+        crate::log::warn!(
+            "the token-failure table reached {MAX_ENTRIES} entries and was reset; \
+             this suggests someone is probing from a very large number of network segments"
+        );
+        map.clear();
+    }
+
+    let entry = map.entry(key).or_insert((0, std::time::Instant::now()));
     entry.0 += 1;
     entry.0
 }
 
+/// 失败次数的累计调用计数，用于给「清理过期记录」节流（见 `auth_record_failure`）。
+static AUTH_FAILS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn auth_record_success(ip: std::net::IpAddr) {
-    AUTH_FAILS.lock().unwrap().remove(&ip);
+    AUTH_FAILS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&AuthSourceKey::from_ip(ip));
 }
 
 /// 🔐 P2：管理后台挂在**明文 HTTP** 上时，口令会在网络中明文传输。
@@ -385,10 +508,45 @@ pub fn check_exposure(
 
 async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
     let expected_token = api_token();
-    let client_ip = req
+
+    // 🔐 13-⑥：算出"按哪个地址归组"。
+    //
+    // ## 为什么这里能、而普通 DNS 查询不能
+    //
+    // 这是 **HTTP** 路径 —— 反向代理可以把真实客户端地址追加进 `X-Forwarded-For`。
+    // （普通 DNS over UDP 没有 HTTP 头，做不到；见 `src/trusted_proxy.rs` 的边界说明。）
+    //
+    // ## 两条安全约束（缺一不可）
+    //
+    // ① **必须先确认对端在 `trusted-proxy` 清单内** —— 由 `resolve_client_ip` 内部完成。
+    //    清单为空（默认）时它直接返回对端地址，**完全无视 XFF**，行为与改动前一致。
+    // ② **只用于"归组"** —— 即下面 `auth_record_failure` / `auth_record_success`
+    //    的计数键。它**不参与"口令对不对"的判定**，所以伪造 XFF 至多影响
+    //    "自己的失败次数记在谁头上"，**无法借此通过鉴权**。
+    //
+    // ⚠️ 这条中间件**不读配置**（它是 per-request 的纯函数式中间件），
+    // 所以可信清单从全局配置取 —— 与 `api_token()` 取自全局是同一种做法。
+    let peer_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|c| c.0.ip());
+
+    let client_ip = peer_ip.map(|peer| {
+        let forwarded = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok());
+        let trusted = api_trusted_proxies();
+        let (ip, source) = crate::trusted_proxy::resolve_client_ip(peer, forwarded, &trusted);
+        if source.is_forwarded() {
+            // 记一条 debug：说明"这次归组用的是代理自报的地址"，
+            // 排障时能一眼看出限流为啥记在了某个地址上。
+            crate::log::debug!(
+                "API auth: client address taken from X-Forwarded-For (peer {peer} is a trusted proxy)"
+            );
+        }
+        ip
+    });
 
     // 提取 HTTP Header 中的 Authorization 字段
     if let Some(auth_header) = req.headers().get(http::header::AUTHORIZATION)
@@ -435,4 +593,151 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
         ),
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+#[cfg(test)]
+mod auth_limit_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    /// 🔐 问题 13-②：**内部错误详情不得出现在响应体里**。
+    ///
+    /// 原实现回 `Something went wrong: {error}`，而 `anyhow::Error` 的 Display 会带出
+    /// 服务器路径、配置细节甚至上游地址。调用方（虽已鉴权）不需要这些；
+    /// 需要它们的服务端已经写进日志了。
+    ///
+    /// 这条测试直接构造一个"带敏感路径"的错误，断言它**不出现在响应体**里。
+    #[tokio::test]
+    async fn internal_error_body_does_not_leak_details() {
+        use axum::response::IntoResponse;
+
+        const SECRET: &str = "/etc/smartdns/secret-config-path.conf";
+        let err = ApiError::Internal(anyhow::anyhow!(
+            "failed to open {SECRET}: permission denied"
+        ));
+
+        let resp = err.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "内部错误仍应是 500（不能糊成 4xx）"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("应当能读出响应体");
+        let text = String::from_utf8_lossy(&body);
+
+        assert!(!text.contains(SECRET), "响应体泄露了服务器路径：{text}");
+        assert!(
+            !text.contains("permission denied"),
+            "响应体泄露了内部错误详情：{text}"
+        );
+        assert!(
+            text.contains("server log"),
+            "应当告诉调用方去服务端日志查（可操作）：{text}"
+        );
+
+        // 对照：客户端错误（400）**本来就该**把原因说明白 —— 不能把这条改动扩大到它们身上
+        let bad = ApiError::BadRequest("invalid `name` parameter".to_string()).into_response();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let bad_bytes = axum::body::to_bytes(bad.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let bad_text = String::from_utf8_lossy(&bad_bytes);
+        assert!(
+            bad_text.contains("invalid `name` parameter"),
+            "400 必须保留可操作的原因，不能被一并抹掉：{bad_text}"
+        );
+    }
+
+    /// 🔐 核心回归：同一个 /64 网段里的不同地址必须共用额度。
+    ///
+    /// 否则在 IPv6 环境下，攻击者每换一个地址计数就归零，
+    /// 「60 秒内 10 次」这道防暴力破解的闸门等于不存在。
+    #[test]
+    fn ipv6_addresses_in_the_same_64_share_one_budget() {
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2::9999".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:2:ffff::1".parse().unwrap();
+
+        assert_eq!(
+            AuthSourceKey::from_ip(a),
+            AuthSourceKey::from_ip(b),
+            "同一 /64 内换地址不能重置计数"
+        );
+        assert_eq!(
+            AuthSourceKey::from_ip(a),
+            AuthSourceKey::from_ip(c),
+            "同一 /64 内换地址不能重置计数"
+        );
+
+        // 换一个 /64 才是另一个来源（这正是运营商的分配粒度）
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_ne!(
+            AuthSourceKey::from_ip(a),
+            AuthSourceKey::from_ip(other),
+            "不同 /64 应当分开计数"
+        );
+    }
+
+    /// 🔐 IPv4 仍按单个地址计数（IPv4 地址稀缺，一个地址基本代表一个人）。
+    #[test]
+    fn ipv4_is_counted_per_address() {
+        let a: IpAddr = "192.168.1.10".parse().unwrap();
+        let b: IpAddr = "192.168.1.11".parse().unwrap();
+        assert_ne!(
+            AuthSourceKey::from_ip(a),
+            AuthSourceKey::from_ip(b),
+            "不同的 IPv4 设备必须各算各的"
+        );
+    }
+
+    /// 🔐 双栈监听下 IPv4 客户端以 `::ffff:a.b.c.d` 出现，必须还原后按 IPv4 计数，
+    /// 否则所有 IPv4 客户端会全部落进 `::/64` 这一个桶里互相牵连。
+    #[test]
+    fn mapped_ipv4_is_not_folded_into_the_ipv6_bucket() {
+        let mapped: IpAddr = "::ffff:192.168.1.10".parse().unwrap();
+        let plain: IpAddr = "192.168.1.10".parse().unwrap();
+        assert_eq!(
+            AuthSourceKey::from_ip(mapped),
+            AuthSourceKey::from_ip(plain),
+            "映射形式与普通形式必须是同一个来源"
+        );
+
+        // 两个不同的 IPv4 客户端不能因为映射形式而挤进同一个桶
+        let mapped2: IpAddr = "::ffff:192.168.1.11".parse().unwrap();
+        assert_ne!(
+            AuthSourceKey::from_ip(mapped),
+            AuthSourceKey::from_ip(mapped2),
+            "不同的 IPv4 客户端不能被折叠到一起"
+        );
+    }
+
+    /// 记账与清零的基本行为。
+    #[test]
+    fn failure_count_accumulates_and_success_clears_it() {
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        auth_record_success(ip); // 先清干净，避免受其它测试影响
+
+        assert_eq!(auth_record_failure(ip), 1);
+        assert_eq!(auth_record_failure(ip), 2);
+
+        // 同网段的另一个地址应累计到同一笔账上
+        let same_seg: IpAddr = "2001:db8:abcd:1::1".parse().unwrap();
+        let same_seg2: IpAddr = "2001:db8:abcd:1::2".parse().unwrap();
+        auth_record_success(same_seg);
+        assert_eq!(auth_record_failure(same_seg), 1);
+        assert_eq!(
+            auth_record_failure(same_seg2),
+            2,
+            "同 /64 的另一个地址必须继续累加，而不是从 1 重新开始"
+        );
+
+        // 口令正确时清零
+        auth_record_success(ip);
+        assert_eq!(auth_record_failure(ip), 1, "成功后计数应当归零");
+        auth_record_success(ip);
+        auth_record_success(same_seg);
+    }
 }

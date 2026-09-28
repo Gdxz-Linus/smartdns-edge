@@ -8,7 +8,6 @@ use std::{
 
 use tokio::sync::RwLock;
 
-use crate::third_ext::FutureJoinAllExt;
 use crate::{
     dns::DnsResponse,
     dns_conf::NameServerInfo,
@@ -245,7 +244,38 @@ impl DnsClientBuilder {
             }
         }
 
-        server_groups.values().map(|s| s.warmup()).join_all().await;
+        // 🔐 问题 46：**不再做启动预热**。
+        //
+        // 原来这里会对每个上游发一条固定的 `example.com` A 查询来"预热"。
+        // 去掉它的理由与建连路径那次相同（**内网上游会被永久判死**、
+        // 隐私暴露、审计噪声），详见 `libdns/custom/connection_provider.rs` 里的说明。
+        //
+        // 另外这里本来就**丢掉全部结果**（`join_all` 的返回值没有使用），
+        // 所以预热从没影响过任何判断：上游可用与否完全由真实查询决定。
+        // 去掉后，连接改为在首次真实查询时建立 —— 代价只是第一个查询多一次建连往返，
+        // 而收益是内网上游不再被这个固定域名卡住。
+
+        // 🔐 问题 46：**不再做启动预热**。
+        //
+        // 原来这里会对每个上游发一条固定的 `example.com` A 查询来"预热"。
+        // 去掉它的理由与建连路径那次相同（**内网上游会被永久判死**、
+        // 隐私暴露、审计噪声），详见 `libdns/custom/connection_provider.rs` 里的说明。
+        //
+        // 另外这里本来就**丢掉全部结果**（`join_all` 的返回值没有使用），
+        // 所以预热从没影响过任何判断：上游可用与否完全由真实查询决定。
+        // 去掉后，连接改为在首次真实查询时建立 —— 代价只是第一个查询多一次建连往返，
+        // 而收益是内网上游不再被这个固定域名卡住。
+
+        // 🔐 问题 46：**不再做启动预热**。
+        //
+        // 原来这里会对每个上游发一条固定的 `example.com` A 查询来"预热"。
+        // 去掉它的理由与建连路径那次相同（**内网上游会被永久判死**、
+        // 隐私暴露、审计噪声），详见 `libdns/custom/connection_provider.rs` 里的说明。
+        //
+        // ⚠️ 顺带一个**原来就有的缺陷**：这行写的是 `server_groups.values()`，
+        // 而**未命名的默认组被存进的是 `default_group_servers`、不在 `server_groups` 里** ——
+        // 所以默认组的上游从来没被启动预热碰过（只有写了 `-group` 的命名组才会）。
+        // 这也意味着"预热"的行为本来就不一致；一并去掉后这种不一致也消失了。
 
         DnsClient {
             default: default_group_servers,
@@ -384,12 +414,6 @@ mod name_server_group {
     }
 
     impl NameServerGroup {
-        pub async fn warmup(&self) {
-            let futures = self.servers.iter().map(|server| {
-                tokio::time::timeout(std::time::Duration::from_secs(5), server.warmup())
-            });
-            futures.join_all().await;
-        }
         #[inline]
         pub fn iter(&self) -> Iter<'_, Arc<NameServer>> {
             self.servers.iter()
@@ -429,34 +453,36 @@ mod name_server_group {
             }
 
             // 被"截断但 rcode=NOERROR"的响应：不作为赢家，记下来留到最后兜底（见循环尾部）
-            let mut truncated_result: Option<Result<DnsResponse, LookupError>> = None;
+            let mut truncated_result: Option<DnsResponse> = None;
+
+            // 🔐 达不到"定论"标准的应答（不带 SOA 的 NXDOMAIN、空应答等）全部暂存，
+            // 等所有上游说完再按 `response_rank` 择优 —— 这正是问题 6 的修复：
+            // 原先不带 SOA 的 NXDOMAIN 能立刻赢下竞速，一个被污染的上游
+            // 就能把结果钉进否定缓存，让所有客户端在整个 TTL 内都解析不出来。
+            let mut held: Vec<Result<DnsResponse, LookupError>> = Vec::new();
 
             loop {
                 let (res, _idx, rest) = select_all(tasks).await;
 
-                let mut is_truncated = false;
-
-                if let Ok(lookup) = res.as_ref() {
-                    use crate::libdns::proto::op::ResponseCode;
-                    let rcode = lookup.response_code();
-                    // 🌟 正常答案（非截断）或明确的不存在（NXDomain）：立刻斩断等待！
-                    if rcode == ResponseCode::NXDomain
-                        || (rcode == ResponseCode::NoError && !lookup.truncated())
-                    {
-                        return res;
-                    }
-                    // 截断包的 rcode 同样是 NOERROR，但它只是"答案太大装不下"的半成品：
-                    // 让它赢下竞速，会把其他上游正在路上的完整答案丢掉，越坏的上游反而越快（P1-5）。
-                    is_truncated = rcode == ResponseCode::NoError && lookup.truncated();
+                // 达到定论标准（正牌答案，或带 SOA 的规范 NXDOMAIN）：立刻斩断等待
+                if let Ok(lookup) = res.as_ref()
+                    && is_conclusive(lookup)
+                {
+                    return res;
                 }
 
                 if rest.is_empty() {
-                    // 所有上游都试完了：只能退回截断包（TC 位会透传给客户端，由客户端按规范换 TCP）
-                    return truncated_result.unwrap_or(res);
+                    // 所有上游都试完了：按可信度择优，截断包留作最后兜底
+                    return pick_best(held, res, truncated_result);
                 }
 
-                if is_truncated && truncated_result.is_none() {
-                    truncated_result = Some(res);
+                // 截断包单独留出来作兜底；其余一律进候选池等评分
+                if let Ok(lookup) = res.as_ref()
+                    && lookup.truncated()
+                {
+                    truncated_result.get_or_insert_with(|| lookup.clone());
+                } else {
+                    held.push(res);
                 }
 
                 tasks = rest;
@@ -515,28 +541,141 @@ mod name_server_group {
 
 /// 🔐 第三部分第 3 条（上游 `-fallback`）：这次竞速的结果算不算"拿到可用答案"？
 ///
-/// 判据与竞速循环自己的一致：**正常答案（NOERROR 且没被截断）** 或 **明确的"这个名字不存在"（NXDOMAIN）**
-/// 才算"有答案"；超时、上游故障、只剩截断包，都算"没答案"—— 这时候才轮到后备服务器上场。
+/// 🔐 判据必须与竞速循环**完全一致**（都用 [`is_conclusive`]），否则
+/// 「什么时候停止等待」会和「什么时候该叫后备上游」对不上：
+/// 例如第一轮已经拿到「带 SOA 的规范 NXDOMAIN」——那是足够可信的结论，
+/// 不该再浪费一次查询去叫后备上游。
+///
+/// 注意这里**不再把「不带 SOA 的 NXDOMAIN」当作拿到答案**：那种应答会被竞速
+/// 暂存并继续等其他上游（问题 6），既然没有定论，后备上游自然该上场。
 pub(crate) fn needs_fallback(res: &Result<DnsResponse, LookupError>) -> bool {
-    use crate::libdns::proto::op::ResponseCode;
+    !is_conclusive_result(res)
+}
 
-    match res {
-        Err(_) => true,
-        Ok(resp) => {
-            let rcode = resp.response_code();
-            !(rcode == ResponseCode::NXDomain
-                || (rcode == ResponseCode::NoError && !resp.truncated()))
-        }
+/// 🔐 应答可信度评分：**数字越小越可信**。
+///
+/// 这是全项目**唯一**的一套「谁更值得采信」标准 —— 原先它只存在于 IP 类查询的兜底
+/// 逻辑里（`dns_mw_ns.rs`），而非 IP 类查询的竞速路径按「谁先回来算谁的」采信，
+/// 于是同一个程序里对「应答质量」有两套口径（详见问题 6）。
+/// 现在抽到这里共用，避免再次漂移。
+///
+/// 判据：
+///   * 有没有答案（Answer 区非空）；
+///   * 有没有 SOA（三个区任意一处）—— 带 SOA 说明是上游**权威**给出的规范否定/空应答，
+///     不带 SOA 的「不存在」很可能是被污染或被中间设备伪造的；
+///   * 响应码。
+pub(crate) fn response_rank(res: &DnsResponse) -> u8 {
+    use crate::libdns::proto::op::ResponseCode;
+    use crate::libdns::proto::rr::RecordType;
+
+    let code = res.response_code();
+    let has_answers = !res.answers().is_empty();
+
+    let has_soa = res
+        .authorities()
+        .iter()
+        .any(|r| r.record_type() == RecordType::SOA)
+        || res
+            .answers()
+            .iter()
+            .any(|r| r.record_type() == RecordType::SOA)
+        || res
+            .additionals()
+            .iter()
+            .any(|r| r.record_type() == RecordType::SOA);
+
+    match (code, has_answers, has_soa) {
+        (ResponseCode::NoError, true, _) => 0, // 有 Answer 的完美合法包
+        (ResponseCode::NoError, false, true) => 1, // 带真实 SOA 的合法 NoData
+        (ResponseCode::NoError, false, false) => 2, // 不带 SOA 的残缺空包
+        (ResponseCode::NXDomain, _, true) => 3, // 带 SOA 的规范 NXDOMAIN
+        (ResponseCode::NXDomain, _, false) => 4, // 光秃秃的虚假 NXDOMAIN
+        _ => 5,
     }
+}
+
+/// 这份应答是否「好到不用再等其他上游」——竞速里允许立刻返回的判据。
+///
+/// 🔐 只有两种情形够格：
+///   1. **NOERROR 且有答案、且未被截断**：正牌答案，不亏待它；
+///   2. **带 SOA 的 NXDOMAIN**：上游权威给出的规范「不存在」，可采信。
+///
+/// 其余一律**不许立刻赢**，包括：
+///   * **不带 SOA 的 NXDOMAIN** —— 很可能是伪造/污染，必须等其他上游交叉验证
+///     （这正是问题 6：原先它也能立刻赢，一个坏上游就能把结果钉死）；
+///   * 空应答（NoData）—— 同上，等交叉验证；
+///   * 截断包 —— 它只是"答案太大装不下"的半成品，之前已经按 P1-5 排除在赢家之外。
+pub(crate) fn is_conclusive(res: &DnsResponse) -> bool {
+    // 截断包只是"答案太大装不下"的半成品，无论什么 rcodes 都不能算定论
+    // （这是 P1-5 的结论：让它赢会把其他上游正在路上的完整答案丢掉）
+    if res.truncated() {
+        return false;
+    }
+
+    match response_rank(res) {
+        // NoError + 有答案：正牌答案，不亏待它
+        0 => true,
+        // NXDomain + 带 SOA：上游权威给出的规范"不存在"，可采信
+        3 => true,
+        // 其余一律等其他上游交叉验证：
+        //   1 = NoData（带 SOA 的空包）
+        //   2 = 不带 SOA 的残缺空包
+        //   4 = 不带 SOA 的 NXDOMAIN（很可能是伪造/污染 —— 问题 6 的根源）
+        _ => false,
+    }
+}
+
+/// 🔐 这一批竞速的结果，算不算"我们已经有了可用的结论"？
+///
+/// 用于上游 `-fallback` 的触发判据（`needs_fallback`）与竞速循环共用同一套标准，
+/// 两者必须保持一致，否则「什么时候该叫后备上游」会和「什么时候停止等待」对不上。
+pub(crate) fn is_conclusive_result(res: &Result<DnsResponse, LookupError>) -> bool {
+    match res {
+        Ok(resp) => is_conclusive(resp),
+        Err(_) => false,
+    }
+}
+
+/// 竞速收尾：所有候选里挑最可信的一个返回。
+///
+/// 排序依据是 [`response_rank`]（数字越小越可信）。全部候选都是错误时，
+/// 把其中一个错误如实抛出去 —— 让上层看到真实原因，而不是伪造一个"空应答"。
+///
+/// `truncated` 是单独留出来的截断包：它只作**最后的兜底**，
+/// 因为 TC 位会透传给客户端、由客户端按规范改用 TCP 重问（P1-5）。
+fn pick_best(
+    held: Vec<Result<DnsResponse, LookupError>>,
+    last: Result<DnsResponse, LookupError>,
+    truncated: Option<DnsResponse>,
+) -> Result<DnsResponse, LookupError> {
+    let mut candidates = held;
+    candidates.push(last);
+
+    // 1. 按可信度择优：只考虑真正拿到的应答
+    if let Some(best) = candidates
+        .iter()
+        .filter_map(|c| c.as_ref().ok())
+        .min_by_key(|resp| response_rank(resp))
+    {
+        return Ok(best.clone());
+    }
+
+    // 2. 一个应答都没有：退回截断包（至少让客户端知道"太大装不下、请改 TCP"）
+    if let Some(t) = truncated {
+        return Ok(t);
+    }
+
+    // 3. 连截断包都没有：把真实错误抛出去（超时 / 上游故障 / 无可用上游）
+    candidates.into_iter().find_map(|c| c.err()).map_or_else(
+        || Err(crate::libdns::proto::ProtoErrorKind::Timeout.into()),
+        Err,
+    )
 }
 
 mod name_server {
     use super::*;
     use crate::dns_url::{DnsUrl, ProtocolConfig};
-    use crate::libdns::custom::{
-        connection_provider::{Connection, ConnectionProvider},
-        warmup::DnsHandleWarmpup,
-    };
+    use crate::libdns::custom::connection_provider::{Connection, ConnectionProvider};
 
     pub struct NameServer {
         options: Arc<NameServerOpts>,
@@ -666,11 +805,6 @@ mod name_server {
                 tcp_keepalive,
                 subnet_all_query_types,
             })
-        }
-
-        pub async fn warmup(&self) -> Result<(), ProtoError> {
-            self.connection.warmup().await?;
-            Ok(())
         }
 
         #[inline]
@@ -1603,4 +1737,175 @@ mod tests {
     //     *once_cell::sync::Lazy::force_mut(&mut lazy) = 88;
     //     assert_eq!(bootstrap::RESOLVER.deref(), &88);
     // }
+
+    // ───────────────────────── 问题 6：竞速采信标准（纯逻辑，不依赖网络）─────────────────────────
+
+    use crate::dns::DefaultSOA as _;
+    use crate::libdns::proto::{
+        op::{Message, ResponseCode},
+        rr::{Name, RData, Record, RecordType, rdata::SOA},
+    };
+
+    /// 造一份应答：可指定响应码、是否带答案、是否带 SOA、是否截断
+    fn make_resp(
+        rcode: ResponseCode,
+        with_answer: bool,
+        with_soa: bool,
+        truncated: bool,
+    ) -> DnsResponse {
+        let name: Name = "example.test".parse().unwrap();
+        let mut msg = Message::query();
+        msg.add_query(crate::libdns::proto::op::Query::query(
+            name.clone(),
+            RecordType::A,
+        ));
+        let mut message: Message = msg;
+        message.set_response_code(rcode);
+        message.set_truncated(truncated);
+
+        if with_answer {
+            message.add_answer(Record::from_rdata(
+                name.clone(),
+                300,
+                RData::A("192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap().into()),
+            ));
+        }
+        if with_soa {
+            message.add_authority(Record::from_rdata(
+                name.clone(),
+                300,
+                RData::SOA(SOA::default_soa()),
+            ));
+        }
+
+        DnsResponse::from(message)
+    }
+
+    /// 🔐 核心回归（问题 6）：**不带 SOA 的 NXDOMAIN 绝不允许立刻赢下竞速**。
+    ///
+    /// 它很可能是被污染或被中间设备伪造的；以前它能立刻返回，于是一个坏上游
+    /// 就能把结果钉进否定缓存，让所有客户端在整个 TTL 内都解析不出来。
+    #[test]
+    fn fake_nxdomain_is_never_conclusive() {
+        let fake = make_resp(ResponseCode::NXDomain, false, false, false);
+        assert_eq!(
+            response_rank(&fake),
+            4,
+            "不带 SOA 的 NXDOMAIN 是最低等级之一"
+        );
+        assert!(
+            !is_conclusive(&fake),
+            "不带 SOA 的 NXDOMAIN 必须继续等其他上游交叉验证"
+        );
+        assert!(needs_fallback(&Ok(fake)), "既然没有定论，后备上游就该上场");
+    }
+
+    /// 带 SOA 的 NXDOMAIN 是上游权威给出的规范否定，可以立刻采信。
+    #[test]
+    fn authoritative_nxdomain_is_conclusive() {
+        let authoritative = make_resp(ResponseCode::NXDomain, false, true, false);
+        assert_eq!(response_rank(&authoritative), 3);
+        assert!(is_conclusive(&authoritative), "带 SOA 的规范否定可以采信");
+        assert!(
+            !needs_fallback(&Ok(authoritative)),
+            "已经是定论了，不该再浪费一次查询去叫后备上游"
+        );
+    }
+
+    /// 正牌答案（NOERROR + 有答案 + 未截断）可以立刻采信。
+    #[test]
+    fn positive_answer_is_conclusive() {
+        let ok = make_resp(ResponseCode::NoError, true, false, false);
+        assert_eq!(response_rank(&ok), 0);
+        assert!(is_conclusive(&ok));
+        assert!(!needs_fallback(&Ok(ok)));
+    }
+
+    /// 空应答（NoData）不是定论，无论带不带 SOA 都要等其他上游。
+    #[test]
+    fn empty_answers_are_not_conclusive() {
+        let nodata_with_soa = make_resp(ResponseCode::NoError, false, true, false);
+        assert_eq!(response_rank(&nodata_with_soa), 1);
+        assert!(!is_conclusive(&nodata_with_soa), "空应答要等交叉验证");
+
+        let bare_empty = make_resp(ResponseCode::NoError, false, false, false);
+        assert_eq!(response_rank(&bare_empty), 2);
+        assert!(!is_conclusive(&bare_empty));
+    }
+
+    /// 截断包永远不是定论（P1-5：让它赢会把其他上游的完整答案丢掉）。
+    #[test]
+    fn truncated_is_never_conclusive() {
+        let truncated = make_resp(ResponseCode::NoError, true, false, true);
+        assert!(!is_conclusive(&truncated), "截断包只是半成品，不能算定论");
+        assert!(needs_fallback(&Ok(truncated)));
+    }
+
+    /// 真故障（SERVFAIL 等）排在最后。
+    #[test]
+    fn servfail_ranks_last() {
+        let servfail = make_resp(ResponseCode::ServFail, false, false, false);
+        assert_eq!(response_rank(&servfail), 5);
+        assert!(!is_conclusive(&servfail));
+    }
+
+    /// 🔐 择优：一个假 NXDOMAIN 与一个真答案同时存在时，必须选中真答案。
+    ///
+    /// 这是问题 6 的实际危害场景：修复前假 NXDOMAIN 先到就赢了；
+    /// 修复后两者都进候选池，由评分决定，真答案（rank 0）胜出。
+    #[test]
+    fn pick_best_prefers_a_real_answer_over_fake_nxdomain() {
+        let fake = make_resp(ResponseCode::NXDomain, false, false, false);
+        let real = make_resp(ResponseCode::NoError, true, false, false);
+
+        // 假 NXDOMAIN 先到（进候选池），真答案随后
+        let got = pick_best(vec![Ok(fake)], Ok(real), None).expect("应当选出真答案");
+        assert_eq!(
+            got.response_code(),
+            ResponseCode::NoError,
+            "必须选真答案，而不是先到的假 NXDOMAIN"
+        );
+        assert!(!got.answers().is_empty(), "选出的应答应当带答案");
+    }
+
+    /// 择优顺序：有答案 > 带 SOA 空包 > 无 SOA 空包 > 带 SOA 的 NXDOMAIN > 无 SOA 的 NXDOMAIN
+    #[test]
+    fn pick_best_follows_the_documented_priority() {
+        let bare_empty = make_resp(ResponseCode::NoError, false, false, false); // rank 2
+        let nodata = make_resp(ResponseCode::NoError, false, true, false); // rank 1
+        let real = make_resp(ResponseCode::NoError, true, false, false); // rank 0
+
+        let got = pick_best(vec![Ok(bare_empty.clone())], Ok(nodata.clone()), None)
+            .expect("应当选出带 SOA 的空包");
+        assert_eq!(response_rank(&got), 1, "带 SOA 的空包优先于裸空包");
+
+        let got =
+            pick_best(vec![Ok(bare_empty), Ok(nodata)], Ok(real), None).expect("应当选出真答案");
+        assert_eq!(response_rank(&got), 0, "真答案优先级最高");
+    }
+
+    /// 所有候选都是错误时，如实抛出错误（而不是伪造一个空应答）。
+    #[test]
+    fn pick_best_reports_error_when_nothing_usable() {
+        let e1: LookupError = crate::libdns::proto::ProtoErrorKind::Timeout.into();
+        let e2: LookupError = crate::libdns::proto::ProtoErrorKind::Timeout.into();
+
+        let got = pick_best(vec![Err(e1)], Err(e2), None);
+        assert!(got.is_err(), "没有任何可用应答时应当报错，不能伪造空应答");
+    }
+
+    /// 一个可用应答都没有、但有截断包时，退回截断包（让客户端知道该改走 TCP）。
+    #[test]
+    fn pick_best_falls_back_to_truncated() {
+        let truncated = make_resp(ResponseCode::NoError, true, false, true);
+        let e: LookupError = crate::libdns::proto::ProtoErrorKind::Timeout.into();
+
+        let got = pick_best(
+            vec![Err(e)],
+            Err(crate::libdns::proto::ProtoErrorKind::Timeout.into()),
+            Some(truncated),
+        )
+        .expect("应当退回截断包");
+        assert!(got.truncated(), "退回应答应保留 TC 位，客户端据此改走 TCP");
+    }
 }

@@ -31,7 +31,9 @@ pub const TTL_MAX: u64 = 0x7FFF_FFFF;
 /// 既不静默出错，也不会因为一个手误就让服务起不来。
 pub fn sanitize_ttl(name: &str, v: u64) -> u64 {
     if v > TTL_MAX {
-        crate::log::warn!("the value {v} of {name} exceeds the DNS maximum of {TTL_MAX} seconds; the maximum is applied");
+        crate::log::warn!(
+            "the value {v} of {name} exceeds the DNS maximum of {TTL_MAX} seconds; the maximum is applied"
+        );
         TTL_MAX
     } else {
         v
@@ -200,6 +202,19 @@ pub struct Config {
     /// force-HTTPS-SOA [yes|no]
     pub force_https_soa: Option<bool>,
 
+    /// 强制不向客户端返回 CNAME 记录
+    ///
+    /// force-no-CNAME [yes|no]
+    ///
+    /// 开启后，含 CNAME 链的应答会**先展平成最终地址**再返回：CNAME 记录被剔除，
+    /// 终点记录的名字改写成用户最初查询的域名。对客户端来说，等于直接拿到了目的地址，
+    /// 少了一跳解析、也避免了中间 CNAME 域名带来的额外延迟与污染面。
+    ///
+    /// 注意：本项目的缓存层**默认就会对 A/AAAA 查询做展平**
+    /// （见 `dns_mw_cache.rs` 的 `flatten_cname`）。本开关把这件事变成
+    /// **按配置显式要求的行为**，并覆盖到非 A/AAAA 之外的场景。
+    pub force_no_cname: Option<bool>,
+
     /// force specific qtype return soa
     ///
     /// force-qtype-SOA [qtypeid |...]
@@ -261,6 +276,18 @@ pub struct Config {
 
     /// 访问控制（`acl-enable`）：开启后没匹配到任何 `client-rules` 的客户端一律 REFUSED。
     pub acl: AclConfig,
+
+    /// 🔐 13-⑥：`trusted-proxy <IP|CIDR>`（可重复）—— 可信反向代理清单。
+    ///
+    /// 只有来自这些地址的请求，才会去解析 `X-Forwarded-For` 还原真实客户端地址
+    /// （用于**归组**：限流计数、选规则组）。
+    ///
+    /// **空 = 不信任任何代理头**，行为与本项目原本**逐字节一致**。
+    /// 详见 `src/trusted_proxy.rs` 的模块文档（含"三条铁律"与 UDP 做不到的边界说明）。
+    ///
+    /// 注意：**刻意不支持 `-` 前缀清除** —— 这是安全相关的清单，
+    /// 让"写错了想撤销"变成一句显式的新配置，比隐式的清空更不容易出事故。
+    pub trusted_proxies: Vec<IpNet>,
 
     /// Support reading dnsmasq dhcp file to resolve local hostname
     pub dnsmasq_lease_file: Option<PathBuf>,

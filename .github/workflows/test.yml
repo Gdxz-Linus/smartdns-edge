@@ -12,10 +12,50 @@ on:
     branches:
       - main
       - release/**
+    # 🔐 第十批 B 组（问题 18 的延伸）：**避免"版本号提交"引发一次多余的完整测试**。
+    #
+    # 背景（实测确认，不是推测）：发版流程是
+    #   version.yml：test（门禁）→ bump（改版本号并 `git push --follow-tags`）→ build
+    # 而 bump 那次 `git push` 推到 main 会**再触发本工作流一次** ——
+    # 于是每次发版都多跑一整轮（5 平台 test + cleanliness + compatibility，共 12 个 job），
+    # 而它测的是"只动了版本号"的提交。
+    #
+    # 依据：`git log` 查过历史上所有 `🔖 Bump version` 提交，**只改这两个文件、各一行**
+    # （`cargo set-version` 的行为）。所以只忽略它们。
+    #
+    # ⚠️ **为什么不忽略 RELEASE_NOTES.md**：它虽然也含版本号，但发版前常会写实质内容
+    # （功能说明、行为变化），那**必须**被测到。宁可多测一次，也不放过可能的实质改动。
+    #
+    # ⚠️ **安全兜底**：即使某次提交"只改版本号"却被这里跳过，发布链路上的
+    # **version.yml 门禁仍会在发版那一刻完整测一遍**（见 version.yml 的 `bump: needs: ["test"]`）。
+    # 所以这里省掉的是"重复"，不是"把关"。
+    paths-ignore:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
     branches:
       - main
       - release/**
+
+# 🔐 第十批 B 组：**同一来源上只保留最新一次运行**。
+#
+# 为什么加：连续推送时，旧的那次测试已经"过时"了（代码又变了），
+# 让它继续占着 runner 跑完没有意义。
+#
+# ⚠️⚠️ **group 里必须带 `github.event_name`**（这里踩过一个会静默废掉问题 18 修复的坑）：
+#   如果 group 只用 `workflow` + `ref`，那么"普通 push 触发的测试"与
+#   "发布门禁调用的测试"可能落进**同一个组**。此时新来的 push 运行
+#   （它的 `cancel-in-progress` 为真）会把**正在跑的发布门禁取消掉** ——
+#   而门禁被取消后，`version.yml` 的 `bump` 仍会以为"测试通过了"而继续推送远端。
+#   那正好把问题 18 的修复变成摆设。
+#   带上 `event_name` 后：push 是 `push`、门禁是 `workflow_call`/`workflow_dispatch`，
+#   **永远是不同的组**，普通推送不可能碰到门禁。
+#
+# ⚠️ `cancel-in-progress` 只在**自动触发**（push / pull_request）时为真；
+# 门禁（workflow_call）与手动体检（workflow_dispatch）**一律不被取消**。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 jobs:
   # 🧪 跑单测。矩阵与 build.yml 的发布矩阵一一对应，且每条都落在与目标架构相同的运行器上，
@@ -41,7 +81,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup
         uses: ./.github/actions/setup
@@ -62,7 +102,7 @@ jobs:
           SMARTDNS_TEST_TLS_URLS: "tls://dns.google?enable_sni=false,tls://dns.cloudflare.com?enable_sni=false,tls://dot.pub"
 
       - name: Setup upterm session for debugging
-        uses: lhotari/action-upterm@v1
+        uses: lhotari/action-upterm@b0357f23233f5ea6d58947c0c402e0631bab7334 # v1
         if: ${{ failure() }}
         with:
           limit-access-to-actor: true
@@ -75,7 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup
         uses: ./.github/actions/setup
@@ -86,7 +126,7 @@ jobs:
           install_cargo_edit: "false"
 
       - name: Install Rust Toolchain Components
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -125,7 +165,7 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup
         uses: ./.github/actions/setup

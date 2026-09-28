@@ -33,7 +33,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCNameMiddl
                     cname.set_fqdn(true);
                 }
 
-                let local_ttl = ctx.cfg().local_ttl();
+                let local_ttl = ctx.local_ttl();
 
                 let cname_record = Record::from_rdata(
                     req.query().original().name().clone(),

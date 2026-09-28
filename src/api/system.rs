@@ -33,6 +33,7 @@ async fn status(State(s): State<Arc<ServeState>>) -> Json<SystemStatus> {
         udp_source_rejected: crate::socks5::rejected_by_source(),
         log_dropped: crate::infra::mapped_file::log_dropped_total(),
         log_flush_failed: crate::infra::mapped_file::log_flush_failed_total(),
+        log_write_failed: crate::infra::mapped_file::log_write_failed_total(),
         bind_retry_pending,
         bind_retry_last_error,
     })
@@ -63,6 +64,10 @@ struct SystemStatus {
     /// `flush()` 未能在超时内排空日志队列的次数（P1-14 的可观测项）。
     /// 正常应为 0；不为 0 说明磁盘/日志线程跟不上，可能有日志没能及时落盘。
     log_flush_failed: u64,
+    /// 向日志文件写入失败的累计次数。正常应为 0；不为 0 说明日志正在丢失，
+    /// 最常见的原因是日志目录/文件对服务运行账号不可写
+    /// （例如 Linux 上以 root 建好文件后降权到 nobody，目录却仍属于 root）。
+    log_write_failed: u64,
     /// 绑定失败、正在自动重试的监听数量（P1-10 的可观测项）。
     /// 正常应为 0；不为 0 说明某个监听地址当前绑不上（最常见的是端口被占用），
     /// 服务正在按指数退避自动重试，恢复后此值归零、无需人工重启。

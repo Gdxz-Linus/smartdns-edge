@@ -450,6 +450,20 @@ fn sanitize_src_address(src: SocketAddr) -> Result<(), String> {
             return Err(format!("cannot respond to broadcast v4 addr: {src}"));
         }
 
+        // 🔐 问题 13-⑤：排除**组播**来源。
+        //
+        // 这里校验的是"这个来源地址能不能作为**应答目标**"（函数名与文档都写的是
+        // `safe for returning messages`）。而组播地址（224.0.0.0/4）**不是单播应答目标** ——
+        // 把 DNS 应答发给一个组播组，在协议上是无意义的，只可能来自伪造源地址的包
+        // （正常网络栈不会把目标为组播的 UDP 包投递给本机的单播 socket）。
+        //
+        // ⚠️ **刻意不加 `is_link_local()`**：链路本地地址（169.254.0.0/16）在现实中
+        // **确有合法用途**（直连设备、部分容器/虚拟网络用它做客户端），拦掉会让那些环境
+        // 直接不可用。而组播没有任何合法用途 —— 所以只加这一项，**误伤为零**。
+        if src.is_multicast() {
+            return Err(format!("cannot respond to multicast v4 addr: {src}"));
+        }
+
         // TODO: add check for is_reserved when that stabilizes
 
         Ok(())
@@ -458,6 +472,12 @@ fn sanitize_src_address(src: SocketAddr) -> Result<(), String> {
     fn verify_v6(src: Ipv6Addr) -> Result<(), String> {
         if src.is_unspecified() {
             return Err(format!("cannot respond to unspecified v6 addr: {src}"));
+        }
+
+        // 🔐 问题 13-⑤：同上 —— 排除 IPv6 组播（ff00::/8）。
+        // 与 v4 一致，**不**排除链路本地（fe80::/10）：IPv6 链路本地组网是常见且合法的场景。
+        if src.is_multicast() {
+            return Err(format!("cannot respond to multicast v6 addr: {src}"));
         }
 
         Ok(())
@@ -473,6 +493,56 @@ fn sanitize_src_address(src: SocketAddr) -> Result<(), String> {
 #[cfg(test)]
 mod stream_error_backoff_tests {
     use super::*;
+
+    /// 🔐 问题 13-⑤：来源校验必须**只多拦组播**，绝不能误伤合法客户端。
+    ///
+    /// 这条测试是"成对"的：既验证组播被拦，也验证**常见的合法来源全部放行** ——
+    /// 后者同样重要，因为拦得过宽会让真实用户连不上（而那种故障很难归因）。
+    #[test]
+    fn source_check_rejects_multicast_but_keeps_legitimate_clients() {
+        let port = 53u16;
+        // ⚠️ IPv6 必须带方括号 —— 直接 `format!("{ip}:{port}")` 会得到
+        // `ff02::1:53` 这种非法写法（`::` 与端口冲突），解析直接失败。
+        // 第一版就是这么写的，测试当场报 AddrParseError。
+        let sock = |s: &str| -> SocketAddr {
+            let host = if s.contains(':') {
+                format!("[{s}]")
+            } else {
+                s.to_string()
+            };
+            format!("{host}:{port}").parse().unwrap()
+        };
+
+        // ① 应当被拦：组播（v4 224.0.0.0/4、v6 ff00::/8）
+        for bad in ["224.0.0.1", "239.1.2.3", "ff02::1", "ff05::fb"] {
+            assert!(
+                sanitize_src_address(sock(bad)).is_err(),
+                "{bad} 是组播地址，不该被当作应答目标"
+            );
+        }
+
+        // ② 原本就拦的：未指定地址、广播、端口 0
+        assert!(sanitize_src_address(sock("0.0.0.0")).is_err());
+        assert!(sanitize_src_address(sock("::")).is_err());
+        assert!(sanitize_src_address(sock("255.255.255.255")).is_err());
+        assert!(sanitize_src_address("192.0.2.1:0".parse().unwrap()).is_err());
+
+        // ③ **绝不能误伤**：这些都必须放行
+        for good in [
+            "192.0.2.1",     // 普通公网/内网地址
+            "10.0.0.5",      // 私网
+            "127.0.0.1",     // 回环（本机客户端）
+            "169.254.10.20", // ⚠️ 链路本地 v4 —— **刻意放行**：直连设备/容器会用
+            "2001:db8::1",   // 普通 v6
+            "::1",           // 回环 v6
+            "fe80::1",       // ⚠️ 链路本地 v6 —— **刻意放行**：链路本地组网是合法场景
+        ] {
+            assert!(
+                sanitize_src_address(sock(good)).is_ok(),
+                "{good} 是合法客户端来源，不该被拦（拦了会让真实环境不可用）"
+            );
+        }
+    }
 
     /// 🔐 P2：持续性错误（网卡消失、fd 耗尽）不能让循环 100% CPU 空转。
     #[test]

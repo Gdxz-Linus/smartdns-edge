@@ -44,7 +44,7 @@ runs:
   steps:
     - name: Install Rust Toolchain (target + components)
       if: ${{ inputs.install_rust == 'true' && inputs.rust_target != '' && inputs.rust_components != '' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       with:
         toolchain: ${{ inputs.rust_toolchain }}
         target: ${{ inputs.rust_target }}
@@ -52,45 +52,45 @@ runs:
 
     - name: Install Rust Toolchain (target only)
       if: ${{ inputs.install_rust == 'true' && inputs.rust_target != '' && inputs.rust_components == '' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       with:
         toolchain: ${{ inputs.rust_toolchain }}
         target: ${{ inputs.rust_target }}
 
     - name: Install Rust Toolchain (components only)
       if: ${{ inputs.install_rust == 'true' && inputs.rust_target == '' && inputs.rust_components != '' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       with:
         toolchain: ${{ inputs.rust_toolchain }}
         components: ${{ inputs.rust_components }}
 
     - name: Install Rust Toolchain (default)
       if: ${{ inputs.install_rust == 'true' && inputs.rust_target == '' && inputs.rust_components == '' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       with:
         toolchain: ${{ inputs.rust_toolchain }}
 
     - name: Install just
       if: ${{ inputs.install_just == 'true' }}
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
       with:
         tool: just
 
     - name: Install cross
       if: ${{ inputs.install_cross == 'true' && runner.os == 'Linux' }}
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
       with:
         tool: cross
 
     - name: Install cargo-edit
       if: ${{ inputs.install_cargo_edit == 'true' }}
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
       with:
         tool: cargo-edit
 
     - name: Install patch-crate
       if: ${{ inputs.install_patch_crate == 'true' }}
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
       with:
         tool: patch-crate
 
