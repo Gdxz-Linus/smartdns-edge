@@ -69,6 +69,8 @@ jobs:
         uses: ./.github/actions/setup
         with:
           rust_target: ${{ matrix.target }}
+          # Linux 目标走 cross 交叉编译（见下面 Build 步骤的 USE_CROSS）
+          install_cross: "true"
           install_patch_crate: "false" 
           install_wix: "false" 
           install_cargo_edit: "false" 

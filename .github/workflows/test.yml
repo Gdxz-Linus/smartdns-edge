@@ -90,6 +90,9 @@ jobs:
           install_patch_crate: "false"
           install_wix: "false"
           install_cargo_edit: "false"
+          # 全部为原生运行器，不使用 cross —— 显式关掉：默认值已改为 false，写出来是为了
+          # 让"这里不需要 cross"成为可见的意图，而不是靠默认值碰巧成立。
+          install_cross: "false"
 
       # 全部为原生运行器，不使用 cross（cross 是给交叉编译用的）
       - name: Test
@@ -174,6 +177,8 @@ jobs:
           install_patch_crate: "false"
           install_wix: "false"
           install_cargo_edit: "false"
+          # Linux 目标走 cross 交叉编译（见下面 Check 步骤的 USE_CROSS）
+          install_cross: "true"
 
       - name: Check
         run: just check --target ${{ matrix.target }}

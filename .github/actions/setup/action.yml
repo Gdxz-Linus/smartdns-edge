@@ -22,10 +22,18 @@ inputs:
     description: "Install just command runner."
     required: false
     default: "true"
+  # ⚠️ 默认 **false**：需要交叉编译的任务才用得上 cross（判据是 justfile 里的 USE_CROSS）。
+  #
+  # 原先默认 true，于是**每个**调用点都会装一次 —— 包括根本不用它的 test 与 cleanliness 任务。
+  # 白花时间之外还有个副作用：在 ARM64 Linux 运行器（ubuntu-24.04-arm）上，
+  # install-action 找不到 `cross@latest` 的对应物，会退回 cargo-binstall 并**报一条 warning**
+  # （见 test 任务的运行记录）。
+  #
+  # 需要它的任务显式传 "true"：build.yml 的 Build 与 test.yml 的 compatibility。
   install_cross:
-    description: "Install cross on Linux runners."
+    description: "Install cross on Linux runners (only needed by jobs that set USE_CROSS=true)."
     required: false
-    default: "true"
+    default: "false"
   install_wix:
     description: "Install Wix toolset on Windows runners."
     required: false
