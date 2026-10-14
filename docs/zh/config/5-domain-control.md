@@ -64,7 +64,7 @@ address /pass.ad.example.com/-
 proxy-server socks5://127.0.0.1:1080 -name clash
 
 # 创建名为 ad-list 的域名集，并强制通过代理去远端下载实时更新的屏蔽规则
-domain-set -name ad-list -type list -file https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
+domain-set -name ad-list -type list -url https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
 
 # 将该集合中的所有十万级域名，一键应用到广告拦截规则中
 address /domain-set:ad-list/#

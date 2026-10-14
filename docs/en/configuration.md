@@ -26,7 +26,10 @@
 | bind-h3 | DNS over HTTP/3 listening port number | none | Support binding multiple ports. Same options as `bind`. | bind-h3 :853 |
 | bind-cert-file | SSL Certificate file path | smartdns-cert.pem | path | bind-cert-file cert.pem |
 | bind-cert-key-file | SSL Certificate key file path | smartdns-key.pem | path | bind-cert-key-file key.pem |
-| bind-cert-key-pass | SSL Certificate key file password | None | string | bind-cert-key-pass password |
+| bind-cert-key-pass | SSL Certificate key file password (used to decrypt a PKCS#8-encrypted private key; one global passphrase, applies to all encrypted listeners) | None | string | bind-cert-key-pass password |
+| bind-cert-generate | Whether to auto-generate a self-signed certificate chain when no certificate is configured | auto | auto (generated when both cert and key paths are unset)\|yes\|no | bind-cert-generate auto |
+| bind-cert-validity-days | Validity period (days) of the auto-generated server certificate | 390 | integer | bind-cert-validity-days 390 |
+| bind-cert-san | Extra name entries added to the auto-generated certificate (repeatable; an IP value produces an IP-type SAN) | None | domain or IP, repeatable | bind-cert-san dns.test |
 | server-name | DNS name | host name / smartdns | any string like hostname | server-name smartdns |
 | cache-size | Domain name result cache number | 512 | Integer ≥ 0 (0 disables the cache).<br />The cache is split into 64 shards, so the **effective capacity is rounded up to a multiple of 64**; the actual value is printed in the startup log | cache-size 65536 |
 | cache-persist | Enable persist cache | Auto | [yes\|no] (Enabled if >128MB free space) | cache-persist yes |
@@ -69,7 +72,7 @@
 | srv-record | add srv record | None | srv-record /domain/[target][,port][,priority][,weight] | srv-record /_vlmcs._tcp/example.com,1688,1,1 |
 | https-record | Specify HTTPS record | None | https-record /domain/[target=][,port=]... <br /> # indicates return SOA<br /> - indicates ignore rule | https-record /example.com/alpn="h2,http/1.1" |
 | local-domain | resolve this domain (and its subdomains) through the **mDNS** group | None | repeatable; `-` clears. Requires `mdns-lookup yes`, otherwise a warning is logged at startup | local-domain lan |
-| dns64 | DNS64 translation prefix | None | ipv6 prefix and mask. May be written inside a `group-begin` rule group (group > global) | dns64 64:ff9b::/96 |
+| dns64 | DNS64 translation prefix (synthesizes AAAA from A records when no real IPv6 exists; requires a NAT64 gateway in the network). When `force-AAAA-SOA` is configured in the same group, the suppression takes precedence and synthesis is skipped. Built-in `ipv4only.arpa` probing answers (RFC 7050) | None | ipv6 prefix and mask (no longer than /96). May be written inside a `group-begin` rule group (group > global) | dns64 64:ff9b::/96 |
 | mdns-lookup | Enable mDNS lookup | no | [yes\|no]. `.local` and domains declared by `local-domain` are resolved over multicast | mdns-lookup yes |
 | hosts-file | set hosts file | None | hosts file path. | hosts-file /etc/hosts |
 | dnsmasq-lease-file | Read the dnsmasq DHCP lease to resolve LAN hostnames | None | lease file path | dnsmasq-lease-file /var/lib/misc/dnsmasq.leases |

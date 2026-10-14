@@ -26,7 +26,10 @@
 | bind-h3 | DNS Over HTTP/3 监听端口号 | 无 | 可绑定多个端口，规则选项同 bind（挂载管理后台的方式同 bind-https） | bind-h3 :853 |
 | bind-cert-file | SSL证书文件路径 | smartdns-cert.pem | 合法路径字符串 | bind-cert-file cert.pem |
 | bind-cert-key-file | SSL证书KEY文件路径 | smartdns-key.pem | 合法路径字符串 | bind-cert-key-file key.pem |
-| bind-cert-key-pass | SSL证书KEY文件密码 | 无 | 字符串 | bind-cert-key-pass password |
+| bind-cert-key-pass | SSL证书KEY文件密码（私钥为 PKCS#8 加密格式时用于解密；全局一个，作用于全部加密监听） | 无 | 字符串 | bind-cert-key-pass password |
+| bind-cert-generate | 未配置证书时是否自动生成自签名证书链 | auto | auto（证书与私钥路径都未配置时生成）\|yes\|no | bind-cert-generate auto |
+| bind-cert-validity-days | 自动生成的服务器证书有效期（天） | 390 | 整数 | bind-cert-validity-days 390 |
+| bind-cert-san | 自动生成证书时追加的名称条目（可重复；写 IP 则生成 IP 类型 SAN） | 无 | 域名或 IP，可重复 | bind-cert-san dns.test |
 | server-name | DNS 服务器名称 | 操作系统主机名 / smartdns | 符合主机名规格的字符串 | server-name smartdns |
 | cache-size | 域名结果缓存个数 | 512 | 大于等于 0 的数字（0 表示关闭缓存）。<br />缓存内部分为 64 个分片，**实际容量会向上取整到 64 的倍数**，启动日志会打印实际值 | cache-size 512 |
 | cache-persist | 是否持久化缓存 | 自动 | [yes\|no] (剩余空间超 128MB 时自动启用) | cache-persist yes |
@@ -69,7 +72,7 @@
 | srv-record | 指定SRV记录 | 无 | srv-record /domain/[target][,port][,priority][,weight] | srv-record /_vlmcs._tcp/example.com,1688,1,1|
 | https-record | 指定HTTPS记录 | 无 | https-record /domain/[target=][,port=]... <br /> # 表示返回SOA<br /> - 表示忽略规则| https-record /example.com/alpn="h2,http/1.1" |
 | local-domain | 把该域名（含子域名）交给 **mDNS** 那一组解析 | 无 | 可多条；写 `-` 清空。**需要同时开 `mdns-lookup yes`**，否则启动时会告警 | local-domain lan |
-| dns64 | DNS64 转换前缀 | 无 | ipv6前缀和掩码。可写在 `group-begin` 规则组里（组级 > 全局） | dns64 64:ff9b::/96 |
+| dns64 | DNS64 转换前缀（AAAA 无真实 IPv6 结果时将 A 记录合成为 AAAA，需网络内有 NAT64 网关）。同组同时配置 force-AAAA-SOA 时压制优先、该组不做合成。内置 ipv4only.arpa 探测应答（RFC 7050） | 无 | ipv6前缀和掩码（不大于 /96）。可写在 `group-begin` 规则组里（组级 > 全局） | dns64 64:ff9b::/96 |
 | mdns-lookup | 是否启用 mDNS 查询 | no | [yes\|no]。`.local` 与 `local-domain` 声明的域名走组播解析 | mdns-lookup yes|
 | hosts-file | 指定hosts文件 | 无 | hosts文件路径 | hosts-file /etc/hosts |
 | dnsmasq-lease-file | 读取 dnsmasq 的 DHCP 租约，解析局域网设备主机名 | 无 | 租约文件路径 | dnsmasq-lease-file /var/lib/misc/dnsmasq.leases |

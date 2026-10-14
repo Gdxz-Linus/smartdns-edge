@@ -64,7 +64,7 @@ For massive ad-blocking or split-routing domain lists, writing them directly in 
 proxy-server socks5://127.0.0.1:1080 -name clash
 
  2. Create a domain set named 'ad-list' and securely fetch the real-time updated rules via the proxy
-domain-set -name ad-list -type list -file https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
+domain-set -name ad-list -type list -url https://anti-ad.net/anti-ad-for-smartdns.conf -proxy clash
 
  3. Apply the 100,000+ domains from the set to the ad-blocking rule with one click
 address /domain-set:ad-list/#

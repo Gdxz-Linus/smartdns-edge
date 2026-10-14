@@ -41,7 +41,10 @@ In addition to standard UDP, SmartDNS Edge can act as an encrypted DNS server to
    bind-cert-key-file /etc/smartdns/key.pem
    ```   
    Use bind-cert-key-pass if your key requires a password
-   *Tip: If encrypted services are enabled but no certificate is specified, SmartDNS Edge will automatically generate a self-signed root and server certificate chain.*
+   *Tip: If encrypted services are enabled but no certificate is specified, SmartDNS Edge will automatically generate a self-signed root and server certificate chain
+   (written to the configuration file's directory as `smartdns-cert.pem` / `smartdns-key.pem`; the root CA key root-ca.key is reused, never regenerated;
+   the SAN automatically includes the hostname and all interface addresses; adjust with bind-cert-generate / bind-cert-san / bind-cert-validity-days).*
+   Self-signed certificates are not trusted by clients by default: import the CA section of the certificate file into the client trust store for full verification, otherwise the connection is encrypted but unverified.
    
 ## 1.3 Additional Flags: Secondary DNS Service
 The bind parameter supports advanced flags to create specialized "Secondary DNS Servers" (e.g., dedicated clean resolution for specific domains).

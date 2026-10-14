@@ -120,6 +120,10 @@ The token is resolved in this order:
 3. otherwise a random token is generated and printed to the console/log at startup,
    as a ready-to-paste `api-token <token>` line.
 
+**The token supports online rotation**: after changing `api-token` in the configuration, call
+`POST /api/config/reload` once (from the console or the API) — the new token takes effect
+immediately and the old one is invalidated, without restarting the daemon.
+
 There is **no hard-coded default password**. If the console is bound to a non-local address without a
 configured token, the daemon **refuses to start** (**exit code 2**, so service managers and scripts can
 tell it apart from other failures) — that would expose the console to the whole network.

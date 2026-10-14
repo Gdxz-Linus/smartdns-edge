@@ -45,7 +45,10 @@ SmartDNS Edge 除了能够作为标准的 UDP DNS 服务端，还可以作为加
    
    如果密钥有密码，可通过 bind-cert-key-pass 指定
    
-   提示：若开启加密服务且未指定证书，SmartDNS Edge 将自动生成自签名的根证书和服务器证书链。
+   提示：若开启加密服务且未指定证书，SmartDNS Edge 将自动生成自签名的根证书和服务器证书链
+   （落在配置文件所在目录，`smartdns-cert.pem` / `smartdns-key.pem`，根 CA 私钥 root-ca.key 复用不重复生成；
+   SAN 自动包含主机名与全部网卡地址，可用 bind-cert-generate / bind-cert-san / bind-cert-validity-days 调整）。
+   自签证书默认不被客户端信任：把证书文件里的 CA 段导入客户端信任库可获得完整校验，否则仅加密无校验。
    
 ## 1.3 附加属性：第二 DNS 服务
 
