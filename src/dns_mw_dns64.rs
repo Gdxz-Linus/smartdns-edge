@@ -160,20 +160,48 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
     }
 }
 
+/// 合成 IPv4-embedded IPv6 地址（RFC 6052 §2.2）。
+///
+/// 合法前缀长度只有 32/40/48/56/64/96 六种（配置层已拦截，这里是对运行期的第二道防线），
+/// 其它长度返回 None。u 字节（保留位）强制为 0。
 fn to_dns64(ipv6_net: Ipv6Net, ipv4: Ipv4Addr) -> Option<Ipv6Addr> {
-    let v4_bits = std::mem::size_of::<Ipv4Addr>() as u8 * 8;
-    let v6_bits = std::mem::size_of::<Ipv6Addr>() as u8 * 8;
-
     let prefix = ipv6_net.prefix_len();
-    let suffix = v6_bits - prefix;
+    let mut octets = ipv6_net.addr().octets();
+    let v4 = ipv4.octets();
 
-    let mut v6 = u128::from_be_bytes(ipv6_net.addr().octets());
-    let mut v4 = u32::from_be_bytes(ipv4.octets()) as u128;
-
-    v6 = v6 >> suffix << suffix;
-    v4 <<= suffix - v4_bits;
-
-    let octets = (v4 + v6).to_be_bytes();
+    // RFC 6052 §2.2 表格：按前缀长度决定 IPv4 的嵌入位置与 u 字节位置
+    match prefix {
+        32 => {
+            octets[4..8].copy_from_slice(&v4);
+            octets[8] = 0;
+        }
+        40 => {
+            octets[5..8].copy_from_slice(&v4[0..3]);
+            octets[9] = v4[3];
+            octets[8] = 0;
+        }
+        48 => {
+            octets[6..8].copy_from_slice(&v4[0..2]);
+            octets[9..11].copy_from_slice(&v4[2..4]);
+            octets[8] = 0;
+        }
+        56 => {
+            // 字节 7 为 8 位保留，字节 8 为 u（两者都必须为 0）
+            octets[9..12].copy_from_slice(&v4[0..3]);
+            octets[13] = v4[3];
+            octets[7] = 0;
+            octets[8] = 0;
+            octets[13] = 0;
+        }
+        64 => {
+            octets[9..13].copy_from_slice(&v4);
+            octets[8] = 0;
+        }
+        96 => {
+            octets[12..16].copy_from_slice(&v4);
+        }
+        _ => return None,
+    }
 
     Some(Ipv6Addr::from(octets))
 }
@@ -482,9 +510,31 @@ mod tests {
 
     #[test]
     fn test_dns64_2() {
+        // 🔐 P3-3：/64 前缀按 RFC 6052 §2.2 布局——前缀 8 字节 + u 字节(0) + IPv4 4 字节 + 3 字节 suffix
+        // 旧期望 3000::c0a8:1:0:0 是非标准布局（v4 从字节 10 开始），与标准 NAT64 网关不互通
         let ipv6_net = Ipv6Net::from_str("3000::/64").unwrap();
         let ipv4 = Ipv4Addr::from_str("192.168.0.1").unwrap();
         let ipv6 = to_dns64(ipv6_net, ipv4);
-        assert_eq!(ipv6, Ipv6Addr::from_str("3000::c0a8:1:0:0").ok());
+        // RFC 6052 /64 布局：字节 0-7 = 前缀，字节 8 = u(0)，字节 9-12 = IPv4，字节 13-15 = suffix
+        let mut expected = [0u8; 16];
+        expected[0..8].copy_from_slice(&[0x30, 0, 0, 0, 0, 0, 0, 0]);
+        expected[9..13].copy_from_slice(&[192, 168, 0, 1]);
+        assert_eq!(
+            ipv6,
+            Some(Ipv6Addr::from(expected)),
+            "/64 前缀必须按 RFC 6052 §2.2 布局（u 字节在字节 8，IPv4 在字节 9-12）"
+        );
+    }
+
+    /// 🔐 P2-4：非法前缀长度返回 None（配置层已拦截，这里是运行期防线）
+    #[test]
+    fn test_dns64_invalid_prefix_returns_none() {
+        let ipv6_net = Ipv6Net::from_str("3000::/128").unwrap();
+        let ipv4 = Ipv4Addr::from_str("192.168.0.1").unwrap();
+        assert_eq!(to_dns64(ipv6_net, ipv4), None, "/128 必须返回 None");
+
+        let ipv6_net = Ipv6Net::from_str("3000::/100").unwrap();
+        let ipv4 = Ipv4Addr::from_str("192.168.0.1").unwrap();
+        assert_eq!(to_dns64(ipv6_net, ipv4), None, "/100 必须返回 None");
     }
 }

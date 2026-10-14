@@ -529,7 +529,7 @@ async fn new_connection(
             >;
 
             let timeout = options.timeout;
-            let tcp_future = runtime_proviver.connect_tcp(server_addr, None, None);
+            let tcp_future = runtime_proviver.connect_tcp(server_addr, bind_addr, None);
 
             let server_name = server.host().to_string();
 
@@ -567,7 +567,7 @@ async fn new_connection(
             let server_name = server.name();
 
             let exchange: Connecting = DnsExchange::connect(HttpsClientConnect::new(
-                runtime_proviver.connect_tcp(server_addr, None, None),
+                runtime_proviver.connect_tcp(server_addr, bind_addr, None),
                 Arc::new(options.tls_config.clone()),
                 server_addr,
                 server_name.clone(),

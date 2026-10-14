@@ -2304,7 +2304,24 @@ impl RuntimeConfigBuilder {
                 CachePersist(v) => self.cache.persist = Some(v),
                 CacheCheckpointTime(v) => self.cache.checkpoint_time = Some(v),
                 CNAME(v) => rule_group.cnames.push(v),
-                Dns64(v) => route!(v; rule_group.params.dns64_prefix, self.dns64_prefix),
+                Dns64(v) => {
+                    // 🔐 P2-4：RFC 6052 只允许 32/40/48/56/64/96 六种前缀长度（§2.2 表格），
+                    // 其它长度（含 >96）无法按标准布局嵌入 IPv4——配置层直接拒绝，
+                    // 不让非法前缀进运行期（与 C 版 dns64.c:51-53 同口径，比 C 版更精确）。
+                    // route! 宏把值路由到"组级或全局"，这里先校验再路由。
+                    if matches!(v.prefix_len(), 32 | 40 | 48 | 56 | 64 | 96) {
+                        route!(v; rule_group.params.dns64_prefix, self.dns64_prefix)
+                    } else {
+                        let detail = format!(
+                            "dns64 prefix /{} is not valid: RFC 6052 only allows /32, /40, /48, /56, /64 or /96",
+                            v.prefix_len()
+                        );
+                        self.fatal_errors.push(match lineno {
+                            Some(no) => format!("configuration file line {no}: {detail}"),
+                            None => detail,
+                        });
+                    }
+                }
                 ExpandPtrFromAddress(v) => self.expand_ptr_from_address = Some(v),
                 NftSet(v) => self.nftsets.push(v),
                 IpSet(v) => self.ipsets.push(v),
@@ -2462,8 +2479,10 @@ impl RuntimeConfigBuilder {
                 BogusNxDomain(v) => self.bogus_nxdomain.push(v),
                 WhitelistIp(v) => self.whitelist_ip.push(v),
                 IgnoreIp(v) => self.ignore_ip.push(v),
-                CaFile(v) => self.ca_file = Some(v),
-                CaPath(v) => self.ca_path = Some(v),
+                // 🔐 P2-3：相对路径锚定到配置文件所在目录（对齐 C 版统一锚定行为；
+                // 原来直接存原值，服务方式启动（CWD=系统目录）时相对路径失效）
+                CaFile(v) => self.ca_file = Some(self.resolve_filepath(v)),
+                CaPath(v) => self.ca_path = Some(self.resolve_filepath(v)),
                 ConfFile(v) => {
                     // 去重与递归保护统一由 load_file 内部处理（它在递归之前就登记路径），
                     // 此处不再自行 contains/insert：原先这里用的是未 resolve 的原始路径，
@@ -2537,7 +2556,30 @@ impl RuntimeConfigBuilder {
                 ProxyConfig(v) => {
                     self.proxy_servers.insert(v.name.clone(), v.config);
                 }
-                HostsFile(file) => self.hosts_file = Some(file),
+                HostsFile(file) => {
+                    // 🔐 P2-3：①反斜杠归一为正斜杠（glob crate 把 \ 当转义符，
+                    // Windows 路径直接作为 pattern 会匹配不到文件）；②相对模式锚定到
+                    // 配置文件所在目录（服务方式启动时 CWD 不可靠，对齐 C 版
+                    // `_config_foreach_file` 的统一锚定行为）。
+                    let normalized = file.as_str().replace('\\', "/");
+                    let anchored = if normalized.starts_with('/') {
+                        normalized
+                    } else if let Some(base) = self.conf_file.as_ref() {
+                        let dir = base
+                            .parent()
+                            .map(|d| d.to_string_lossy().trim_end_matches('/').to_string())
+                            .unwrap_or_default();
+                        format!("{dir}/{normalized}")
+                    } else {
+                        normalized
+                    };
+                    match glob::Pattern::new(&anchored) {
+                        Ok(pattern) => self.hosts_file = Some(pattern),
+                        Err(err) => warn!(
+                            "hosts-file {anchored:?} is not a valid glob pattern: {err}; ignored"
+                        ),
+                    }
+                }
                 IpSetProvider(p) => {
                     // 🔐 与 `domain-set` 同款：相对路径按"当前配置文件所在目录"解析；
                     // 来源记录进 `ip_set_providers`（定时刷新按 `-interval` 判断周期），
@@ -6416,5 +6458,47 @@ mod rule_group_scope_tests {
             !cfg.force_no_cname_in_group("no-such-group-typo"),
             "拼错的组名不该静默拿到 default 的组级值"
         );
+    }
+
+    /// 🔐 P2-3：hosts-file 的相对路径必须锚定到「配置文件所在目录」，
+    /// Windows 反斜杠必须归一为正斜杠（glob crate 把 \ 当转义符，不归一会匹配不到文件）。
+    #[test]
+    fn test_hosts_file_relative_path_anchored_to_conf_dir() {
+        let dir = std::env::temp_dir().join(format!("smartdns-hosts-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(&conf, "hosts-file hosts.conf\n").unwrap();
+        std::fs::write(dir.join("hosts.conf"), "127.0.0.1 anchored.test\n").unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&conf));
+
+        let pattern = cfg
+            .hosts_file()
+            .expect("hosts-file 应已解析")
+            .as_str()
+            .to_string();
+        // 锚定后的 pattern 应以配置目录开头（不再依赖进程工作目录）
+        assert!(
+            std::path::Path::new(&pattern).is_absolute(),
+            "hosts-file 相对路径必须锚定到配置目录，实际 pattern: {pattern}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 P2-3：Windows 反斜杠路径必须归一为正斜杠——glob crate 把 \ 当转义符，
+    /// `C:\smartdns\hosts.conf` 直接作为 pattern 会因转义而永远匹配不到文件。
+    /// 归一在消费分支（dns_conf.rs 的 HostsFile 分支）完成，这里从模式字符串层面验证：
+    /// 反斜杠归一后再编译 Pattern，匹配应成功。
+    #[test]
+    fn test_hosts_file_backslash_normalized() {
+        let raw = "C:\\smartdns\\hosts.conf";
+        let normalized = raw.replace('\\', "/");
+        let pattern = glob::Pattern::new(&normalized).expect("归一后必须是合法 pattern");
+        assert!(
+            pattern.matches("C:/smartdns/hosts.conf"),
+            "反斜杠归一后必须能匹配正斜杠路径"
+        );
+        // 说明：glob crate 在 Windows 平台对反斜杠做了分隔符兼容（raw 也能匹配），
+        // 缺陷的实际暴露面是「Windows 写的配置拷到 Linux 跑」——归一保证跨平台一致。
     }
 }
