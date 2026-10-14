@@ -57,7 +57,15 @@ pub fn make_dispatch<P: AsRef<Path>>(
     // 真实需求其实是"把配置里那个日志文件的目录建出来"。
     let _ = crate::infra::mapped_file::ensure_parent_dir(path.as_ref());
 
-    let file = MappedFile::open(path.as_ref(), size, Some(num as usize), mode);
+    // 🔐 P3-11：`log-num 0`＝禁用日志文件输出（对齐 C 版 tlog.c:597 的语义——
+    // logcount <= 0 时不写文件；本仓库模板注释与文档站也写"0 means disable log"）。
+    // 上游 main.rs 传进来的 enabled 就是 `log_num() > 0`，所以这里 enabled=false 时
+    // 连文件都不打开：不留空句柄、不创建空日志文件。
+    let file = if enabled {
+        MappedFile::open(path.as_ref(), size, Some(num as usize), mode)
+    } else {
+        MappedFile::invalid()
+    };
 
     // 🔐 P3：文件日志到底开没开、为什么没开，必须说出来。
     // 原来失败被静默吞掉（`unwrap_or_else(|_| false)`），再叠加 main.rs 里

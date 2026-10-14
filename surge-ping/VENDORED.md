@@ -18,10 +18,33 @@
   （hickory-dns 的两个许可证）当时是保留完整的，因此这一处属遗漏。
 - **核对方式**：`head -2 surge-ping/LICENSE` 应显示 `MIT License`。
 
-### 2. 未改动其它文件
+### 2. `src/client.rs`（内嵌时即有的实质改动，2026-10-14 审计补记）
 
-除上面的 `LICENSE` 外，本目录的 9 个源文件与 `Cargo.toml` **一字未动**（审计基线 `41ebf9f` 以来的
-`git diff --numstat 41ebf9f..HEAD -- surge-ping` 只有 `LICENSE` 一行，+21/−0）。
+这些改动在审计基线 `41ebf9f` **之前**就存在（内嵌时对上游 0.8.2 做的），首次建账时
+误写为"一字未动"，此处补记：
+
+- **`set_ttl_v4` 支持**（`Client::new` 内，`config.ttl` 非空时调用）——上游 0.8.2
+  没有 TTL 设置能力；主仓测速需要指定探测包 TTL。
+- **`RecvTaskGuard` 守卫体系**（结构体 + Drop abort + `Client._recv` 字段）——上游
+  原版把收包任务的 `JoinHandle` 直接丢弃，任务随 Client 克隆而失控（永不中止、
+  泄漏）；守卫保证最后一个 Client 引用释放时收包任务被 abort。
+
+### 3. `src/ping.rs`（内嵌时即有的实质改动，同上补记）
+
+- **`last_sequence` 跟踪与清理**（`Pinger` 内）——记录最后一次发送的序号，收到应答
+  或超时后清空，避免 Drop 时对已完成的请求再做多余的锁请求。
+
+### 4. `Cargo.toml`（内嵌时即有的改动，同上补记）
+
+- **新增依赖 `socket2`**（features = ["all"]）——`set_ttl_v4`/`bind_device` 等
+  socket 细粒度控制经由它实现。
+- **保留 `[[example]]` 段**：上游的 examples/ 源文件未随副本带入，段声明待清理
+  （见修复台账 R-P3-14）。
+
+### 5. 源文件数量更正
+
+本目录 `src/` 下实际为 **8 个 `.rs` 源文件**（含 `icmp/` 子目录 3 个），首次建账时
+写"9 个"有误。
 
 ## 与主仓的关系
 

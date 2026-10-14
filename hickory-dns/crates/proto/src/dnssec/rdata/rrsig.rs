@@ -69,11 +69,15 @@ impl RRSIG {
     ///
     /// See [RFC 4035, section 5.3.3](https://datatracker.ietf.org/doc/html/rfc4035#section-5.3.3).
     ///
-    pub fn authenticated_ttl(&self, record: &Record, current_time: u32) -> u32 {
+    pub fn authenticated_ttl(&self, record: &Record, rrsig_ttl: u32, current_time: u32) -> u32 {
+        // 🔐 R-P3-10：补第四个 min 项——RRSIG 记录自身的接收 TTL（RFC 4035 §5.3.3
+        // 文档列了四项，原实现漏了第二项）。rrsig_ttl 由调用方传入
+        // （本方法未持有 RRSIG 外层 Record）。
         record
             .ttl()
             .min(self.input.original_ttl)
             .min(self.input.sig_expiration.0.saturating_sub(current_time))
+            .min(rrsig_ttl)
     }
 }
 

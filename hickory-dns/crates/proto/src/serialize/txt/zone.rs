@@ -464,15 +464,15 @@ impl Context {
         // slightly annoying, need to grab the TTL, then move rdata into the record,
         //  then check the Type again and have custom add logic.
         let set_ttl = match (rtype, self.ttl, &rdata) {
-            // TTL for the SOA is set internally...
-            // expire is for the SOA, minimum is default for records
+            // 🔐 R-P3-1：SOA 记录自身的 TTL 取 minimum（RFC 1035 §5.2、RFC 2308 §3——
+            // SOA 的 minimum 字段是负缓存 TTL，SOA 记录的 TTL 也应取它）。
+            // 原实现误用 expire（主从同步的过期时长，与记录缓存时长无关），
+            // 组件内 TODO 也自认 "looks wrong"。zone 文件显式写了 TTL 时以显式值为准。
             (RecordType::SOA, _, RData::SOA(soa)) => {
-                // TODO, this looks wrong, get_expire() should be get_minimum(), right?
-                let set_ttl = soa.expire() as u32; // the spec seems a little inaccurate with u32 and i32
                 if self.ttl.is_none() {
                     self.ttl = Some(soa.minimum());
-                } // TODO: should this only set it if it's not set?
-                set_ttl
+                }
+                soa.minimum()
             }
             (RecordType::SOA, _, _) => {
                 return ParseResult::Err(ParseError::from(format!(

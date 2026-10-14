@@ -159,11 +159,10 @@ impl<'a> Lexer<'a> {
                                 "INCLUDE" => Token::Include,
                                 "ORIGIN" => Token::Origin,
                                 "TTL" => Token::Ttl,
+                                // 🔐 R-P3-4：dollar 已在第 151 行 take 移出，此处二次 take
+                                // 恒得 None——错误信息里永远是空字符串。直接用已取出的值。
                                 _ => {
-                                    return Err(LexerErrorKind::UnrecognizedDollar(
-                                        char_data.take().unwrap_or_else(|| "".into()),
-                                    )
-                                    .into());
+                                    return Err(LexerErrorKind::UnrecognizedDollar(dollar).into());
                                 }
                             }));
                         }
@@ -226,8 +225,12 @@ impl<'a> Lexer<'a> {
                                 return opt;
                             }
                         }
-                        // TODO: this next one can be removed, but will keep unescaping for quoted strings
-                        //Some('\\') => { try!(Self::push_to_str(&mut char_data, try!(self.escape_seq()))); },
+                        // 🔐 R-P2-2：非引号上下文的 CharData 同样处理转义（RFC 1035 §5.1——
+                        // \X 与 \DDD 的转义语义不因是否在引号内而不同）。恢复上游注释掉的分支。
+                        Some('\\') => {
+                            self.txt.next();
+                            Self::push_to_str(&mut char_data, self.escape_seq()?)?;
+                        }
                         Some(ch) if !ch.is_control() && !ch.is_whitespace() => {
                             self.txt.next();
                             Self::push_to_str(&mut char_data, ch)?;
@@ -269,16 +272,25 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        unreachable!("The above match statement should have found a terminal state");
+        // 🔐 R-P2-1：原 unreachable!() 已移除——防御性错误处理不应以 panic 收场。
+        // 所有状态在 match 内要么返回、要么转移；若未来新增状态遗漏终态，
+        // 走到这里按非法状态返回错误，而不是让进程崩溃。
+        Err(LexerErrorKind::IllegalState("lexer state machine reached a non-terminal state").into())
     }
 
     fn push_to_str(collect: &mut Option<String>, ch: char) -> LexerResult<()> {
-        collect
+        // 🔐 R-P2-1：单 token 长度上限 4096。zone 文件里合法 token（域名/文本）远小于此；
+        // 无上限时一个超长 token（如单行无分隔符的恶意 zone 文件）会让 String 持续增长
+        // 直至内存耗尽。超限返回错误而不是继续累积。
+        const MAX_TOKEN_LEN: usize = 4096;
+        let s = collect
             .as_mut()
-            .ok_or_else(|| LexerErrorKind::IllegalState("collect is None").into())
-            .map(|s| {
-                s.push(ch);
-            })
+            .ok_or_else(|| LexerErrorKind::IllegalState("collect is None"))?;
+        if s.len() >= MAX_TOKEN_LEN {
+            return Err(LexerErrorKind::TokenTooLong.into());
+        }
+        s.push(ch);
+        Ok(())
     }
 
     fn escape_seq(&mut self) -> LexerResult<char> {
@@ -290,7 +302,9 @@ impl<'a> Lexer<'a> {
 
         if !ch.is_control() {
             if ch.is_numeric() {
-                // in this case it's an escaped octal: \DDD
+                // 🔐 R-P2-2：\DDD 是三位**十进制**转义（RFC 1035 §5.1），如 \077 = 77 = 'M'。
+                // 原实现按十六进制位权（d1<<16 + d2<<8 + d3）解码，\077 会错解成 0x707。
+                // 十进制位权最大值 999 超出字节范围，须校验 ≤ 255。
                 let d1: u32 = self
                     .txt
                     .next()
@@ -316,7 +330,10 @@ impl<'a> Lexer<'a> {
                             .ok_or_else(|| LexerError::from(LexerErrorKind::IllegalCharacter(c)))
                     })??; // gobble
 
-                let val: u32 = (d1 << 16) + (d2 << 8) + d3;
+                let val: u32 = d1 * 100 + d2 * 10 + d3;
+                if val > 255 {
+                    return Err(LexerError::from(LexerErrorKind::UnrecognizedOctet(val)));
+                }
                 let ch: char = char::from_u32(val)
                     .ok_or_else(|| LexerError::from(LexerErrorKind::UnrecognizedOctet(val)))?;
 
@@ -481,7 +498,8 @@ mod lex_test {
         );
         assert_eq!(
             Lexer::new("a\\077").next_token().unwrap().unwrap(),
-            Token::CharData("a\\077".to_string())
+            // 🔐 R-P2-2：非引号上下文同样解码 \DDD（原实现原样保留是错误行为）
+            Token::CharData("aM".to_string())
         );
     }
 
@@ -509,7 +527,8 @@ mod lex_test {
         );
         assert_eq!(
             Lexer::new("\"a\\077\"").next_token().unwrap().unwrap(),
-            Token::CharData("a\u{707}".to_string())
+            // 🔐 R-P2-2：\077 按十进制解码 = 77 = 'M'（原实现错误地按十六进制位权解成 \u{707}）
+            Token::CharData("aM".to_string())
         );
 
         assert!(Lexer::new("\"a\\\"").next_token().is_err());

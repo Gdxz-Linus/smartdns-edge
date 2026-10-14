@@ -157,6 +157,10 @@ impl Algorithm {
     }
 
     /// Whether this algorithm is supported by hickory's build settings
+    ///
+    /// 🔐 R-P3-11：RSASHA1NSEC3SHA1 已从此列表移除——*ring* 不支持该算法的签名验证
+    /// （见 crypto.rs RSA verify() 的显式 Err 分支），此前声明 supported 会导致验证链
+    /// 选中它后必败，把整个 RRset 误判为 Bogus。除非 ring 增加支持，否则不应恢复。
     pub fn is_supported(&self) -> bool {
         matches!(
             self,
@@ -164,7 +168,6 @@ impl Algorithm {
                 | Algorithm::ECDSAP384SHA384
                 | Algorithm::ED25519
                 | Algorithm::RSASHA1
-                | Algorithm::RSASHA1NSEC3SHA1
                 | Algorithm::RSASHA256
                 | Algorithm::RSASHA512
         )

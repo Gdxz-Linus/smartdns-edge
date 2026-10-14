@@ -272,7 +272,9 @@ impl From<u16> for RecordType {
             1 => Self::A,
             28 => Self::AAAA,
             // TODO: wrong value here, see https://github.com/hickory-dns/hickory-dns/issues/723
-            65305 => Self::ANAME,
+            // 🔐 R-P2-5：ANAME 的 IANA 注册类型码是 65280（draft-ietf-dnsop-aname-04）；
+            // 原实现 65305（0xFF19）是笔误
+            65280 => Self::ANAME,
             255 => Self::ANY,
             251 => Self::IXFR,
             252 => Self::AXFR,
@@ -402,7 +404,8 @@ impl From<RecordType> for u16 {
             RecordType::A => 1,
             RecordType::AAAA => 28,
             // TODO: wrong value here, see https://github.com/hickory-dns/hickory-dns/issues/723
-            RecordType::ANAME => 65305,
+            // 🔐 R-P2-5：对齐 IANA 注册值 65280（原 65305 为笔误）
+            RecordType::ANAME => 65280,
             RecordType::ANY => 255,
             RecordType::AXFR => 252,
             RecordType::CAA => 257,

@@ -45,10 +45,11 @@ pub(super) fn decode_public_key<'a>(
             Ok(Arc::new(Ec::from_public_bytes(public_key, algorithm)?))
         }
         Algorithm::ED25519 => Ok(Arc::new(Ed25519::from_public_bytes(public_key.into())?)),
-        Algorithm::RSASHA1
-        | Algorithm::RSASHA1NSEC3SHA1
-        | Algorithm::RSASHA256
-        | Algorithm::RSASHA512 => Ok(Arc::new(Rsa::from_public_bytes(public_key, algorithm)?)),
+        // 🔐 R-P3-11：RSASHA1NSEC3SHA1 从此处一并移除——ring 无法验证该算法，
+        // 与 `Algorithm::is_supported` 保持同步（见 algorithm.rs 的说明）。
+        Algorithm::RSASHA1 | Algorithm::RSASHA256 | Algorithm::RSASHA512 => {
+            Ok(Arc::new(Rsa::from_public_bytes(public_key, algorithm)?))
+        }
         _ => Err("public key algorithm not supported".into()),
     }
 }

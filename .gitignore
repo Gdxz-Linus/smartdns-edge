@@ -4,6 +4,7 @@
 # 内嵌副本的构建产物（Cargo 工作区各自的 target）
 /dhcproto/target/
 /hickory-dns/target/
+/surge-ping/target/
 
 /logs/
 

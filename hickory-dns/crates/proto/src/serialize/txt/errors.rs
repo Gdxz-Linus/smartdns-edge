@@ -276,6 +276,10 @@ pub enum LexerErrorKind {
     /// An unrecognized octet was found
     #[error("unrecognized octet: {0:x}")]
     UnrecognizedOctet(u32),
+
+    /// 🔐 R-P2-1：单个 token 超过长度上限（4096）
+    #[error("token too long (limit: 4096 characters)")]
+    TokenTooLong,
 }
 
 /// The error type for lexer errors that get returned in the crate

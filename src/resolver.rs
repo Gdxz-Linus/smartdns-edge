@@ -53,6 +53,9 @@ impl ResolveCommand {
         if query_types.is_empty() {
             query_types.push(RecordType::A);
         }
+        // 🔐 P3-7：用户指定的查询类别（默认 IN）——此前解析后被丢弃（死代码），
+        // 现接线进查询构造。在进入 async move 闭包前取出值，避免借用 self。
+        let query_class = self.q_class();
 
         let palette = Colours::pretty();
 
@@ -77,8 +80,11 @@ impl ResolveCommand {
 
                 for domain in domains {
                     for query_type in &query_types {
+                        // 🔐 P3-7：把用户指定的查询类别（默认 IN）接线进查询——
+                        // 此前解析后被丢弃，CH 等类别被静默替换为 IN。
                         let options = LookupOptions {
                             record_type: *query_type,
+                            query_class,
                             ..Default::default()
                         };
 
@@ -253,6 +259,19 @@ impl ResolveCommand {
                 }
             }
 
+            // 🔐 P3-8：输出格式开关（-J/--json、-1/--short）与协议无关，
+            // 必须在任何位置都合法。原先它们拦在下面的 `proto.is_none()` 块里，
+            // 用户写 `resolve -U baidu.com -J` 会报 "Invalid argument -J"。
+            // -s/--server 一直在块外，同类参数行为应当一致。
+            if arg == "-J" || arg == "--json" {
+                is_json = true;
+                continue;
+            }
+            if arg == "-1" || arg == "--short" {
+                is_short = true;
+                continue;
+            }
+
             if arg.starts_with('-') && proto.is_none() {
                 match arg.as_str() {
                     "-U" | "--udp" => {
@@ -277,16 +296,6 @@ impl ResolveCommand {
                     }
                     "-H3" | "--h3" => {
                         proto = Some(H3);
-                        continue;
-                    }
-
-                    // 🌟 拦截短格式与 JSON 参数
-                    "-J" | "--json" => {
-                        is_json = true;
-                        continue;
-                    }
-                    "-1" | "--short" => {
-                        is_short = true;
                         continue;
                     }
                     _ => (),
@@ -758,6 +767,45 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// 🔐 P3-7：显式查询类别（CH）被解析进 q_class，并进入 LookupOptions。
+    #[test]
+    fn test_query_class_ch_parsed_and_wired() {
+        let cmd = ResolveCommand::try_parse_from(["dig", "example.com", "TXT", "CH"]).unwrap();
+        assert_eq!(cmd.q_class(), DNSClass::CH, "CH 必须被解析为查询类别");
+
+        // LookupOptions 接线：字段来自 q_class()
+        let options = LookupOptions {
+            record_type: RecordType::TXT,
+            query_class: cmd.q_class(),
+            ..Default::default()
+        };
+        assert_eq!(options.query_class, DNSClass::CH, "LookupOptions 必须带上 CH");
+
+        // 不指定类别时默认 IN
+        let cmd = ResolveCommand::try_parse_from(["dig", "example.com"]).unwrap();
+        assert_eq!(cmd.q_class(), DNSClass::IN);
+    }
+
+    /// 🔐 P3-8：输出格式开关（-J/--json、-1/--short）在任何位置都合法，
+    /// 包括协议参数（-U 等）之后。原先它们只在 `proto.is_none()` 时被识别，
+    /// `resolve -U example.com -J` 会报 "Invalid argument -J"。
+    #[test]
+    fn test_format_flags_accepted_after_protocol_flag() {
+        // 协议参数在前、格式开关在后：必须解析成功
+        let cmd = ResolveCommand::try_parse_from(["dig", "-U", "example.com", "-J"]).unwrap();
+        assert!(cmd.json, "-J 在协议参数之后必须被识别");
+        assert!(!cmd.short);
+
+        let cmd = ResolveCommand::try_parse_from(["dig", "-T", "example.com", "--short"]).unwrap();
+        assert!(cmd.short, "--short 在协议参数之后必须被识别");
+        assert!(!cmd.json);
+
+        // 混合顺序也要全部生效
+        let cmd = ResolveCommand::try_parse_from(["dig", "-1", "example.com", "-U", "--json"]).unwrap();
+        assert!(cmd.json && cmd.short, "格式开关与协议参数任意交错都必须全部生效");
+        assert!(cmd.proto.udp, "协议参数本身不受影响");
     }
 }
 

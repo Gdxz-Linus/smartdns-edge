@@ -652,7 +652,9 @@ impl Message {
 
     /// Attempts to read the specified number of `Query`s
     pub fn read_queries(decoder: &mut BinDecoder<'_>, count: usize) -> ProtoResult<Vec<Query>> {
-        let mut queries = Vec::with_capacity(count);
+        // 🔐 R-P2-8：count 来自报文头声明（攻击者可控，最大 65535），按声明预分配
+        // 会被放大成内存耗尽。容量钳在 8，随实际数据增长（对齐上游 hickory main）。
+        let mut queries = Vec::with_capacity(Ord::min(count, 8));
         for _ in 0..count {
             queries.push(Query::read(decoder)?);
         }
@@ -683,7 +685,8 @@ impl Message {
         count: usize,
         is_additional: bool,
     ) -> ProtoResult<(Vec<Record>, Option<Edns>, MessageSignature)> {
-        let mut records: Vec<Record> = Vec::with_capacity(count);
+        // 🔐 R-P2-8：同 read_queries——按头声明预分配会被放大成内存耗尽，钳在 8（对齐上游）。
+        let mut records: Vec<Record> = Vec::with_capacity(Ord::min(count, 8));
         let mut edns: Option<Edns> = None;
         let mut sig = MessageSignature::default();
 

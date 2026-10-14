@@ -182,7 +182,7 @@ impl Label {
             f: &mut W,
             is_first: bool,
         ) -> Result<(), fmt::Error> {
-            let to_triple_escape = |ch: u8| format!("\\{ch:03o}");
+            let to_triple_escape = |ch: u8| format!("\\{ch:003}");
             let to_single_escape = |ch: char| format!("\\{ch}");
 
             match char::from(byte) {
@@ -570,7 +570,7 @@ mod tests {
     fn test_ascii_escape() {
         assert_eq!(
             Label::from_raw_bytes(&[0o200]).unwrap().to_string(),
-            "\\200"
+            "\\128"
         );
         assert_eq!(
             Label::from_raw_bytes(&[0o001]).unwrap().to_string(),
@@ -581,6 +581,6 @@ mod tests {
             Label::from_ascii("ben.fry").unwrap().to_string(),
             "ben\\.fry"
         );
-        assert_eq!(Label::from_raw_bytes(&[0o200]).unwrap().to_ascii(), "\\200");
+        assert_eq!(Label::from_raw_bytes(&[0o200]).unwrap().to_ascii(), "\\128");
     }
 }

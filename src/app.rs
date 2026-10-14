@@ -1204,7 +1204,9 @@ fn build_middleware(
         builder = builder.with(ClientRuleMiddleware::new()); // 🌟 挂载带有 LRU 缓存的实体实例
 
         // check if audit enabled.
-        if cfg.audit_enable() && cfg.audit_file().is_some() {
+        // 🔐 P3-11：`audit-num 0`＝禁用审计文件输出（对齐 C 版 tlog_open 语义：
+        // maxlogcount<=0 不写文件）。audit-syslog / audit-console 不受影响。
+        if cfg.audit_enable() && cfg.audit_file().is_some() && cfg.audit_num() > 0 {
             builder = builder.with(DnsAuditMiddleware::new(
                 cfg.audit_file().unwrap(),
                 cfg.audit_size(),

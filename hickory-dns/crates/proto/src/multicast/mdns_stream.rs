@@ -258,6 +258,8 @@ impl MdnsStream {
             packet_ttl,
             ipv4_if,
             ipv6_if,
+            backoff_sleep: None,
+            backoff_ms: 0,
         }
     }
 }
@@ -319,6 +321,11 @@ struct NextRandomUdpSocket {
     packet_ttl: Option<u32>,
     ipv4_if: Option<Ipv4Addr>,
     ipv6_if: Option<u32>,
+    /// 🔐 R-P3-5：端口分配连续失败时的退避休眠。原实现 10 次 bind 全失败后
+    /// `wake_by_ref()` + Pending——立即自我唤醒立即再 poll，紧自旋 100% CPU。
+    /// 退避 100ms 起步、2 倍递增、5s 封顶；任一次 bind 成功即清零。
+    backoff_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    backoff_ms: u64,
 }
 
 impl NextRandomUdpSocket {
@@ -363,7 +370,7 @@ impl Future for NextRandomUdpSocket {
     /// polls until there is an available next random UDP port.
     ///
     /// if there is no port available after 10 attempts, returns NotReady
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // non-one-shot, i.e. continuous, always use one of the well-known mdns ports and bind to the multicast addr
         if !self.mdns_query_type.sender() {
             debug!("skipping sending stream");
@@ -400,6 +407,9 @@ impl Future for NextRandomUdpSocket {
                 match std::net::UdpSocket::bind(addr) {
                     Ok(socket) => {
                         let socket = self.prepare_sender(socket)?;
+                        // 🔐 R-P3-5：bind 成功，退避清零
+                        self.backoff_sleep = None;
+                        self.backoff_ms = 0;
                         return Poll::Ready(Ok(Some(socket)));
                     }
                     Err(err) => debug!("unable to bind port, attempt: {}: {}", attempt, err),
@@ -408,8 +418,21 @@ impl Future for NextRandomUdpSocket {
 
             debug!("could not get next random port, delaying");
 
-            // TODO: this replaced a task::current().notify, is it correct?
-            cx.waker().wake_by_ref();
+            // 🔐 R-P3-5：真退避替代紧自旋。原实现 `wake_by_ref()` + Pending——立即自我
+            // 唤醒立即再 poll，10 次 bind 又全失败，周而复始 100% CPU 空转（上游注释
+            // 自己也存疑 "is it correct?"）。现在挂一个真休眠（100ms 起步、2 倍递增、
+            // 5s 封顶），到期由定时器唤醒重试。
+            let delay = if self.backoff_ms == 0 {
+                100_u64
+            } else {
+                (self.backoff_ms * 2).min(5_000)
+            };
+            self.backoff_ms = delay;
+            self.backoff_sleep =
+                Some(Box::pin(tokio::time::sleep(std::time::Duration::from_millis(delay))));
+            let sleep = self.backoff_sleep.as_mut().unwrap();
+            ready!(std::future::Future::poll(sleep.as_mut(), cx));
+            self.backoff_sleep = None;
             Poll::Pending
         }
     }

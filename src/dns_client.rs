@@ -23,6 +23,7 @@ use crate::libdns::{
         op::{Edns, Message, Query},
         rr::{
             Record, RecordType,
+            DNSClass,
             domain::{IntoName, Name},
             rdata::opt::{ClientSubnet, EdnsOption},
         },
@@ -392,6 +393,9 @@ pub struct LookupOptions {
     pub is_dnssec: bool,
     pub record_type: RecordType,
     pub client_subnet: Option<ClientSubnet>,
+    /// 查询类别（DNSClass）。默认 IN；`smartdns resolve` 命令允许用户显式指定
+    /// （如 CH）。此前该参数被解析后丢弃（P3-7 死代码），现真正接线到查询构造。
+    pub query_class: DNSClass,
 }
 
 impl Default for LookupOptions {
@@ -400,6 +404,7 @@ impl Default for LookupOptions {
             is_dnssec: false,
             record_type: RecordType::A,
             client_subnet: Default::default(),
+            query_class: DNSClass::IN,
         }
     }
 }
@@ -833,7 +838,10 @@ mod name_server {
             let name = name.into_name()?;
             let options: LookupOptions = options.into();
 
-            let query = Query::query(name, options.record_type);
+            // 🔐 P3-7：查询类别接线——用户显式指定的类别（resolve 命令的 CH 等）
+            // 必须真正进入查询报文，而不是被静默替换为 IN。
+            let mut query = Query::query(name, options.record_type);
+            query.set_query_class(options.query_class);
 
             let client_subnet = options.client_subnet.or(self.options().client_subnet);
 
@@ -1157,6 +1165,28 @@ mod name_server {
         fn no_keepalive_configured_means_no_option() {
             let edns = edns_of(RecordType::A, false, false, None);
             assert_eq!(keepalive_data(&edns), None);
+        }
+
+        /// 🔐 P3-7：LookupOptions 默认查询类别是 IN；显式指定的类别
+        /// 能通过 set_query_class 进入查询报文（resolve 命令的接线依据）。
+        #[test]
+        fn lookup_options_query_class_default_and_wiring() {
+            // 默认 IN
+            let opts = LookupOptions::default();
+            assert_eq!(opts.query_class, DNSClass::IN);
+
+            // 显式 CH：构造查询并应用类别，报文里的类别必须跟着变
+            let mut query = Query::query(
+                Name::from_str("example.com.").unwrap(),
+                RecordType::TXT,
+            );
+            assert_eq!(query.query_class(), DNSClass::IN, "Query::query 默认 IN");
+            query.set_query_class(DNSClass::CH);
+            assert_eq!(
+                query.query_class(),
+                DNSClass::CH,
+                "set_query_class 后报文类别必须是用户指定的值"
+            );
         }
     }
 }

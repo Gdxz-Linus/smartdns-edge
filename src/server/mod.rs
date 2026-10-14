@@ -67,11 +67,29 @@ pub fn serve(
     let first_packet_timeout = cfg.first_packet_timeout();
 
     // 🔐 逐监听连接上限：内网端口可以宽松、对公网端口单独收紧
-    crate::server::limit::register_listener(
-        bind_addr_config.sock_addr(),
-        bind_addr_config.server_opts().max_connections,
-        bind_addr_config.server_opts().max_connections_per_ip,
-    );
+    //
+    // 🔐 P3-5：逐连接限额只对 TCP 类监听有意义（UDP 无连接）。UDP 监听配置了
+    // max-connections / max-connections-per-ip 时必须明确告知"不生效"，
+    // 而不是注册进表里静默无效——更不能覆盖同地址 TCP 监听注册的限额
+    // （UDP+TCP 同端口是常规部署，注册表按 SocketAddr 索引，UDP 行后注册
+    //  会把 TCP 行的限额对象顶掉，TCP 连接按错误的值受限）。
+    // TCP 类监听之间同地址会被 bind 失败拦截（无 REUSEPORT），不存在覆盖问题。
+    let opts = bind_addr_config.server_opts();
+    let has_listener_limits = opts.max_connections.is_some() || opts.max_connections_per_ip.is_some();
+    let is_udp_listener = matches!(bind_addr_config, BindAddrConfig::Udp(_));
+    if has_listener_limits && is_udp_listener {
+        crate::log::warn!(
+            "listener {} is a UDP listener; per-listener connection limits (max-connections / max-connections-per-ip) do not apply to UDP (connectionless) and are ignored",
+            bind_addr_config.sock_addr()
+        );
+    }
+    if has_listener_limits && !is_udp_listener {
+        crate::server::limit::register_listener(
+            bind_addr_config.sock_addr(),
+            opts.max_connections,
+            opts.max_connections_per_ip,
+        );
+    }
 
     use crate::rustls::TlsServerCertResolver;
     use net::{bind_to, setup_tcp_socket, setup_udp_socket};

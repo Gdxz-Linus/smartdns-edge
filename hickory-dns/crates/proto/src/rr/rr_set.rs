@@ -343,9 +343,14 @@ impl RecordSet {
             .collect::<Vec<usize>>();
 
         // if the Records are identical, ignore the update, update all that are not (ttl, etc.)
+        //
+        // 🔐 R-P2-6：Record 的 PartialEq 按 RFC 2136 §1.1.1 排除 TTL，因此 `==` 为 true
+        // 时仍可能"仅 TTL 不同"——原实现把它当完全相同静默拒绝，TTL 更新丢失。
+        // filter 已保证 rdata 相同、assert 已保证 name/type 一致，唯一自由变量是 TTL：
+        // TTL 相同 → 完全相同，忽略；仅 TTL 不同 → 走下方替换逻辑更新 TTL。
         let mut replaced = false;
         for i in to_replace {
-            if self.records[i] == record {
+            if self.records[i] == record && self.records[i].ttl() == record.ttl() {
                 return false;
             }
 

@@ -328,6 +328,14 @@ impl<S: DnsTcpStream> Stream for TcpStream<S> {
                     } else {
                         let length = u16::from_be_bytes(*bytes);
                         debug!("got length: {}", length);
+                        // 🔐 R-P3-6：长度前缀为 0 —— 非 RFC 1035 报文（DNS 报文不可能为空）。
+                        // 原实现产出 0 字节"消息"，上层解码失败报错，服务端随即断开整条
+                        // 复用连接（某些客户端实现会发 0 长度报文作边界/保活，被误断）。
+                        // 正确处理：重置位置继续读下一条消息的长度前缀，连接保持。
+                        if length == 0 {
+                            *pos = 0;
+                            continue;
+                        }
                         // 🌟 P0-5 修复：绝不按客户端声明的长度分配内存。
                         let planned = length as usize;
                         let initial = READ_CHUNK.min(planned);

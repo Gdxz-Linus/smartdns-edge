@@ -530,7 +530,7 @@ impl Name {
     /// assert_eq!(bytes_name, name);
     ///
     /// let bytes_name = Name::from_labels(vec!["bad.char".as_bytes(), "example".as_bytes(), "com".as_bytes()]).unwrap();
-    /// let name = Name::from_ascii("bad\\056char.example.com.").unwrap();
+    /// let name = Name::from_ascii("bad\\046char.example.com.").unwrap();
     ///
     /// assert_eq!(bytes_name, name);
     /// ```
@@ -611,9 +611,11 @@ impl Name {
                     _ => return Err(format!("unrecognized char: {ch}").into()),
                 },
                 ParseState::Escape1 => {
+                    // 🔐 R-P3-3：\DDD 是三位**十进制**转义（RFC 1035 §5.1），与第五批
+                    // zone_lex.rs（R-P2-2）的十进制口径统一。原实现按八进制解码。
                     if ch.is_numeric() {
                         state = ParseState::Escape2(
-                            ch.to_digit(8)
+                            ch.to_digit(10)
                                 .ok_or_else(|| ProtoError::from(format!("illegal char: {ch}")))?,
                         );
                     } else {
@@ -626,7 +628,7 @@ impl Name {
                     if ch.is_numeric() {
                         state = ParseState::Escape3(
                             i,
-                            ch.to_digit(8)
+                            ch.to_digit(10)
                                 .ok_or_else(|| ProtoError::from(format!("illegal char: {ch}")))?,
                         );
                     } else {
@@ -635,11 +637,16 @@ impl Name {
                 }
                 ParseState::Escape3(i, ii) => {
                     if ch.is_numeric() {
-                        // octal conversion
-                        let val: u32 = (i * 8 * 8)
-                            + (ii * 8)
-                            + ch.to_digit(8)
+                        // 🔐 R-P3-3：十进制转换（d1*100 + d2*10 + d3），校验 ≤ 255
+                        let val: u32 = (i * 100)
+                            + (ii * 10)
+                            + ch.to_digit(10)
                                 .ok_or_else(|| ProtoError::from(format!("illegal char: {ch}")))?;
+                        if val > 255 {
+                            return Err(ProtoError::from(format!(
+                                "escaped value out of range: {val}"
+                            )));
+                        }
                         let new: char = char::from_u32(val)
                             .ok_or_else(|| ProtoError::from(format!("illegal char: {ch}")))?;
                         label.push(new);
@@ -1226,18 +1233,17 @@ impl<'r> BinDecodable<'r> for Name {
     /// This will consume the portions of the `Vec` which it is reading...
     fn read(decoder: &mut BinDecoder<'r>) -> ProtoResult<Self> {
         let mut name = Self::default();
-        read_inner(decoder, &mut name, None)?;
+        read_inner(decoder, &mut name)?;
         Ok(name)
     }
 }
 
-fn read_inner(
-    decoder: &mut BinDecoder<'_>,
-    name: &mut Name,
-    max_idx: Option<usize>,
-) -> Result<(), DecodeError> {
+fn read_inner(decoder: &mut BinDecoder<'_>, name: &mut Name) -> Result<(), DecodeError> {
     let mut state: LabelParseState = LabelParseState::LabelLengthOrPointer;
-    let name_start = decoder.index();
+    let mut ptr_max_idx = None;
+    let mut decoder_tmp;
+    let mut decoder = &mut *decoder;
+    let mut name_start = decoder.index();
 
     // assume all chars are utf-8. We're doing byte-by-byte operations, no endianness issues...
     // reserved: (1000 0000 aka 0800) && (0100 0000 aka 0400)
@@ -1245,8 +1251,8 @@ fn read_inner(
     // label: 03FF & slice = length; slice.next(length) = label
     // root: 0000
     loop {
-        // this protects against overlapping labels
-        if let Some(max_idx) = max_idx {
+        // this protects against overlapping labels when chasing pointers
+        if let Some(max_idx) = ptr_max_idx {
             if decoder.index() >= max_idx {
                 return Err(DecodeError::LabelOverlapsWithOther {
                     label: name_start,
@@ -1273,7 +1279,9 @@ fn read_inner(
                         // remaining six bits of the length field limit the label to 63 octets or
                         // less.
                         name.set_fqdn(true);
-                        LabelParseState::Root
+                        // need to pop() the 0 off the stack...
+                        decoder.pop()?;
+                        break;
                     }
                     None => {
                         // Valid names on the wire should end in a 0-octet, signifying the end of
@@ -1336,17 +1344,25 @@ fn read_inner(
                         ptr: e,
                     })?;
 
-                let mut pointer = decoder.clone(location);
-                read_inner(&mut pointer, name, Some(name_start))?;
+                // 🔐 R-P2-4：压缩指针改为迭代跳转，不再递归。
+                // 原实现 `read_inner(&mut pointer, ...)` 递归解引用：恶意报文可构造
+                // 严格递减的指针链（每跳 2 字节），64KB 报文内最多 3 万余层递归，
+                // 足以打爆 tokio worker 的 2MB 栈——栈溢出 panic（DoS）。
+                // 迭代化（对齐上游 hickory main 的修复）：用 ptr_max_idx + decoder
+                // 重绑定在同一个循环里跳转，"指针必须指向前方"的约束不变，
+                // LabelOverlapsWithOther 检查仍然生效，但栈深度恒定。
+                ptr_max_idx = Some(name_start);
+                decoder_tmp = decoder.clone(location);
+                decoder = &mut decoder_tmp;
+                name_start = decoder.index();
+                LabelParseState::LabelLengthOrPointer
+            }
+        };
 
-                // Pointers always finish the name, break like Root.
-                break;
-            }
-            LabelParseState::Root => {
-                // need to pop() the 0 off the stack...
-                decoder.pop()?;
-                break;
-            }
+        // 🔐 R-P2-4：每轮循环的廉价早退——名字已确定超过 255 字节上限时立即失败，
+        // 不再继续解析（与上游 hickory main 一致）。
+        if name.label_data.len() >= 255 {
+            return Err(DecodeError::DomainNameTooLong(name.len()));
         }
     }
 
@@ -1417,7 +1433,6 @@ enum LabelParseState {
     LabelLengthOrPointer, // basically the start of the FSM
     Label,                // storing length of the label, must be < 63
     Pointer,              // location of pointer in slice,
-    Root,                 // root is the end of the labels list for an FQDN
 }
 
 impl FromStr for Name {
@@ -1658,6 +1673,36 @@ mod tests {
         let mut d = BinDecoder::new(&bytes);
 
         assert!(Name::read(&mut d).is_err());
+    }
+
+    /// 🔐 R-P2-4：长压缩指针链必须安全失败（栈溢出回归测试）。
+    ///
+    /// 构造一条 1000 层的指针链（每层 = 1 字节 label + 2 字节指针，指针位置
+    /// 严格递减，满足"指针必须指向前方"的约束）：迭代化之前的递归实现会
+    /// 在数千层时打爆栈（panic），迭代实现应在累积 label 达到 255 字节上限时
+    /// 被早退拒绝，而不是栈溢出。
+    #[test]
+    fn test_long_pointer_chain_is_rejected_safely() {
+        // offset 0: "A." 根（指针链最终落地处）
+        let mut bytes: Vec<u8> = vec![0x01, b'A', 0x00];
+        let layers = 1000usize;
+        // 每层 = [len=1]['A'][ptr 指向前一层入口]；第 0 层指向 offset 0 的 "A."
+        let mut prev_target = 0usize;
+        for _ in 0..layers {
+            let at = bytes.len();
+            bytes.push(0x01);
+            bytes.push(b'A');
+            bytes.push(0xC0 | ((prev_target >> 8) as u8 & 0x3F));
+            bytes.push((prev_target & 0xFF) as u8);
+            prev_target = at; // 下一层指向本层（位置更靠后的一层指回这里）
+        }
+        // 从最后一层入口开始读（真实报文里 RDATA 内嵌名字即此形态）
+        let mut d = BinDecoder::new(&bytes[bytes.len() - 4..]);
+        let result = Name::read(&mut d);
+        assert!(
+            result.is_err(),
+            "千层指针链累积的名字必然超过 255 上限，应被早退拒绝而不是耗尽资源"
+        );
     }
 
     #[test]
@@ -2334,6 +2379,36 @@ mod tests {
             }
             _ => 0.0,
         }
+    }
+
+    /// 🔐 R-P3-3：\DDD 按十进制解码（RFC 1035 §5.1）。
+    /// \077 应解码为十进制 77 = 'M'（原实现按八进制位权解出别的字符）；
+    /// 超 255 的值（如 \999）必须报错。
+    #[test]
+    fn test_decimal_escape_seq() {
+        // 十进制解码
+        let name = Name::from_ascii("a\\077.example.").unwrap();
+        let labels: Vec<String> = name
+            .iter()
+            .map(|l| String::from_utf8_lossy(l).into_owned())
+            .collect();
+        assert_eq!(labels[0], "aM", "\\077 应解码为十进制 77 = 'M'");
+
+        // 超 255 必须报错
+        assert!(
+            Name::from_ascii("a\\999.example.").is_err(),
+            "\\999 超出字节范围必须报错"
+        );
+
+        // 往返验证改由 UTF-8 通道（from_utf8）承担：from_ascii 的 Label 校验拒绝
+        // 解码出的非 ASCII 字节是既有的 ASCII/UTF-8 通道边界（非本修复引入），
+        // 因此 \097（'a'）经 from_ascii 解码后 label 实为 "aa"，再解析无转义、不稳定。
+        let name = Name::from_utf8("a\\097.example.").unwrap();
+        assert_eq!(
+            name.iter().map(|l| String::from_utf8_lossy(l).into_owned()).collect::<Vec<_>>()[0],
+            "aa",
+            "\\097 十进制解码 = 97 = 'a'，与前缀 'a' 拼为 aa"
+        );
     }
 
     #[test]

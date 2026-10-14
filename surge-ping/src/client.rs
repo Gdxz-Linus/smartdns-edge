@@ -8,7 +8,7 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
@@ -221,46 +221,70 @@ impl Client {
 
 async fn recv_task(socket: AsyncSocket, reply_map: ReplyMap) {
     let mut buf = vec![0u8; 2048];
+    // 🔐 R-P2-11：recv_from 连续失败时的退避间隔。原实现错误被 `if let Ok` 静默吞掉
+    // 且立即重试——socket 持续报错时变热循环空转吃 CPU。
+    let mut error_backoff = Duration::from_millis(0);
+    const BACKOFF_STEP: Duration = Duration::from_millis(100);
+    const BACKOFF_MAX: Duration = Duration::from_secs(5);
     loop {
-        if let Ok((sz, addr)) = socket.recv_from(&mut buf).await {
-            let timestamp = Instant::now();
-            let message = &buf[..sz];
-            let local_addr = socket.local_addr().unwrap().ip();
-            let packet = {
-                let result = match addr.ip() {
-                    IpAddr::V4(src_addr) => {
-                        let local_addr_ip4 = match local_addr {
-                            IpAddr::V4(local_addr_ip4) => local_addr_ip4,
-                            _ => continue,
-                        };
-
-                        Icmpv4Packet::decode(message, socket.sock_type, src_addr, local_addr_ip4)
-                            .map(IcmpPacket::V4)
-                    }
-                    IpAddr::V6(src_addr) => {
-                        Icmpv6Packet::decode(message, src_addr).map(IcmpPacket::V6)
-                    }
-                };
-                match result {
-                    Ok(packet) => packet,
+        match socket.recv_from(&mut buf).await {
+            Err(_err) => {
+                // 持续失败：退避后重试（任务保留，socket 恢复后自动继续工作）。
+                // 步进 100ms，上限 5s，避免热循环。
+                error_backoff = (error_backoff + BACKOFF_STEP).min(BACKOFF_MAX);
+                tokio::time::sleep(error_backoff).await;
+                continue;
+            }
+            Ok((sz, addr)) => {
+                error_backoff = Duration::from_millis(0);
+                let timestamp = Instant::now();
+                let message = &buf[..sz];
+                // 🔐 R-P2-11：原 unwrap——一次 local_addr 失败会让整个收包任务 panic
+                // 死亡，之后所有测速请求永久超时（任务无重启机制）。失败按"本包
+                // 无法定本地地址"处理：跳过本包，任务继续。
+                let local_addr = match socket.local_addr() {
+                    Ok(addr) => addr.ip(),
                     Err(err) => {
-                        debug!("error decoding ICMP packet: {:?}", err);
+                        debug!("local_addr failed, skipping packet: {:?}", err);
                         continue;
                     }
+                };
+                let packet = {
+                    let result = match addr.ip() {
+                        IpAddr::V4(src_addr) => {
+                            let local_addr_ip4 = match local_addr {
+                                IpAddr::V4(local_addr_ip4) => local_addr_ip4,
+                                _ => continue,
+                            };
+
+                            Icmpv4Packet::decode(message, socket.sock_type, src_addr, local_addr_ip4)
+                                .map(IcmpPacket::V4)
+                        }
+                        IpAddr::V6(src_addr) => {
+                            Icmpv6Packet::decode(message, src_addr).map(IcmpPacket::V6)
+                        }
+                    };
+                    match result {
+                        Ok(packet) => packet,
+                        Err(err) => {
+                            debug!("error decoding ICMP packet: {:?}", err);
+                            continue;
+                        }
+                    }
+                };
+
+                let ident = if is_linux_icmp_socket!(socket.get_type()) {
+                    None
+                } else {
+                    Some(packet.get_identifier())
+                };
+
+                if let Some(waiter) = reply_map.remove(addr.ip(), ident, packet.get_sequence()) {
+                    // If send fails the receiving end has closed. Nothing to do.
+                    let _ = waiter.send(Reply { timestamp, packet });
+                } else {
+                    debug!("no one is waiting for ICMP packet ({:?})", packet);
                 }
-            };
-
-            let ident = if is_linux_icmp_socket!(socket.get_type()) {
-                None
-            } else {
-                Some(packet.get_identifier())
-            };
-
-            if let Some(waiter) = reply_map.remove(addr.ip(), ident, packet.get_sequence()) {
-                // If send fails the receiving end has closed. Nothing to do.
-                let _ = waiter.send(Reply { timestamp, packet });
-            } else {
-                debug!("no one is waiting for ICMP packet ({:?})", packet);
             }
         }
     }

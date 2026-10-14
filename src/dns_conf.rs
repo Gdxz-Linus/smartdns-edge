@@ -1608,7 +1608,14 @@ impl RuntimeConfigBuilder {
         }
 
         if !self.rule_group_stack.is_empty() {
-            while let Some((name, group)) = self.rule_group_stack.pop() {
+            // 🔐 P3-1：走到这里说明还有 group-begin 没有配对的 group-end。
+            // 行为与 C 版一致（src/dns_conf/dns_conf_group.c:163-172 的 pop 保护弹到 default 组为止，
+            // 未闭合组的规则继续生效、不崩溃），但 C 版全程无提示，用户少写一行 group-end 根本无法察觉。
+            // 这里按栈底到栈顶的顺序逐个告警后再合并，规则生效结果不变，只是补上可见性。
+            for (name, group) in self.rule_group_stack.drain(..) {
+                warn!(
+                    "group-begin \"{name}\" has no matching group-end; its rules stay active in group \"{name}\" (as if group-end were at end of configuration)"
+                );
                 self.rule_groups.entry(name).or_default().merge(group);
             }
         }
@@ -2809,7 +2816,15 @@ fn expand_conf_pattern(pattern: &Path, base_file: Option<&PathBuf>) -> Vec<PathB
         }
     };
 
-    let mut files: Vec<PathBuf> = glob::glob(&pattern.to_string_lossy())
+    // 🔐 P3-2：glob crate 把 `\` 当通配符转义字符，Windows 用户写
+    // `conf-file d:\smartdns\conf.d\*.conf` 时 `\d` `\c` 会被当成转义序列，
+    // 匹配结果错误甚至恒为空。glob 在所有平台都接受 `/` 作分隔符，
+    // 因此喂给 glob 之前把分隔符统一归一化为 `/`。`\\` 转义的通配符场景
+    // （用户显式想匹配字面 `*`）不在此配置语义的考虑范围：conf-file 的
+    // 通配符就是要展开，不存在"匹配字面星号的配置文件名"的合理需求。
+    let pattern_str = pattern.to_string_lossy().replace('\\', "/");
+
+    let mut files: Vec<PathBuf> = glob::glob(&pattern_str)
         .map(|paths| paths.filter_map(|path| path.ok()).collect())
         .unwrap_or_default();
     files.retain(|path| path.is_file());
@@ -3258,6 +3273,27 @@ mod tests {
                 .get(|n| n.address.clone())
                 .is_none(),
             "继承一个没定义过的组 → 不继承（C 版也是告警后不继承）"
+        );
+    }
+
+    /// 🔐 P3-1：group-begin 没有配对的 group-end 时——
+    /// 行为与 C 版一致（规则继续生效、不崩溃），但必须打 WARN 告警让用户能察觉。
+    /// 这条测试钉住"规则仍生效"这半边语义（告警文案本身由实现保证，不在此断言）。
+    #[test]
+    fn test_unclosed_group_rules_stay_active_and_build_succeeds() {
+        let cfg = RuntimeConfig::builder()
+            .with("group-begin leaky")
+            .with("address /a.test/1.2.3.4")
+            // 故意不写 group-end：组作用域未闭合
+            .build()
+            .unwrap();
+
+        let name = Name::from_utf8("a.test").unwrap();
+        assert!(
+            cfg.find_domain_rule(&name, "leaky")
+                .get(|n| n.address.clone())
+                .is_some(),
+            "未闭合组的规则必须照常生效（对齐 C 版不收口的行为）"
         );
     }
 
@@ -4539,6 +4575,42 @@ mod tests {
         // 通配符一个都没命中：返回空列表（调用方据此告警）
         let none = dir.join("conf.d").join("*.nomatch");
         assert!(expand_conf_pattern(&none, None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 P3-2：Windows 反斜杠分隔符的通配模式也要能展开。
+    /// glob crate 把 `\` 当转义字符，用户在 Windows 上写
+    /// `conf-file d:\smartdns\conf.d\*.conf` 会匹配失败；喂 glob 前归一化为 `/`。
+    /// 这条测试在所有平台跑（非 Windows 平台同样允许写 `\` 分隔的路径字符串）。
+    #[test]
+    fn test_expand_conf_pattern_backslash_separators() {
+        let dir = std::env::temp_dir().join(format!(
+            "conf-pattern-bs-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+        std::fs::write(dir.join("conf.d").join("10-a.conf"), "#\n").unwrap();
+        std::fs::write(dir.join("conf.d").join("20-b.conf"), "#\n").unwrap();
+
+        // 用平台分隔符拼出合法绝对路径，再把分隔符全部换成 `\`，
+        // 模拟 Windows 用户在配置里写的原始写法。
+        let posix = dir.join("conf.d").join("*.conf");
+        let backslashed = std::path::PathBuf::from(
+            posix.to_string_lossy().replace('/', "\\"),
+        );
+
+        let mut names = expand_conf_pattern(&backslashed, None)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            ["10-a.conf", "20-b.conf"],
+            "反斜杠分隔的通配模式必须与正斜杠结果一致"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

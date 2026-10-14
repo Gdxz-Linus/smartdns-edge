@@ -325,7 +325,11 @@ impl core::str::FromStr for SvcParamKey {
                 )))
             })?;
 
-            Ok(SvcParamKey::Key(u16::from_str(key_value)?))
+            // 🔐 R-P3-2：文本解析必须与 wire 解码共用同一个映射（From<u16>）。
+            // 原实现把任何 keyN 一律解析成 SvcParamKey::Key(N)：key0/key1 等标准键
+            // 被错标为私有键（wire 的 0 是 Mandatory、1 是 Alpn），33 等编号 wire 侧
+            // 应为 Unknown——文本与 wire 往返不一致。套用 From<u16> 后同轨。
+            Ok(SvcParamKey::from(u16::from_str(key_value)?))
         }
 
         let key = match s {
@@ -1203,6 +1207,7 @@ mod tests {
     use alloc::string::ToString;
 
     use super::*;
+    use core::str::FromStr;
 
     #[test]
     fn read_svcb_key() {
@@ -1217,6 +1222,29 @@ mod tests {
         assert_eq!(SvcParamKey::Key(65534), 65534.into());
         assert_eq!(SvcParamKey::Key65535, 65535.into());
         assert_eq!(SvcParamKey::Unknown(65279), 65279.into());
+    }
+
+    /// 🔐 R-P3-2：文本解析与 wire 解码往返一致性。
+    ///
+    /// key0/key1 等标准编号过去被文本路径错标为 Key(N)（wire 的 0 是 Mandatory）；
+    /// key33 等区间外编号 wire 侧是 Unknown——修复后 from_str 必须与 From<u16> 同轨。
+    #[test]
+    fn svcb_key_from_str_roundtrip_matches_wire() {
+        // 标准键：文本 → wire 数值必须一致
+        assert_eq!(u16::from(SvcParamKey::from_str("mandatory").unwrap()), 0);
+        assert_eq!(u16::from(SvcParamKey::from_str("alpn").unwrap()), 1);
+        // 标准区间内的 keyN：不得错标为私有 Key（与 wire 的 Unknown 对齐）
+        assert_eq!(
+            SvcParamKey::from_str("key33").unwrap(),
+            SvcParamKey::from(33),
+            "key33 的文本解析必须与 wire 值 33 的表示一致"
+        );
+        assert_eq!(u16::from(SvcParamKey::from_str("key0").unwrap()), 0);
+        // 私有区间：文本与 wire 表示一致
+        assert_eq!(SvcParamKey::from_str("key65280").unwrap(), SvcParamKey::from(65280));
+        // 往返：parse → display → parse 稳定
+        let k = SvcParamKey::from_str("key65280").unwrap();
+        assert_eq!(SvcParamKey::from_str(&k.to_string()).unwrap(), k);
     }
 
     #[test]

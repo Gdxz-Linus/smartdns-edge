@@ -373,11 +373,14 @@ where
         // Collect all inbound requests, max 100 at a time for QoS
         //   by having a max we will guarantee that the client can't be DOSed in this loop
         // TODO: make the QoS configurable
-        let mut messages_received = 0;
-        for i in 0..QOS_MAX_RECEIVE_MSGS {
+        // 🔐 R-P2-7：逐条累加。原实现 `messages_received = i` 记录的是最后一条成功的
+        // 下标：满一轮 100 条时最后 i = QOS_MAX_RECEIVE_MSGS - 1，下方 `==` 判断恒为
+        // false，wake 永不触发，QoS 让位失效。
+        let mut messages_received = 0usize;
+        for _ in 0..QOS_MAX_RECEIVE_MSGS {
             match self.stream.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(buffer))) => {
-                    messages_received = i;
+                    messages_received += 1;
 
                     //   deserialize or log decode_error
                     match DnsResponse::from_buffer(buffer.into_parts().0) {
@@ -684,6 +687,37 @@ mod test {
         };
         assert_eq!(response.len(), 1);
         assert_eq!(response[0].answers().len(), axfr_response().len());
+    }
+
+    /// 🔐 R-P2-7：QoS 满一轮后必须继续处理（回归测试）。
+    ///
+    /// 发送 1 个查询，mock 吐出 100（恰好一轮 QoS 上限）+2 条响应：响应处理
+    /// 必须跨越一轮上限持续进行。注：单查询场景受 completion channel 容量
+    /// （CHANNEL_BUFFER_SIZE=32）限制，超量响应按既有设计丢弃（try_send 失败
+    /// 即弃，不阻塞 QoS 循环），因此端到端口径只能锁定"循环持续运转"。
+    #[tokio::test]
+    async fn test_multiplexer_qos_continues_after_full_batch() {
+        subscribe();
+        let (query, answer) = a_query_answer();
+
+        let single = answer.into_iter().next().unwrap();
+        let mut responses = vec![single.clone(); QOS_MAX_RECEIVE_MSGS];
+        responses.push(single.clone());
+        responses.push(single);
+        let mut multiplexer = get_mocked_multiplexer(responses).await;
+        let response = multiplexer.send_message(query);
+
+        let received = tokio::select! {
+            _ = multiplexer.next() => panic!("should never end"),
+            r = response.try_collect::<Vec<_>>() => r.unwrap(),
+        };
+        // 收到通道容量上限的响应数 = QoS 循环把整轮处理完且未卡死
+        // 收到数达到通道容量量级 = QoS 循环跨过一轮上限后仍在持续处理
+        assert!(
+            received.len() >= CHANNEL_BUFFER_SIZE,
+            "跨过 QoS 一轮上限后处理必须继续（实际收到 {} 条）",
+            received.len()
+        );
     }
 
     #[tokio::test]

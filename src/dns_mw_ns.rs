@@ -22,7 +22,7 @@ use crate::{
 
 use crate::libdns::proto::rr::domain::usage::LOCAL;
 use crate::libdns::proto::rr::rdata::opt::ClientSubnet;
-use crate::libdns::proto::{op::ResponseCode, rr::rdata::opt::EdnsCode};
+use crate::libdns::proto::{op::ResponseCode, rr::rdata::opt::EdnsCode, rr::DNSClass};
 use futures::FutureExt;
 use rr::rdata::opt::EdnsOption;
 use std::sync::Mutex;
@@ -103,6 +103,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                     ctx.edns_client_subnet()
                         .map(|net| ClientSubnet::new(net.addr(), net.prefix_len(), 0))
                 }),
+            // 🔐 P3-7：服务端转发路径始终沿用客户端查询报文里的类别（通常 IN），
+            // 不做任何改写——resolve 命令的显式类别只影响诊断工具自身。
+            query_class: req.queries().first().map(|q| q.query_class()).unwrap_or(DNSClass::IN),
         };
 
         // skip nameserver rule
@@ -1306,6 +1309,7 @@ mod tests {
                             is_dnssec: false,
                             record_type: RecordType::A,
                             client_subnet: Some(ClientSubnet::from_str(subnet).unwrap()),
+                            query_class: DNSClass::IN,
                         },
                     )
                 })

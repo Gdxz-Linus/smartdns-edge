@@ -70,10 +70,19 @@ where
     R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
     let mut bytes = BytesMut::with_capacity(length.unwrap_or(0).clamp(512, 4_096));
+    // 🔐 R-P3-8：请求体上限。原实现把所有帧无界拼接，长度只在收完后比对——
+    // 声明 100MB 就先收 100MB 才报错，客户端 POST 巨 body 即可耗尽内存。
+    // 有声明时上限 = 声明值（中途超出即报错）；未声明时钳 64KB（DNS 报文上限）。
+    let max_len = length.unwrap_or(64 * 1024).max(1);
 
     loop {
         match request_stream.next().await {
-            Some(Ok(mut frame)) => bytes.extend_from_slice(&frame.split_off(0)),
+            Some(Ok(mut frame)) => {
+                if bytes.len() + frame.len() > max_len {
+                    return Err("request body exceeds limit".into());
+                }
+                bytes.extend_from_slice(&frame.split_off(0));
+            }
             Some(Err(err)) => return Err(err.into()),
             None => {
                 return if let Some(length) = length {

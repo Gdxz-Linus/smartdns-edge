@@ -734,7 +734,9 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 let query =
                     Query::query(rrsig.data().input().signer_name.clone(), RecordType::DNSKEY);
 
-                if i > MAX_RRSIGS_PER_RRSET {
+                // 🔐 R-P3-9：上限条件由 `>` 改 `>=`——原实现 `i > 8` 允许 i=8
+                // （第 9 个签名）通过，实际验证 9 个，超出 MAX=8 的设计上限。
+                if i >= MAX_RRSIGS_PER_RRSET {
                     warn!("too many ({i}) RRSIGs for rrset {rrset:?}; skipping");
                     return None;
                 }
@@ -1188,7 +1190,11 @@ fn verify_rrset_with_dnskey(
             );
             (
                 Proof::Secure,
-                Some(rrsig.data().authenticated_ttl(rrset.record(), current_time)),
+                Some(rrsig.data().authenticated_ttl(
+                    rrset.record(),
+                    rrsig.ttl(), // 🔐 R-P3-10：RRSIG 自身的接收 TTL
+                    current_time,
+                )),
             )
         })
         .map_err(|e| {

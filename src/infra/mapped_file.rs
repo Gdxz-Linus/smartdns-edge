@@ -109,6 +109,24 @@ impl MappedFile {
         }
     }
 
+    /// 🔐 P3-11：一个"永远不写盘"的占位实例。
+    ///
+    /// `log-num 0`＝禁用日志文件输出（对齐 C 版 tlog.c:597 的语义）。
+    /// 上游（`log::make_dispatch`）在 enabled=false 时用它代替真正的文件实例：
+    /// 路径字段保留（诊断可见），但从不打开句柄、从不写盘、从不滚动归档。
+    pub fn invalid() -> Self {
+        Self {
+            path: PathBuf::new(),
+            size: 0,
+            num: None,
+            file: None,
+            len: 0,
+            mode: None,
+            peamble_bytes: None,
+            disk_probe: None,
+        }
+    }
+
     /// 🔐 问题 40：读取当前磁盘上该文件的「身份」。
     ///
     /// 文件不存在时返回 `None` —— 那同样意味着"缓存值失效"（可能被外部删了或搬走了），
@@ -419,7 +437,12 @@ impl MappedFile {
         //   1. `n == 0` 时切片 `files[0..]` 覆盖**全部**文件，等于"配 0 个归档"变成
         //      "把刚归档出来的那份也立刻删掉"——日志内容凭空消失；
         //   2. 删除失败会用 `?` 直接把错误抛出去，一次权限问题就能让日志停止滚动。
-        // 现在：0 按 1 处理（至少留住最近一份归档，并明确告警），删除失败只记日志不中断。
+        // 现在：删除失败只记日志不中断。
+        //
+        // 🔐 P3-11：`log-num 0`／`audit-num 0` 的上游语义已对齐 C 版＝**禁用文件输出**
+        // （log 走 `make_dispatch` 的 enabled 判定；正常流程根本不会带着 num=0 滚动归档）。
+        // 这里保留"0 按 1"兜底，是纵深防御：万一未来有调用方绕过上游检查直接以 num=0
+        // 打开本组件，也不至于把刚归档的文件立刻删掉。告警保留，提示配置自相矛盾。
         let keep = match self.num {
             Some(0) => {
                 crate::log::warn_once("log-num-zero");
@@ -450,6 +473,12 @@ impl MappedFile {
 impl Write for MappedFile {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // 🔐 P3-11：invalid 占位实例（`log-num 0` 禁用文件输出时上游传入）——
+        // 调用方主动选择"不写盘"，直接丢弃内容并报告"写了 0 字节"，
+        // 不打开任何文件、不触发归档、不产生写失败告警。
+        if self.path.as_os_str().is_empty() {
+            return Ok(0);
+        }
         let file = self.get_active_file()?;
         let len = file.write(buf)?;
         self.len += len as u64;
@@ -852,6 +881,49 @@ impl MutexMappedFile {
         let consumer = Arc::new(LogConsumer { tx });
 
         // 登记到全局，供关机路径的 flush_all() 使用（只存 Weak，见 LOG_CONSUMERS 的说明）
+        {
+            let mut list = LOG_CONSUMERS.lock().unwrap_or_else(|e| e.into_inner());
+            list.retain(|weak| weak.strong_count() > 0);
+            list.push(Arc::downgrade(&consumer));
+        }
+
+        Self { inner, consumer }
+    }
+
+    /// 🔐 P3-11：`log-num 0`（禁用文件输出）时上游用的占位实例。
+    ///
+    /// 内层是 [`MappedFile::invalid`]：写进去的内容在内层被直接丢弃（不打开文件、
+    /// 不归档、不产生写失败告警）。外层的队列与消费线程照常运转，语义与普通实例
+    /// 完全一致——调用方无感知差别，只是内容不会落盘。
+    pub fn invalid() -> Self {
+        let inner = Arc::new(Mutex::new(MappedFile::invalid()));
+        let inner_clone = inner.clone();
+
+        let (tx, rx) = mpsc::sync_channel::<LogMsg>(10240);
+
+        thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    LogMsg::Data(bytes) => {
+                        let mut file = inner_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        // invalid 实例的 write 返回 Ok(0)（内容被刻意丢弃），不触发告警。
+                        let _ = file.write(&bytes);
+                    }
+                    LogMsg::Flush(ack) => {
+                        {
+                            let mut file = inner_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = file.flush();
+                        }
+                        let _ = ack.send(());
+                    }
+                }
+            }
+            let mut file = inner_clone.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = file.flush();
+        });
+
+        let consumer = Arc::new(LogConsumer { tx });
+
         {
             let mut list = LOG_CONSUMERS.lock().unwrap_or_else(|e| e.into_inner());
             list.retain(|weak| weak.strong_count() > 0);

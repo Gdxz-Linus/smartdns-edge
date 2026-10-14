@@ -136,28 +136,34 @@ impl FromStr for DnsUrl {
     type Err = DnsUrlParseErr;
 
     fn from_str(url: &str) -> Result<Self, Self::Err> {
-        let mut url = url.to_lowercase();
-        match url.as_str() {
-            "system" => {
-                return Ok(Self {
-                    name: url.clone().into(),
-                    proto: ProtocolConfig::System,
-                    host: Host::Domain(url),
-                    ..Self::default()
-                });
-            }
-            "dhcp" => {
-                return Ok(Self {
-                    name: url.clone().into(),
-                    proto: ProtocolConfig::Dhcp {
-                        interface: Default::default(),
-                    },
-                    host: Host::Domain(url),
-                    ..Self::default()
-                });
-            }
-            _ => (),
+        // 🔐 P3-6：不对整条 URL 做小写化。
+        // scheme 与域名的大小写规范化由下面的 Url::parse 完成（RFC 3986：scheme/host
+        // 不区分大小写，parse 后统一小写；path 是大小写敏感的，必须原样保留——
+        // DoH 服务器可能区分 /dns-query 与 /DNS-QUERY 两个端点）。
+        // 原实现整条 to_lowercase 会把用户写的 DoH 路径改写错。
+        // system / dhcp 这两个裸关键字仍需大小写宽容，单独匹配。
+        let trimmed = url.trim();
+        if trimmed.eq_ignore_ascii_case("system") {
+            let url = trimmed.to_lowercase();
+            return Ok(Self {
+                name: url.clone().into(),
+                proto: ProtocolConfig::System,
+                host: Host::Domain(url),
+                ..Self::default()
+            });
         }
+        if trimmed.eq_ignore_ascii_case("dhcp") {
+            let url = trimmed.to_lowercase();
+            return Ok(Self {
+                name: url.clone().into(),
+                proto: ProtocolConfig::Dhcp {
+                    interface: Default::default(),
+                },
+                host: Host::Domain(url),
+                ..Self::default()
+            });
+        }
+        let mut url = trimmed.to_string();
         if !url.contains("://") {
             url.insert_str(0, "udp://")
         }
@@ -827,6 +833,28 @@ mod tests {
         assert_eq!(url.to_string(), "https://dns.google/dns-query");
         assert_eq!(*prefer, HttpsPrefer::Auto);
         assert!(url.ip().is_none());
+    }
+
+    /// 🔐 P3-6：DoH 路径大小写敏感，必须原样保留。
+    /// scheme 与域名由 Url::parse 规范化（RFC 3986），path 不得被改写——
+    /// 服务器可能区分 /dns-query 与 /DNS-QUERY 两个端点。
+    #[test]
+    #[cfg(feature = "dns-over-https")]
+    fn test_parse_https_path_case_preserved() {
+        use std::ops::Deref;
+
+        // 大写 scheme + 大写域名 + 混合大小写路径：前两者规范化，路径原样
+        let url = DnsUrl::from_str("HTTPS://DNS.Google/DNS-Query").unwrap();
+        assert_eq!(url.proto, Protocol::Https);
+        assert_eq!(url.name().as_ref(), "dns.google", "域名规范化为小写");
+        let ProtocolConfig::Https { path, .. } = &url.proto else {
+            panic!("expected https protocol config")
+        };
+        assert_eq!(
+            path.deref(),
+            "/DNS-Query",
+            "DoH 路径必须原样保留，不得被小写化"
+        );
     }
 
     #[test]

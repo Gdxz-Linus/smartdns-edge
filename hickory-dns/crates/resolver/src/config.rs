@@ -552,7 +552,10 @@ pub struct ResolverOpts {
     pub case_randomization: bool,
     /// Path to a DNSSEC trust anchor file.
     ///
-    /// If this is provided, `validate` will automatically be set to `true`, enabling DNSSEC validation.
+    /// 🔐 R-P2-9：此字段当前**仅用于触发** `validate = true`（见 `ResolverBuilder::build`），
+    /// 锚点文件**不会被加载**——实际验证始终使用内置的默认根锚
+    /// （`TrustAnchors::default()`）。`TrustAnchors::from_file` 已具备文件加载能力，
+    /// 若未来需要自定义锚点，需在 `build()` 里接线并启用 `text-parsing` feature。
     pub trust_anchor: Option<PathBuf>,
 }
 

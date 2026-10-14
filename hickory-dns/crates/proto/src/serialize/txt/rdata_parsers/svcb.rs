@@ -202,7 +202,10 @@ fn parse_alpn(value: Option<&str>) -> Result<SvcParamValue, ParseError> {
         ParseError::from(ParseErrorKind::Message("expected at least one ALPN code"))
     })?;
 
-    let alpns = parse_list::<String>(value).expect("infallible");
+    // 🔐 R-P2-3：`?` 传播替代 expect("infallible")——parse_list 返回 Result，
+    // 当前 T=String 时确实不会失败，但类型系统允许失败路径存在；
+    // 直接传播消除 panic 路径（对齐上游 hickory main 的修法）。
+    let alpns = parse_list::<String>(value)?;
     Ok(SvcParamValue::Alpn(Alpn(alpns)))
 }
 

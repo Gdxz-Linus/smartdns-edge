@@ -37,7 +37,7 @@ default = ["common"]
 
 homebrew = [ "common" ]
 
-common = ["resolve-cli", "dns-over-tls", "dns-over-https", "dns-over-quic", "dns-over-h3", "mdns", "dnssec", "service", "nft", "nom-recipes-all", "swagger-ui-cdn", "http_client", "serde" ]
+common = ["resolve-cli", "dns-over-tls", "dns-over-https", "dns-over-quic", "dns-over-h3", "mdns", "service", "nft", "nom-recipes-all", "swagger-ui-cdn", "http_client", "serde" ]
 
 future-diagnostic = [
   "dep:console-subscriber"
@@ -83,7 +83,13 @@ service = ["dep:which"]
 
 nft = ["dep:which"]
 
-dnssec = [ "hickory-proto/dnssec-ring", "rustls/ring"]
+# R-P2-9 遗留处置：DNSSEC 验证与本项目“对 DNS 应答做加工”的定位根本冲突
+# （改写/合成的记录没有签名，端到端验签必然失败），且 C 版从无此功能、
+# 验证链路从未实现。去除编译：common 不再启用 dnssec。
+# rustls/ring 的 TLS 后端锁定已并入 dns-over-tls 等 DoT/DoH 开关（行为不变）。
+# 若未来立项 DNSSEC：resolver 启用 __dnssec + proto 启用 text-parsing +
+# build() 调 TrustAnchors::from_file（见修复台账 R-P2-9 遗留记录）。
+# dnssec = [ "hickory-proto/dnssec-ring", "rustls/ring" ] <- 已移除，勿恢复
 
 serde = [ "dep:serde", "dep:serde_json" ]
 
