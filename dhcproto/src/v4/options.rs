@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, iter, net::Ipv4Addr};
 use crate::{
     decoder::{Decodable, Decoder},
     encoder::{Encodable, Encoder},
-    error::{DecodeResult, EncodeResult},
+    error::{DecodeError, DecodeResult, EncodeResult},
     v4::bulk_query,
     v4::{fqdn, relay},
 };
@@ -139,7 +139,7 @@ dhcproto_macros::declare_codes!(
 /// ```rust
 /// use dhcproto::v4;
 ///
-/// let mut msg = v4::Message::default();
+/// let mut msg = dhcproto::v4::Message::default();
 ///  msg.opts_mut()
 ///     .insert(v4::DhcpOption::MessageType(v4::MessageType::Discover));
 ///  msg.opts_mut().insert(v4::DhcpOption::ClientIdentifier(
@@ -638,6 +638,9 @@ fn decode_inner(
         OptionCode::DomainSearch => DomainSearch(decoder.read_domains(len)?),
         OptionCode::TFTPServerAddress => TFTPServerAddress(decoder.read_ipv4(len)?),
         OptionCode::BulkLeaseQueryStatusCode => {
+            if len < 1 {
+                return Err(DecodeError::NotEnoughBytes);
+            }
             let code = decoder.read_u8()?.into();
             // len - 1 because code is included in length
             let message = decoder.read_string(len - 1)?;
@@ -664,7 +667,9 @@ fn decode_inner(
             BulkLeaseQueryDataSource(bulk_query::DataSourceFlags::new(decoder.read_u8()?))
         }
         OptionCode::ClientFQDN => {
-            debug_assert!(len >= 3);
+            if len < 3 {
+                return Err(DecodeError::NotEnoughBytes);
+            }
             let flags = decoder.read_u8()?.into();
             let rcode1 = decoder.read_u8()?;
             let rcode2 = decoder.read_u8()?;
@@ -693,7 +698,20 @@ fn decode_inner(
                 let mut dest = [0u8; 4];
                 dest[0..sig_bytes].clone_from_slice(route_dec.read_slice(sig_bytes)?);
 
-                let dest = Ipv4Net::new(dest.into(), prefix_len).unwrap();
+                // 畸形防护（P1-3/R-P1-3）：先按前缀掩零主机位再构造网络；
+                // host 位非零会让 Ipv4Net::new 返回 Err，此处向上传播而不是 panic。
+                let mask = if prefix_len == 0 {
+                    0u32
+                } else {
+                    u32::MAX << (32 - prefix_len as u32)
+                };
+                let dest_u32 = u32::from_be_bytes(dest) & mask;
+                let dest = Ipv4Net::new(Ipv4Addr::from(dest_u32), prefix_len).map_err(|e| {
+                    DecodeError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid classless static route prefix: {e}"),
+                    ))
+                })?;
                 let gw = route_dec.read_ipv4(4)?;
 
                 routes.push((dest, gw));
@@ -1581,5 +1599,85 @@ mod tests {
             ],
             8,
         )
+    }
+    // ── 畸形输入防护回归测试（P1-3 / R-P1-3，2026-10-13）──
+
+    /// option 121：前缀 23、host 位非零（第 3 字节最低位为 1）。
+    /// 修复前：Ipv4Net::new(...).unwrap() 直接 panic；修复后：返回 Err。
+    #[test]
+    fn test_classless_static_route_host_bits_masked() -> Result<()> {
+        // 前缀 23、host 位非零（第 3 字节最低位为 1）。
+        // 修复前：Ipv4Net::new(...).unwrap() 直接 panic；
+        // 修复后：按前缀掩零 host 位（1.1.1.1 → 1.1.0.0/23），宽容解析。
+        let data = [121u8, 8, 23, 1, 1, 1, 10, 0, 0, 1];
+        let mut dec = Decoder::new(&data);
+        let opt = DhcpOption::decode(&mut dec)?;
+        match opt {
+            DhcpOption::ClasslessStaticRoute(routes) => {
+                assert_eq!(routes.len(), 1);
+                assert_eq!(routes[0].0.to_string(), "1.1.0.0/23");
+                assert_eq!(routes[0].1, std::net::Ipv4Addr::new(10, 0, 0, 1));
+            }
+            other => panic!("wrong option: {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// option 121：前缀按字节对齐（/24）时仍能正常解析（回归保护）。
+    #[test]
+    fn test_classless_static_route_aligned_prefix_ok() -> Result<()> {
+        // prefix 24, dest [192,168,1,0]（3 字节）, gw [10,0,0,1]
+        let data = [121u8, 8, 24, 192, 168, 1, 10, 0, 0, 1];
+        let mut dec = Decoder::new(&data);
+        let opt = DhcpOption::decode(&mut dec)?;
+        match opt {
+            DhcpOption::ClasslessStaticRoute(routes) => {
+                assert_eq!(routes.len(), 1);
+                assert_eq!(routes[0].0.to_string(), "192.168.1.0/24");
+                assert_eq!(routes[0].1, std::net::Ipv4Addr::new(10, 0, 0, 1));
+            }
+            other => panic!("wrong option: {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// option 151（BulkLeaseQueryStatusCode）长度为 0：修复前 release 下静默截断、debug 下 panic。
+    #[test]
+    fn test_bulk_lease_query_status_code_len0_is_error() -> Result<()> {
+        // code=151, len=0
+        let data = [151u8, 0];
+        let mut dec = Decoder::new(&data);
+        let opt = DhcpOption::decode(&mut dec);
+        assert!(opt.is_err(), "len=0 option 151 must be an error");
+        Ok(())
+    }
+
+    /// option 81（ClientFQDN）长度不足 3：修复前下溢。
+    #[test]
+    fn test_client_fqdn_len2_is_error() -> Result<()> {
+        // code=81, len=2, 数据 2 字节（不够 flags+rcode1+rcode2 的 3 字节）
+        let data = [81u8, 2, 0, 0];
+        let mut dec = Decoder::new(&data);
+        let opt = DhcpOption::decode(&mut dec);
+        assert!(opt.is_err(), "len<3 option 81 must be an error");
+        Ok(())
+    }
+
+    /// 魔数不匹配的报文必须被拒绝（v4/mod.rs Message::decode）。
+    #[test]
+    fn test_invalid_magic_cookie_is_error() -> Result<()> {
+        let mut msg = crate::v4::Message::default();
+        msg.set_opts(
+            vec![DhcpOption::MessageType(crate::v4::MessageType::Offer)]
+                .into_iter()
+                .collect(),
+        );
+        let mut bytes = msg.to_vec()?;
+        println!("total len: {}, bytes[236..240] = {:?}", bytes.len(), &bytes[236..240]);
+        // 破坏 magic cookie（字节 236..240）
+        bytes[236] ^= 0xff;
+        let res = crate::v4::Message::from_bytes(&bytes);
+        assert!(res.is_err(), "corrupted magic cookie must be rejected");
+        Ok(())
     }
 }

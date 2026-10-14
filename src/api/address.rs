@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 // 🌟 修复：引入读写锁，细化并发粒度
 use std::sync::LazyLock;
@@ -76,20 +76,84 @@ pub fn routes() -> StatefulRouter {
 }
 
 #[utoipa::path(get, path = "/addresses", tag = "Addresses")]
-async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<AddressRule>> {
+async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<SourcedAddressRule>> {
     // 🌟 抢占共享读锁：多个 GET 请求可完全并发，只有写操作时才会被短暂阻塞
     let _guard = CONFIG_FILE_LOCK.read().await;
 
-    let groups = state
-        .app
-        .cfg()
-        .await
-        .rule_groups()
-        .get("default")
-        .map(|group| group.address_rules.clone())
-        .unwrap_or_default();
+    // 🔐 P2-11：GET 与写接口（PUT/DELETE）对齐数据源 —— 原来取内存 default 组
+    // （含主配置规则），写接口却只认 managed/address.conf，表现为"看得到、改不掉"。
+    // 现在分别列出两个来源，每条带 `source` 字段：
+    //   * `managed` —— 管理接口写入的规则，可改可删（来自 managed/address.conf，即写接口的数据源）；
+    //   * `main`    —— 主配置里的规则，只读；对它调 PUT/DELETE 会得到 409 与说明。
+    let cfg = state.app.cfg().await;
 
-    Json(groups.into())
+    let mut rules: Vec<SourcedAddressRule> = Vec::new();
+
+    // managed 来源：直接读文件（写接口的数据源），与内存无关
+    if let Some(managed_dir) = cfg.managed_dir() {
+        let file = managed_dir.join("address.conf");
+        if let Ok(text) = tokio::fs::read_to_string(&file).await {
+            if let Ok((_, config)) = ConfigFile::parse(&text) {
+                for line in config.iter() {
+                    if let ConfigLine::Config {
+                        config: ConfigItem::Address(rule),
+                        ..
+                    } = line
+                    {
+                        rules.push(SourcedAddressRule {
+                            source: AddressRuleSource::Managed,
+                            rule: rule.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // main 来源：主配置文件里的 address 规则（不能按内存 default 组取 ——
+    // 重载后 managed 规则也在里面，会重复出现；P2-11 实测发现的修正）
+    if let Some(path) = cfg.conf_file() {
+        if let Ok(text) = tokio::fs::read_to_string(path).await {
+            if let Ok((_, config)) = ConfigFile::parse(&text) {
+                let managed_domains: std::collections::HashSet<_> = rules
+                    .iter()
+                    .map(|r| r.rule.domain.clone())
+                    .collect();
+                for line in config.iter() {
+                    if let ConfigLine::Config {
+                        config: ConfigItem::Address(rule),
+                        ..
+                    } = line
+                    {
+                        if !managed_domains.contains(&rule.domain) {
+                            rules.push(SourcedAddressRule {
+                                source: AddressRuleSource::Main,
+                                rule: rule.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(rules.into())
+}
+
+/// 🔐 P2-11：地址规则的来源（`managed` = 管理接口写入、可写；`main` = 主配置、只读）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, crate::api::ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum AddressRuleSource {
+    Managed,
+    Main,
+}
+
+/// 🔐 P2-11：带来源的地址规则（`rule` 字段平铺，兼容原有字段名）
+#[derive(Debug, Clone, Serialize, Deserialize, crate::api::ToSchema)]
+struct SourcedAddressRule {
+    #[serde(flatten)]
+    rule: AddressRule,
+    source: AddressRuleSource,
 }
 
 #[utoipa::path(post, path = "/addresses", tag = "Addresses")]
@@ -152,6 +216,9 @@ async fn create(
         safe_write_config(&file, format!("{config}")).await?;
     }
 
+    // 🔐 P2-10：写入成功后立即让规则生效（原来只写文件、不触发加载，"说成功但没生效"）
+    apply_written_rules(&state).await?;
+
     Ok(StatusCode::CREATED)
 }
 
@@ -173,6 +240,14 @@ async fn update(
     // 🌟 抢占排他写锁：写入期间，其他读写请求全部等待
     let _guard = CONFIG_FILE_LOCK.write().await;
 
+    // 🔐 P2-11：域名若只存在于主配置（内存规则），写接口改不了它 —— 返回 409 说明去哪改。
+    // （managed 文件不存在时不代表"规则不存在"：可能只写在主配置里。）
+    if main_config_has_address(&cfg, &rule.domain).await {
+        return Err(ApiError::Conflict(format!(
+            "address rule for domain {} is defined in the main configuration file and is read-only here; edit the configuration file instead",
+            rule.domain
+        )));
+    }
     let file = managed_dir.join("address.conf");
     if !file.exists() {
         return Err(ApiError::NotFound(format!(
@@ -206,6 +281,9 @@ async fn update(
 
     safe_write_config(&file, format!("{config}")).await?;
 
+    // 🔐 P2-10：写入成功后立即让规则生效
+    apply_written_rules(&state).await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -224,6 +302,12 @@ async fn delete(
     // 🌟 抢占排他写锁：写入期间，其他读写请求全部等待
     let _guard = CONFIG_FILE_LOCK.write().await;
 
+    // 🔐 P2-11：主配置里的规则只读，返回 409 说明去哪删。
+    if main_config_has_address(&cfg, &domain).await {
+        return Err(ApiError::Conflict(format!(
+            "address rule for domain {domain} is defined in the main configuration file and is read-only here; edit the configuration file instead"
+        )));
+    }
     if !managed_dir.exists() {
         return Err(ApiError::NotFound(format!("Domain {domain} not found")));
     }
@@ -258,7 +342,62 @@ async fn delete(
 
     safe_write_config(&file, format!("{config}")).await?;
 
+    // 🔐 P2-10：删除成功后立即让变更生效
+    apply_written_rules(&state).await?;
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+
+
+/// 🔐 P2-11：该域名的 address 规则是否写在**主配置文件**里（用于写接口的 409 判定）。
+///
+/// 必须查主配置文件本身，而不是内存 default 组 —— 重载后 managed 规则也会进 default 组，
+/// 按内存判断会把 managed 规则也误判成"主配置只读"（实测发现的修正）。
+async fn main_config_has_address(
+    cfg: &crate::dns_conf::RuntimeConfig,
+    domain: &crate::config::Domain,
+) -> bool {
+    let Some(path) = cfg.conf_file() else {
+        return false;
+    };
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return false;
+    };
+    let Ok((_, config)) = ConfigFile::parse(&text) else {
+        return false;
+    };
+    config.iter().any(|line| {
+        matches!(
+            line,
+            ConfigLine::Config {
+                config: ConfigItem::Address(rule),
+                ..
+            } if rule.domain == *domain
+        )
+    })
+}
+
+/// 🔐 P2-10：写操作成功后让规则真正进入解析链。
+///
+/// 背景：POST/PUT/DELETE 只写 `managed/address.conf`，而该文件只在启动与手动
+/// reload 时被加载（dns_conf.rs 的 managed 目录加载段）——于是接口返回 2xx、
+/// 文件也写了，解析行为却不变（"说成功了但没生效"）。
+///
+/// 这里在写成功后调用与 `POST /api/config/reload` 同一个 `app.reload()`：
+/// 重载是异步任务、期间老规则继续服务，不阻塞解析。
+///
+/// 语义约定：**文件已写入**，重载失败时返回 500 并说明"规则已保存但生效失败，
+/// 请检查配置后手动 POST /api/config/reload"——绝不带着假成功返回 2xx。
+async fn apply_written_rules(state: &Arc<ServeState>) -> Result<(), ApiError> {
+    state
+        .app
+        .reload()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(
+            "the rule was saved to disk but applying it failed: {e:#}; \
+             fix the problem and POST /api/config/reload"
+        )))
 }
 
 // 🌟 核心修复：原子化配置文件写入，杜绝断电/强杀导致的配置清零问题

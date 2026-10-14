@@ -353,7 +353,10 @@ impl MappedFile {
                 };
                 match res {
                     Ok(mut file) => {
-                        self.len = file.metadata().unwrap().len();
+                        // 🔐 P3-4/P3-13：刚打开的文件 metadata() 理论上不会失败，但在外部
+                        // 删除/重命名的竞态窗口里可能失败 —— 这里按"空文件"处理（len=0，
+                        // 有前导字节则重写），与同模块其余容错口径一致，不再 unwrap panic。
+                        self.len = file.metadata().map(|m| m.len()).unwrap_or(0);
                         if self.len == 0 && self.peamble_bytes.is_some() {
                             let bytes = self.peamble().unwrap();
                             self.len = file.write(bytes)? as u64;

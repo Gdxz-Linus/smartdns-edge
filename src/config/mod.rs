@@ -142,6 +142,14 @@ pub struct Config {
     pub bind_cert_key_file: Option<PathBuf>,
     /// SSL Certificate key file password
     pub bind_cert_key_pass: Option<String>,
+    /// 🔐 P2-1：bind-cert-generate 三态（None=auto，Some(true)=yes，Some(false)=no）
+    pub bind_cert_generate: Option<bool>,
+    /// 🔐 P2-1：自签证书有效期（天）；对齐 C 版 bind-cert-validity-days
+    pub bind_cert_validity_days: Option<u64>,
+    /// 🔐 P2-1：追加到证书 SAN 的自定义域名（可重复累加）；对齐 C 版 bind-cert-san
+    pub bind_cert_san: Vec<String>,
+    /// 🔐 P2-1：根 CA 私钥落盘位置；对齐 C 版 bind-cert-root-key-file
+    pub bind_cert_root_key_file: Option<PathBuf>,
 
     /// tcp connection idle timeout
     ///

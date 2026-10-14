@@ -208,9 +208,15 @@ impl IntoResponse for crate::dns::DnsError {
         // 拼出来的就是坏 JSON；而且细节直接回显等于把内部信息（含服务器路径）送给调用方。
         // 这里用 serde_json 生成（自动转义），详情只写服务端日志。
         crate::log::warn!("DoH query failed: {self:?}");
+        // 🔐 P2-12：与上面 ApiError::Internal 的脱敏口径对齐 —— 此前的注释声称
+        // "细节只写服务端日志"，但响应体里仍是 `self.to_string()` 的原文，
+        // 会把上游地址、传输协议等内部信息回显给未鉴权调用方（/dns-query 是公开路由）。
+        // 现在对外只回固定文案，完整错误只进日志。
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": self.to_string() })),
+            Json(serde_json::json!({
+                "error": "upstream DNS query failed; see the server log for details"
+            })),
         )
             .into_response()
     }
@@ -253,7 +259,12 @@ impl<T> From<Vec<T>> for DataListPayload<T> {
 //
 // 原实现在这里留了一串写死的默认口令：口令公开写在源码里，
 // 等于全世界装了本项目的人共用一个管理密码。
-static API_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+// 🔐 P2-9：口令从 OnceLock 改为 RwLock<Option<String>> ——
+// OnceLock 只在第一次生效，热重载改了配置里的 api-token 后新口令到不了这里，
+// 旧口令继续有效、新口令不生效，必须重启进程才能轮换（"改了不生效"类缺陷）。
+// RwLock 读路径每请求一次、无写竞争；None 表示"尚未初始化"（首次访问时按原取值顺序生成）。
+static API_TOKEN: std::sync::RwLock<Option<std::sync::Arc<String>>> =
+    std::sync::RwLock::new(None);
 static API_TOKEN_FROM_USER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -270,7 +281,19 @@ fn generate_api_token() -> String {
 pub fn set_configured_token(token: Option<String>) {
     if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
         API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = API_TOKEN.set(token);
+        // 🔐 P2-9：热重载时这里会被再次调用 —— 口令轮换必须生效，并留一条可确认的日志。
+        let rotated = {
+            let guard = API_TOKEN.read().unwrap();
+            match guard.as_deref() {
+                Some(old) if old.as_str() == token.as_str() => None,
+                Some(old) => Some(old.clone()),
+                None => None,
+            }
+        };
+        *API_TOKEN.write().unwrap() = Some(std::sync::Arc::new(token));
+        if let Some(_old) = rotated {
+            crate::log::info!("management console token has been rotated (the previous token no longer works)");
+        }
     }
 }
 
@@ -283,15 +306,22 @@ pub fn has_configured_token(config_token: Option<&str>) -> bool {
 }
 
 /// 当前生效的口令：配置 → 环境变量 → 随机生成（并打印一次提示）
-pub fn api_token() -> &'static str {
-    API_TOKEN.get_or_init(|| {
-        if let Ok(token) = std::env::var("SMARTDNS_API_TOKEN")
-            && !token.trim().is_empty()
-        {
-            API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
-            return token;
-        }
-
+pub fn api_token() -> std::sync::Arc<String> {
+    // 快路径：已初始化直接读（鉴权中间件每请求一次）
+    if let Some(token) = API_TOKEN.read().unwrap().clone() {
+        return token;
+    }
+    // 慢路径：初始化（配置口令在启动时经 set_configured_token 登记；这里兜底环境变量/随机）
+    let mut guard = API_TOKEN.write().unwrap();
+    if let Some(token) = guard.clone() {
+        return token;
+    }
+    let token = if let Ok(token) = std::env::var("SMARTDNS_API_TOKEN")
+        && !token.trim().is_empty()
+    {
+        API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
+        token
+    } else {
         let token = generate_api_token();
         crate::log::warn!(
             "the management console has no token configured, so one was generated: {token} (to make it permanent, add this line to the configuration: api-token {token})"
@@ -299,7 +329,10 @@ pub fn api_token() -> &'static str {
         println!("[smartdns] management console token (randomly generated for this run): {token}");
         println!("[smartdns] to make it permanent, add this line to the configuration file: api-token {token}");
         token
-    })
+    };
+    let token = std::sync::Arc::new(token);
+    *guard = Some(token.clone());
+    token
 }
 
 /// 口令是否来自用户自己的配置/环境变量（而不是自动生成的）
@@ -739,5 +772,39 @@ mod auth_limit_tests {
         assert_eq!(auth_record_failure(ip), 1, "成功后计数应当归零");
         auth_record_success(ip);
         auth_record_success(same_seg);
+    }
+}
+
+
+#[cfg(test)]
+mod p2_9_tests {
+    use super::*;
+
+    /// 🔐 P2-9：热重载改 api-token 后，新口令必须立即生效、旧口令立即失效；
+    /// 空/空白口令不覆盖已有口令。
+    /// 全局口令是共享状态，故合并为一个测试按顺序验证完整序列。
+    #[test]
+    fn test_token_rotation_on_reload() {
+        // 首次登记
+        set_configured_token(Some("token-first".into()));
+        assert_eq!(api_token().as_str(), "token-first");
+
+        // 模拟热重载：改口令
+        set_configured_token(Some("token-second".into()));
+        assert_eq!(
+            api_token().as_str(),
+            "token-second",
+            "热重载后的新口令必须立即生效（P2-9 修复点）"
+        );
+
+        // 再改（确认轮换可重复）
+        set_configured_token(Some("token-third".into()));
+        assert_eq!(api_token().as_str(), "token-third");
+
+        // 空/空白口令不覆盖
+        set_configured_token(None);
+        assert_eq!(api_token().as_str(), "token-third", "空口令不应覆盖已有口令");
+        set_configured_token(Some("   ".into()));
+        assert_eq!(api_token().as_str(), "token-third", "纯空白口令不应覆盖已有口令");
     }
 }

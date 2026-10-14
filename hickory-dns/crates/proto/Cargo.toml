@@ -130,6 +130,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints]
 workspace = true
 
+# 2026-10-13 R-P1-2：恢复上游 dev-dependencies（内嵌时被删，使内联测试无法编译）。
+# 与上游 0.26.0-alpha.1 的 crates/proto/Cargo.toml [dev-dependencies] 一致。
+[dev-dependencies]
+futures-executor = { workspace = true, default-features = false, features = ["std"] }
+test-support.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tracing-subscriber.workspace = true
+
 [package.metadata.cargo-all-features]
 skip_optional_dependencies = true
 max_combination_size = 2

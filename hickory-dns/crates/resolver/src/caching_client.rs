@@ -434,7 +434,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::*;
 
-    use crate::proto::op::{Message, Query};
+    use crate::proto::op::{Message, OpCode, Query};
     use crate::proto::rr::rdata::{NS, SRV};
     use crate::proto::rr::{Name, Record};
     use futures_executor::block_on;
@@ -483,7 +483,11 @@ mod tests {
             u32::MAX,
             RData::A(A::new(127, 0, 0, 1)),
         ));
-        cache.insert(query.clone(), Ok(message), Instant::now());
+        cache.insert(
+            query.clone(),
+            Ok(records_to_lookup(query.clone(), message.answers(), Instant::now())),
+            Instant::now(),
+        );
 
         let client = mock(vec![empty()]);
         let client = CachingClient::with_cache(cache, client, false);
@@ -546,7 +550,7 @@ mod tests {
 
     #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn cname_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(
             Name::from_str("www.example.com.").unwrap(),
             RecordType::A,
@@ -561,7 +565,7 @@ mod tests {
 
     #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn srv_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(
             Name::from_str("_443._tcp.www.example.com.").unwrap(),
             RecordType::SRV,
@@ -581,7 +585,7 @@ mod tests {
 
     #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn ns_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(
             Name::from_str("www.example.com.").unwrap(),
             RecordType::NS,
@@ -825,7 +829,7 @@ mod tests {
         // expecting no queries to be performed
         let mut client = CachingClient::with_cache(lru, mock(vec![error()]), false);
 
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.insert_answers(vec![Record::from_rdata(
             Name::from_str("ttl.example.com.").unwrap(),
             first,

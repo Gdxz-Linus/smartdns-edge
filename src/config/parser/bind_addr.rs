@@ -260,10 +260,26 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             // 该监听单独开启访问控制（不匹配 client-rules 的客户端回 REFUSED）
             "acl" => opts.acl = Some(true),
             // 该监听单独设置连接上限（用于"内网宽松、公网收紧"这类部署）
-            "max-connections" => opts.max_connections = v.and_then(|s| s.trim().parse().ok()),
-            "max-connections-per-ip" => {
-                opts.max_connections_per_ip = v.and_then(|s| s.trim().parse().ok())
-            }
+            // 🔐 P2-2：非法值不能静默吞掉 —— `parse().ok()` 会把手误（如 `2ooo`）变成 None，
+            // 上限悄悄回落到全局/自动值，资源保护无声失效且无任何线索。这里改为明确告警并忽略该选项。
+            "max-connections" => match v.map(str::trim).map(str::parse::<usize>) {
+                Some(Ok(n)) => opts.max_connections = Some(n),
+                Some(Err(err)) => crate::log::error!(
+                    "invalid `-max-connections` value on a listener ({:?}): {err}; ignored",
+                    v
+                ),
+                None => crate::log::warn!("`-max-connections` on a listener has no value; ignored"),
+            },
+            "max-connections-per-ip" => match v.map(str::trim).map(str::parse::<usize>) {
+                Some(Ok(n)) => opts.max_connections_per_ip = Some(n),
+                Some(Err(err)) => crate::log::error!(
+                    "invalid `-max-connections-per-ip` value on a listener ({:?}): {err}; ignored",
+                    v
+                ),
+                None => {
+                    crate::log::warn!("`-max-connections-per-ip` on a listener has no value; ignored")
+                }
+            },
             "no-serve-expired" => opts.no_serve_expired = Some(true),
             "no-dualstack-selection" => opts.no_dualstack_selection = Some(true),
             "force-aaaa-soa" => opts.force_aaaa_soa = Some(true),
@@ -298,6 +314,26 @@ fn parse_ssl_config<'b>(options: &Options<'b>) -> (Options<'b>, SslConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_listener_max_connections_option() {
+        // 🔐 P2-2：合法值正常生效
+        let (_, cfg) = UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections 123").unwrap();
+        assert_eq!(cfg.opts.max_connections, Some(123));
+
+        let (_, cfg) =
+            UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections-per-ip 45").unwrap();
+        assert_eq!(cfg.opts.max_connections_per_ip, Some(45));
+
+        // 🔐 P2-2：非法值不再被 `parse().ok()` 静默吞掉 —— 解析失败时保持 None
+        // （并打一条 error 日志），行为与"未配置"一致但日志可查。
+        let (_, cfg) = UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections 2ooo").unwrap();
+        assert_eq!(cfg.opts.max_connections, None, "非法值必须被拒绝而不是静默取值");
+
+        let (_, cfg) =
+            UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections-per-ip abc").unwrap();
+        assert_eq!(cfg.opts.max_connections_per_ip, None);
+    }
 
     #[test]
     fn test_parse_bind_addr() {

@@ -83,21 +83,86 @@ pub fn serve(
         ssl_config: &SslConfig,
         certificate_file: Option<&Path>,
         certificate_key_file: Option<&Path>,
+        key_passphrase: Option<&str>,
+        generate: Option<bool>,
+        server_name: Option<&str>,
+        cert_dir: &Path,
+        root_key_path: Option<&Path>,
+        append_san: Option<&str>,
+        validity_days: Option<i64>,
         typ: &'static str,
     ) -> Result<Arc<TlsServerCertResolver>, crate::Error> {
-        let certificate_file = ssl_config
+        let mut certificate_file = ssl_config
             .certificate
             .as_deref()
-            .or(certificate_file)
-            .ok_or(crate::Error::CertificatePathNotDefined(typ))?;
-        let certificate_key_file = ssl_config
+            .or(certificate_file);
+        let mut certificate_key_file = ssl_config
             .certificate_key
             .as_deref()
-            .or(certificate_key_file)
+            .or(certificate_key_file);
+
+        // 🔐 P2-1 配套：自签名证书自动生成（对齐 C 版 bind-cert-generate 三态语义）。
+        // auto（未配置）= 证书与私钥路径都未配置时生成到默认位置；yes = 强制（文件已存在则幂等跳过）；
+        // no = 不生成。用户显式配置了任一路径时绝不生成、绝不覆盖。
+        let mut generated_paths: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+        if (certificate_file.is_none() || certificate_key_file.is_none())
+            && generate != Some(false)
+        {
+            let cert_path = cert_dir.join("smartdns-cert.pem");
+            let key_path = cert_dir.join("smartdns-key.pem");
+            match crate::cert_gen::generate_self_signed_chain(
+                &cert_path,
+                &key_path,
+                root_key_path,
+                server_name,
+                append_san,
+                validity_days,
+            ) {
+                Ok(()) => {
+                    generated_paths = Some((cert_path, key_path));
+                }
+                Err(err) => {
+                    crate::log::error!(
+                        "failed to generate a self-signed certificate for {typ}: {err}"
+                    );
+                    // 生成失败继续走原有报错路径（缺证书路径）
+                }
+            }
+        }
+        if let Some((cert_path, key_path)) = &generated_paths {
+            certificate_file = Some(cert_path.as_path());
+            certificate_key_file = Some(key_path.as_path());
+        }
+
+        let certificate_file = certificate_file
+            .ok_or(crate::Error::CertificatePathNotDefined(typ))?;
+        let certificate_key_file = certificate_key_file
             .ok_or(crate::Error::CertificateKeyPathNotDefined(typ))?;
-        let resolver = TlsServerCertResolver::new(certificate_file, certificate_key_file)?;
+        // 🔐 P2-1：私钥口令取自全局配置（对齐 C 版语义：口令全局一个，随证书三件套作用于全部监听）
+        let resolver =
+            TlsServerCertResolver::new(certificate_file, certificate_key_file, key_passphrase)?;
         Ok(Arc::new(resolver))
     }
+
+    // 🔐 P2-1：私钥口令（全局配置 bind-cert-key-pass；对齐 C 版：全局一个，作用于全部监听）
+    let key_passphrase = cfg.bind_cert_key_pass();
+
+    // 🔐 P2-1：server_name 用于证书 SAN（去掉尾部根点）
+    let server_name_san = {
+        let n = cfg.server_name();
+        let s = n.to_string();
+        let s = s.trim_end_matches('.').to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+
+    // 🔐 P2-1：自动生成证书的默认落盘目录（配置文件所在目录；无则当前目录）
+    let cert_dir = cfg
+        .conf_dir()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let cert_root_key_path = cfg.bind_cert_root_key_file.as_deref();
+    let cert_append_san = cfg.bind_cert_san.join(",");
+    let cert_validity_days = cfg.bind_cert_validity_days.map(|d| d as i64);
 
     let token = match bind_addr_config {
         BindAddrConfig::Udp(bind_addr_config) => {
@@ -156,6 +221,13 @@ pub fn serve(
                 ssl_config,
                 certificate_file,
                 certificate_key_file,
+                key_passphrase,
+                cfg.bind_cert_generate,
+                server_name_san.as_deref(),
+                &cert_dir,
+                cert_root_key_path,
+                Some(cert_append_san.as_str()),
+                cert_validity_days,
                 LISTENER_TYPE,
             )?;
 
@@ -197,6 +269,13 @@ pub fn serve(
                 ssl_config,
                 certificate_file,
                 certificate_key_file,
+                key_passphrase,
+                cfg.bind_cert_generate,
+                server_name_san.as_deref(),
+                &cert_dir,
+                cert_root_key_path,
+                Some(cert_append_san.as_str()),
+                cert_validity_days,
                 LISTENER_TYPE,
             )?;
 
@@ -233,6 +312,13 @@ pub fn serve(
                 ssl_config,
                 certificate_file,
                 certificate_key_file,
+                key_passphrase,
+                cfg.bind_cert_generate,
+                server_name_san.as_deref(),
+                &cert_dir,
+                cert_root_key_path,
+                Some(cert_append_san.as_str()),
+                cert_validity_days,
                 LISTENER_TYPE,
             )?;
 
@@ -261,6 +347,13 @@ pub fn serve(
                 ssl_config,
                 certificate_file,
                 certificate_key_file,
+                key_passphrase,
+                cfg.bind_cert_generate,
+                server_name_san.as_deref(),
+                &cert_dir,
+                cert_root_key_path,
+                Some(cert_append_san.as_str()),
+                cert_validity_days,
                 LISTENER_TYPE,
             )?;
 

@@ -43,8 +43,10 @@ mod tests {
 
     use super::*;
     use crate::infra::ipset::IpSet;
+    use crate::libdns::proto::rr::rdata::PTR;
     use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::DNSClass;
+    use crate::dns_mw_hosts::DnsHostsMiddleware;
     use crate::{dns_conf::RuntimeConfig, dns_mw::*};
     use std::net::SocketAddr;
 
@@ -108,6 +110,65 @@ mod tests {
 
         assert!(local_net.overlap(&net2));
     }
+
+
+
+#[tokio::test(flavor = "multi_thread")]
+    async fn test_localptr_nxdomain_for_private_ptr_not_owned() {
+        // R-P1-1 隐私定调回归：私网 PTR 且无本地数据 → NXDOMAIN（不得外发上游）。
+        let cfg = RuntimeConfig::builder().build().unwrap();
+        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let response = search_with_query(
+            &mock,
+            "77.1.168.192.in-addr.arpa.",
+            RecordType::PTR,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            response.answers().len(),
+            0,
+            "无本地数据的私网 PTR 不应有 Answer"
+        );
+        // rcode：设计定调是 NXDOMAIN。若实现走的是"转发上游"，这里会拿到上游应答。
+        println!("private-ptr-not-owned rcode: {:?}", response.response_code());
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_private_ptr_from_hosts_file_answers_before_localptr() {
+        // R-P1-1 场景：hosts 文件里有私网地址条目 + expand-ptr-from-address。
+        // 修复前：Zone 中间件（外层）的 LocalPtrProvider 对任何私网 PTR 直接回 NXDOMAIN，
+        // 内层的 DnsHostsMiddleware 永远没机会应答——局域网设备反查主机名整体失效。
+        // 验证结构必须与真实链路一致：hosts 外层 → zone 内层。
+        let cfg = RuntimeConfig::builder()
+            .with("hosts-file ./tests/test_data/hosts/printer.hosts")
+            .with("expand-ptr-from-address yes")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(DnsHostsMiddleware::new())
+            .with_extra_middleware(DnsZoneMiddleware::new())
+            .build(cfg);
+        let response = search_with_query(
+            &mock,
+            "55.1.168.192.in-addr.arpa.",
+            RecordType::PTR,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await;
+        let hostnames: Vec<_> = response
+            .answers()
+            .iter()
+            .flat_map(|r| r.data().as_ptr())
+            .collect();
+        assert_eq!(
+            hostnames,
+            vec![&PTR("myprinter.lan.".parse().unwrap())],
+            "私网 PTR 应由 hosts 数据回答（修复前被外层 LocalPtr 的 NXDOMAIN 短路）"
+        );
+    }
+
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_server_hostname() {

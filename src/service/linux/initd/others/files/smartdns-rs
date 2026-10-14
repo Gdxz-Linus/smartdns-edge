@@ -26,7 +26,11 @@
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
 
-. /etc/default/smartdns
+# 🔐 P2-14：安装器从不创建 /etc/default/smartdns，直接 source 会让 SMART_DNS_OPTS
+# 处于未定义状态（裸跑 smartdns、无配置无 pidfile，然后卡死在等待循环）。
+# 现在文件存在才加载，并给默认参数：读默认配置路径 + 写 pidfile（等待循环依赖它）。
+[ -r /etc/default/smartdns ] && . /etc/default/smartdns
+SMART_DNS_OPTS="${SMART_DNS_OPTS:--c /etc/smartdns/smartdns.conf -p /var/run/smartdns.pid}"
 SMARTDNS=/usr/sbin/smartdns
 PIDFILE=/var/run/smartdns.pid
 
@@ -34,15 +38,26 @@ test -x $SMARTDNS || exit 5
 
 case $1 in
 start)
-	# 🔐 P2：这里**必须**不加引号 —— $SMART_DNS_OPTS 是"多个参数拼成的一个串"，
+	# 🔐 P2-14：这里**必须**不加引号 —— $SMART_DNS_OPTS 是"多个参数拼成的一个串"，
 	# 加了引号就整串被当成"一个"参数，进程启动必失败（debian 那份脚本也是不加引号的）。
 	# shellcheck disable=SC2086
-	$SMARTDNS $SMART_DNS_OPTS
+	# 🔐 P2-14：程序不支持自守护进程（cli.rs 明确提示 foreground），必须后台化启动，
+	# 否则 service start 永远阻塞在启动行，等待循环根本执行不到。
+	$SMARTDNS $SMART_DNS_OPTS &
+		# 🔐 P2-14：等待循环必须有超时 —— 原实现无上限，进程启动失败（端口被占、
+		# 配置错误、pidfile 没写出）时 service start 永久挂起。60 秒（120 次 0.5 秒）。
+		TIMEOUT=60
+		ELAPSED=0
 		while true; do
 			if [ -e "$PIDFILE" ]; then
 				break;
 			fi
+			if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+				echo "start smartdns server failed (timed out waiting for pidfile after ${TIMEOUT}s)."
+				exit 1
+			fi
 			sleep .5
+			ELAPSED=$((ELAPSED + 1))
 		done
 		PID="$(cat $PIDFILE 2>/dev/null)"
 		if [ -z "$PID" ]; then

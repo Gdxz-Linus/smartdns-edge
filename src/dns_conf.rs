@@ -1156,6 +1156,37 @@ impl RuntimeConfig {
         &self.rule_groups
     }
 
+    /// 🔐 P2-5：检测"同一规则组同时配置 dns64 与 force-AAAA-SOA（或全局 force-AAAA-SOA
+    /// 已开启）"的矛盾配置，打一条 WARN。
+    ///
+    /// 语义定调：force-AAAA-SOA 是"不给 AAAA"的直接指令，优先于 dns64 合成——
+    /// 冲突时该组的 dns64 不起作用（DNS64 中间件在应答带压制标记时跳过合成）。
+    /// 这条告警让矛盾配置在加载期就被看见（典型场景：网络从双栈向 IPv6-only 迁移时，
+    /// 早年的 force-AAAA-SOA 忘了删），而不是靠行为差异慢慢发现。
+    ///
+    /// 只告警、不改行为；启动与热重载都会调用（每次重载重查一遍，改完配置告警自然消失）。
+    pub fn log_dns64_conflicts(&self) {
+        // 全局 force-AAAA-SOA 开启时，所有配了 dns64 的组（含顶层前缀本身）都受影响。
+        let global_soa = self.force_aaaa_soa();
+        for name in self.rule_groups.keys() {
+            if self.dns64_prefix_in_group(name).is_none() {
+                continue;
+            }
+            if global_soa || self.force_aaaa_soa_in_group(name) {
+                crate::log::warn!(
+                    "group '{}' has both `dns64` and `force-AAAA-SOA` (or the global one): force-AAAA-SOA takes precedence, DNS64 synthesis is disabled in this group",
+                    name
+                );
+            }
+        }
+        // 顶层（全局）dns64 前缀 + 全局 force-AAAA-SOA 单独查：顶层前缀不在任何组里。
+        if self.dns64_prefix.is_some() && global_soa {
+            crate::log::warn!(
+                "the global `dns64` prefix and global `force-AAAA-SOA` are both configured: force-AAAA-SOA takes precedence, DNS64 synthesis is disabled"
+            );
+        }
+    }
+
     pub fn rule_group(&self, name: &str) -> &RuleGroup {
         self.rule_groups.get(name).unwrap_or(RuleGroup::empty())
     }
@@ -1427,6 +1458,11 @@ impl RuntimeConfig {
 
     pub fn conf_dir(&self) -> Option<&Path> {
         self.conf_dir.as_deref()
+    }
+
+    /// 🔐 P2-11：主配置文件路径（管理接口用它区分"主配置里的规则"与"managed 里的规则"）。
+    pub fn conf_file(&self) -> Option<&Path> {
+        self.conf_file.as_deref()
     }
 
     pub fn managed_dir(&self) -> Option<&Path> {
@@ -2071,7 +2107,22 @@ impl RuntimeConfigBuilder {
         let inherited = match inherit.as_deref() {
             None | Some("none") => None,
             Some("parent") => self.rule_group_stack.last().map(|(_, g)| g.clone()),
-            Some("default") => self.rule_groups.get(DEFAULT_GROUP).cloned(),
+            Some("default") => {
+                // R-P1-6 修复：顶层配置在解析期间累积在**懒加载的 default 栈帧**里，
+                // 要到 build() 阶段才合并进 rule_groups["default"]。因此解析到
+                // `group-begin X -inherit default` 时直接查表会得到空。
+                // 回退到栈中名为 default 的帧（即顶层配置的现场），语义与 C 版一致：
+                // 继承在推入时解析，只包含截至目前已出现的顶层规则。
+                self.rule_groups
+                    .get(DEFAULT_GROUP)
+                    .cloned()
+                    .or_else(|| {
+                        self.rule_group_stack
+                            .iter()
+                            .find(|(name, _)| name == DEFAULT_GROUP)
+                            .map(|(_, g)| g.clone())
+                    })
+            }
             Some(name) => match self.rule_groups.get(name) {
                 Some(g) => Some(g.clone()),
                 None => {
@@ -2243,6 +2294,12 @@ impl RuntimeConfigBuilder {
                 BindCertKeyFile(v) => self.bind_cert_key_file = Some(self.resolve_filepath(v)),
                 ApiToken(v) => self.api_token = Some(v),
                 BindCertKeyPass(v) => self.bind_cert_key_pass = Some(v),
+                BindCertGenerate(v) => self.bind_cert_generate = v,
+                BindCertValidityDays(v) => self.bind_cert_validity_days = Some(v),
+                BindCertSan(v) => self.bind_cert_san.push(v),
+                BindCertRootKeyFile(v) => {
+                    self.bind_cert_root_key_file = Some(self.resolve_filepath(v))
+                }
                 CacheFile(v) => self.cache.file = Some(self.resolve_filepath(v)),
                 CachePersist(v) => self.cache.persist = Some(v),
                 CacheCheckpointTime(v) => self.cache.checkpoint_time = Some(v),
@@ -3099,6 +3156,38 @@ mod tests {
                 .is_some(),
             "child 继承了 base 之后也该有"
         );
+    }
+
+
+/// R-P1-6 精确判别：-inherit default 是否把**顶层规则合并进 child 组本身**。
+    /// （find_domain_rule 有 default 回退，会掩盖继承是否生效——必须直接查 child 组的树。）
+    #[test]
+    fn test_group_inherit_default_merges_top_level_rules() {
+        let cfg = RuntimeConfig::builder()
+            .with("address /top.test/1.2.3.4")
+            .with("group-begin child -inherit default")
+            .with("address /child.test/5.6.7.8")
+            .with("group-end")
+            .build()
+            .unwrap();
+
+        let top = Name::from_utf8("top.test").unwrap();
+        let merged = cfg
+            .domain_rule_group("child")
+            .find(&top)
+            .map(|node| node.address.clone());
+        assert!(
+            merged.is_some(),
+            "-inherit default 应把顶层规则合并进 child 组（修复前解析期 default 组为空，合并结果为空）"
+        );
+        let merged = merged.unwrap().expect("child 组内应有该域名的规则节点");
+        match merged {
+            crate::config::AddressRuleValue::Addr { v4: Some(v4), .. } => {
+                let got: Vec<std::net::Ipv4Addr> = v4.iter().copied().collect();
+                assert_eq!(got, vec![std::net::Ipv4Addr::new(1, 2, 3, 4)])
+            }
+            other => panic!("expected Addr 1.2.3.4, got {other:?}"),
+        }
     }
 
     /// `-inherit none` = 不继承；写错组名 = 不继承（并且会告警，这里只验行为）

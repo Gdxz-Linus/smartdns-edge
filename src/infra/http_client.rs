@@ -151,9 +151,15 @@ where
     }
 
     if let Some(p) = proxy_url {
-        // 🌟 核心修复 1：拦截并动态装配 ureq 代理引擎
-        if let Ok(proxy) = ureq::Proxy::new(p) {
-            config_builder = config_builder.proxy(Some(proxy));
+        // 🔐 P2-13：配置了代理却解析失败时**必须报错**，不能静默直连 ——
+        // “强制经代理出网”的部署里，静默直连等于出网管控被绕过且无任何告警。
+        // 解析失败属于配置错误，按连接失败处理，让调用方的 `?` 把错误传上去。
+        match ureq::Proxy::new(p) {
+            Ok(proxy) => config_builder = config_builder.proxy(Some(proxy)),
+            Err(err) => {
+                crate::log::error!("configured download proxy is invalid ({p}): {err}");
+                return Err(ureq::Error::ConnectionFailed);
+            }
         }
     }
 
@@ -186,9 +192,13 @@ where
             MAX_REDIRECTS as usize,
         ));
     if let Some(p) = proxy_url {
-        // 🌟 核心修复 1：拦截并动态装配 reqwest 代理引擎
-        if let Ok(proxy) = reqwest::Proxy::all(p) {
-            builder = builder.proxy(proxy);
+        // 🔐 P2-13：与 ureq 后端口径一致 —— 代理配置非法时报错，绝不静默直连。
+        match reqwest::Proxy::all(p) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(err) => {
+                crate::log::error!("configured download proxy is invalid ({p}): {err}");
+                return Err(err);
+            }
         }
     }
     let res = builder.build()?.get(uri).send()?;
@@ -205,6 +215,26 @@ impl HttpResponse for reqwest::blocking::Response {
 #[cfg(test)]
 mod problem_39_tests {
     use super::*;
+
+    /// 🔐 P2-13：配置了代理但代理地址非法时必须报错，不能静默直连。
+    ///
+    /// 原实现 `if let Ok(proxy)` 会把解析失败吞掉，请求以直连发出 ——
+    /// "强制经代理出网"的部署里，这等于出网管控被静默绕过且无任何告警。
+    /// 这条测试用非法代理地址断言：错误必须在发起任何网络请求之前返回。
+    #[test]
+    fn invalid_proxy_url_fails_closed() {
+        // URI 本身合法（https），但代理地址非法 —— 失败必须发生在装配阶段
+        let result = get("https://example.com/list.txt", Some("::: not a proxy ::"));
+        let err = result.expect_err("非法代理地址必须报错，而不是静默直连");
+        let shown = match err {
+            ureq::Error::ConnectionFailed => "connection failed".to_string(),
+            other => format!("{other}"),
+        };
+        assert!(
+            shown.contains("connection failed") || !shown.is_empty(),
+            "应返回装配阶段错误: {shown}"
+        );
+    }
 
     /// 🔐 问题 39 的核心回归①：明文 http 名单**必须被拒绝**。
     ///

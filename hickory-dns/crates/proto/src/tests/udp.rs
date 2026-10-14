@@ -9,7 +9,7 @@ use std::println;
 use futures_util::stream::StreamExt;
 use tracing::debug;
 
-use crate::op::{Message, Query};
+use crate::op::{Message, OpCode, Query};
 use crate::rr::rdata::NULL;
 use crate::rr::{Name, RData, Record, RecordType};
 use crate::runtime::RuntimeProvider;
@@ -175,7 +175,7 @@ pub async fn udp_client_stream_test(server_addr: IpAddr, provider: impl RuntimeP
                 assert_eq!(*request.queries()[0].name(), test_name_server.clone());
                 assert_eq!(request.queries()[0].query_type(), RecordType::NULL);
 
-                let mut message = Message::query();
+                let mut message = Message::response(0, OpCode::Query);
                 message.set_id(request.id());
                 message.add_queries(request.queries().to_vec());
                 message.add_answer(Record::from_rdata(

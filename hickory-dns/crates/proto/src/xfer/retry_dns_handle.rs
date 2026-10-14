@@ -142,7 +142,7 @@ mod test {
             let i = self.attempts.load(Ordering::SeqCst);
 
             if (i > self.retries || self.retries - i == 0) && self.last_succeed {
-                let mut message = Message::query();
+                let mut message = Message::response(0, OpCode::Query);
                 message.set_id(i);
                 return Box::new(once(ok(DnsResponse::from_message(message).unwrap())));
             }

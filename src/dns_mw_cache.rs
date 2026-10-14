@@ -495,8 +495,14 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                 let self_key = cache_key.clone();
                                 tokio::spawn(async move {
                                     let _guards = guards;
-                                    let mut msg = Message::query();
-                                    msg.add_query(self_key.query);
+                                    // 🔐 R-P1-4 修复：内联刷新与后台预取走**同一个组包函数**
+                                    // （prefetch_query_for 会把原记录的 ECS 装回查询的 EDNS）。
+                                    // 修复前这里手写 Message::query() 不带 ECS——刷新落在
+                                    // "不带 ECS"的那条缓存记录上，带 ECS 的过期条目被
+                                    // set_valid_until_for_prefetch 无限续命却永远刷不到新数据。
+                                    // 后果与 2026-09-18 为预取路径定调过的完全同型（见
+                                    // prefetch_query_for 的文档注释）。
+                                    let msg = prefetch_query_for(&self_key);
                                     client_clone.send(msg).await;
                                 });
 

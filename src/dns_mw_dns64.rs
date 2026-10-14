@@ -58,6 +58,44 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
             return next.run(ctx, req).await;
         };
 
+        // 🔐 P2-5 补齐：`ipv4only.arpa` 特判（RFC 7050，对齐 C 版 dns64.c 的内置处理）。
+        //
+        // 这是 IPv6-only 网络里客户端做 NAT64 探测的标准域名：
+        //   * A 查询 → 固定返回 IANA 保留地址 192.0.0.170 / 192.0.0.171（不查上游、不进缓存，
+        //     TTL 取 local-ttl——与 C 版 `_dns_server_get_local_ttl` 一致）；
+        //   * AAAA 查询 → 回空 NOERROR，交给下面的 DNS64 合成逻辑（合成的地址指向 NAT64 前缀，
+        //     客户端据此判断"在 NAT64 后面"）。
+        // 缺了它，部分系统（Windows/手机）的 IPv6 连通性探测会异常或超时变慢。
+        // 仅在配了 dns64 前缀的组生效（与 C 版 is_dns64_request 的第一道判定一致）。
+        const IPV4ONLY_ARPA: &str = "ipv4only.arpa.";
+        if req.query().name().to_string().eq_ignore_ascii_case(IPV4ONLY_ARPA) {
+            let query = req.query().original().clone();
+            let name = query.name().to_owned();
+            match query.query_type() {
+                RecordType::A => {
+                    let ttl = ctx.local_ttl() as u32;
+                    let mut resp = DnsResponse::empty();
+                    resp.add_query(query);
+                    for ip in ["192.0.0.170", "192.0.0.171"] {
+                        resp.add_answer(crate::dns::Record::from_rdata(
+                            name.clone(),
+                            ttl,
+                            crate::dns::RData::A(ip.parse().unwrap()),
+                        ));
+                    }
+                    return Ok(resp);
+                }
+                RecordType::AAAA => {
+                    // 空应答：不查上游，让客户端的探测流程走 AAAA 语义
+                    // （C 版 has_ip=0 + do_reply；这里同样回 NOERROR 空 AAAA）
+                    let mut resp = DnsResponse::empty();
+                    resp.add_query(query);
+                    return Ok(resp);
+                }
+                _ => (), // 其它类型照常走原链路
+            }
+        }
+
         let query = req.query().original();
         let query_type = query.query_type();
         match query_type {
@@ -65,12 +103,21 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                 let res = next.clone().run(ctx, req).await;
 
                 // 🌟 修复：无论上游是返回 NXDOMAIN(Err) 还是返回了纯 IPv4 的空包(Ok但没AAAA记录)，都必须启动 DNS64 合成！
+                // 🔐 P2-5：**压制标记优先于合成**。应答带 aaaa_suppressed 标记说明
+                // "没有 AAAA"是内层链路的主动决策（双栈优选测速 A 胜出压掉 AAAA、
+                // force-AAAA-SOA / address /域/#6 把 AAAA 回成 SOA）——
+                // 补救不得推翻指令，跳过合成。只对"上游真没有 AAAA"的情况出手。
+                // 参考 C 版：双栈优选子查询与 DNS64 互相隔离，force-AAAA-SOA 在
+                // 请求预处理阶段直接回 SOA，查询根本到不了 DNS64。
                 let fallback_needed = match &res {
                     Err(_) => true,
-                    Ok(lookup) => !lookup
-                        .records()
-                        .iter()
-                        .any(|r| r.record_type() == RecordType::AAAA),
+                    Ok(lookup) => {
+                        !lookup.aaaa_suppressed()
+                            && !lookup
+                                .records()
+                                .iter()
+                                .any(|r| r.record_type() == RecordType::AAAA)
+                    }
                 };
 
                 if !fallback_needed {
@@ -137,6 +184,293 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use crate::dns_conf::RuntimeConfig;
+    use crate::dns_mw::*;
+    use crate::libdns::proto::rr::DNSClass;
+
+    /// 🔐 P2-5：应答带 aaaa_suppressed 标记时，DNS64 不合成（压制优先于补救）。
+    /// 内层 FlagSetter 中间件模拟"双栈优选/force-AAAA-SOA 压制了 AAAA"的应答。
+
+    async fn search_with_query(
+        mw: &DnsMiddlewareHandler,
+        name: &str,
+        query_type: RecordType,
+        query_class: DNSClass,
+        src: std::net::SocketAddr,
+    ) -> Result<DnsResponse, crate::dns::DnsError> {
+        use crate::libdns::proto::op;
+        let mut query = op::Query::query(name.parse().unwrap(), query_type);
+        query.set_query_class(query_class);
+        let mut message = op::Message::query();
+        message.add_query(query);
+        let req = DnsRequest::new(message, src, Protocol::Udp);
+        mw.search(&req, &Default::default()).await
+    }
+
+    /// 🔐 P2-5 补齐：ipv4only.arpa 特判（RFC 7050 / C 版 dns64.c 对齐）。
+    /// A 查询固定回 192.0.0.170/171；AAAA 查询回空 NOERROR；不查上游。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ipv4only_arpa_a_query() {
+        struct FailResponder;
+        use crate::middleware::Middleware as _;
+
+        #[async_trait::async_trait]
+        impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for FailResponder {
+            async fn handle(
+                &self,
+                _ctx: &mut DnsContext,
+                _req: &DnsRequest,
+                _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+            ) -> Result<DnsResponse, DnsError> {
+                panic!("ipv4only.arpa must be answered locally, never forwarded upstream");
+            }
+        }
+
+        let cfg = RuntimeConfig::builder()
+            .with("dns64 64:ff9b::/96")
+            .with("local-ttl 77")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .with_extra_middleware(FailResponder)
+            .build(cfg);
+
+        let response = search_with_query(
+            &mock,
+            "ipv4only.arpa.",
+            RecordType::A,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut ips: Vec<_> = response
+            .answers()
+            .iter()
+            .filter_map(|r| match r.data() {
+                crate::dns::RData::A(ip) => Some(ip.to_string()),
+                _ => None,
+            })
+            .collect();
+        ips.sort();
+        assert_eq!(
+            ips,
+            vec!["192.0.0.170", "192.0.0.171"],
+            "ipv4only.arpa 的 A 查询必须固定返回 RFC 7050 保留地址"
+        );
+        assert_eq!(response.answers()[0].ttl(), 77, "TTL 应取 local-ttl（对齐 C 版）");
+    }
+
+    /// 🔐 P2-5 补齐：ipv4only.arpa 的 AAAA 查询回空 NOERROR，且不查上游。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ipv4only_arpa_aaaa_query() {
+        struct FailResponder;
+        use crate::middleware::Middleware as _;
+
+        #[async_trait::async_trait]
+        impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for FailResponder {
+            async fn handle(
+                &self,
+                _ctx: &mut DnsContext,
+                _req: &DnsRequest,
+                _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+            ) -> Result<DnsResponse, DnsError> {
+                panic!("ipv4only.arpa AAAA must not be forwarded upstream");
+            }
+        }
+
+        let cfg = RuntimeConfig::builder()
+            .with("dns64 64:ff9b::/96")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .with_extra_middleware(FailResponder)
+            .build(cfg);
+        let response = search_with_query(
+            &mock,
+            "ipv4only.arpa.",
+            RecordType::AAAA,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(response.answers().is_empty(), "AAAA 应返回空（RFC 7050）");
+        assert_eq!(
+            response.response_code(),
+            crate::libdns::proto::op::ResponseCode::NoError
+        );
+    }
+
+    /// 🔐 P2-5 补齐：未配 dns64 前缀的组不拦截 ipv4only.arpa（原样穿透到内层）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ipv4only_arpa_not_intercepted_without_dns64() {
+        struct PassthroughChecker;
+        use crate::middleware::Middleware as _;
+
+        #[async_trait::async_trait]
+        impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for PassthroughChecker {
+            async fn handle(
+                &self,
+                _ctx: &mut DnsContext,
+                req: &DnsRequest,
+                _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+            ) -> Result<DnsResponse, DnsError> {
+                assert!(
+                    req.query().name().to_string().eq_ignore_ascii_case("ipv4only.arpa."),
+                    "未配 dns64 时该查询应原样穿透"
+                );
+                let mut resp = DnsResponse::empty();
+                resp.add_query(req.query().original().to_owned());
+                Ok(resp)
+            }
+        }
+
+        let cfg = RuntimeConfig::builder().build().unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .with_extra_middleware(PassthroughChecker)
+            .build(cfg);
+        let response = search_with_query(
+            &mock,
+            "ipv4only.arpa.",
+            RecordType::A,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(response.answers().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dns64_skipped_when_suppressed() {
+        struct SuppressedResponder;
+        use crate::middleware::Middleware as _;
+
+        #[async_trait::async_trait]
+        impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for SuppressedResponder {
+            async fn handle(
+                &self,
+                _ctx: &mut DnsContext,
+                req: &DnsRequest,
+                _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+            ) -> Result<DnsResponse, DnsError> {
+                // 模拟内层：AAAA 查询被压制，回 SOA（force-AAAA-SOA 的形态）
+                let mut resp = DnsResponse::empty();
+                resp.add_query(req.query().original().to_owned());
+                use crate::libdns::proto::op::ResponseCode;
+                resp.set_response_code(ResponseCode::NoError);
+                resp.add_authority(crate::dns::Record::from_rdata(
+                    req.query().original().name().clone(),
+                    300,
+                    crate::dns::RData::default_soa(),
+                ));
+                resp.set_aaaa_suppressed(true);
+                Ok(resp)
+            }
+        }
+
+        let cfg = RuntimeConfig::builder()
+            .with("dns64 64:ff9b::/96")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .with_extra_middleware(SuppressedResponder)
+            .build(cfg);
+        let response = search_with_query(
+            &mock,
+            "suppressed.test.",
+            RecordType::AAAA,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        // 压制标记下：不合成——应答保持 SOA 形态（无合成 AAAA、无二次 A 查询的地址）
+        assert!(
+            response
+                .answers()
+                .iter()
+                .all(|r| r.record_type() != RecordType::AAAA),
+            "被压制的 AAAA 查询不得被 DNS64 合成（P2-5 修复点）"
+        );
+        assert!(
+            response
+                .authorities()
+                .iter()
+                .any(|r| r.record_type() == RecordType::SOA),
+            "压制应答应保持 SOA 否定形态"
+        );
+    }
+
+    /// 🔐 P2-5：无压制标记时，DNS64 照常合成（主场行为不受修复影响）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dns64_synthesizes_when_not_suppressed() {
+        struct AOnlyResponder;
+        use crate::middleware::Middleware as _;
+
+        #[async_trait::async_trait]
+        impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AOnlyResponder {
+            async fn handle(
+                &self,
+                _ctx: &mut DnsContext,
+                req: &DnsRequest,
+                _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+            ) -> Result<DnsResponse, DnsError> {
+                if req.query().query_type() == RecordType::A {
+                    let mut resp = DnsResponse::empty();
+                    resp.add_query(req.query().original().to_owned());
+                    resp.add_answer(crate::dns::Record::from_rdata(
+                        req.query().original().name().clone(),
+                        300,
+                        crate::dns::RData::A("1.2.3.4".parse().unwrap()),
+                    ));
+                    Ok(resp)
+                } else {
+                    // AAAA 查询：上游真没有（NOERROR 空应答，无压制标记）
+                    let mut resp = DnsResponse::empty();
+                    resp.add_query(req.query().original().to_owned());
+                    Ok(resp)
+                }
+            }
+        }
+
+        let cfg = RuntimeConfig::builder()
+            .with("dns64 64:ff9b::/96")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .with_extra_middleware(AOnlyResponder)
+            .build(cfg);
+        let response = search_with_query(
+            &mock,
+            "v4only.test.",
+            RecordType::AAAA,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let synthesized: Vec<_> = response
+            .answers()
+            .iter()
+            .filter(|r| r.record_type() == RecordType::AAAA)
+            .collect();
+        assert_eq!(
+            synthesized.len(),
+            1,
+            "上游真没有 AAAA 时必须照常合成（主场行为）"
+        );
+        assert_eq!(
+            synthesized[0].data().ip_addr(),
+            Some("64:ff9b::102:304".parse().unwrap())
+        );
+    }
 
     #[test]
     fn test_dns64_1() {

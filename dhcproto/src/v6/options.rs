@@ -11,7 +11,7 @@ use crate::v6::option_codes::OptionCode;
 use crate::{
     decoder::{Decodable, Decoder},
     encoder::{Encodable, Encoder},
-    error::{DecodeResult, EncodeResult},
+    error::{DecodeError, DecodeResult, EncodeResult},
     v6::{MessageType, RelayMessage},
 };
 
@@ -648,13 +648,18 @@ impl Decodable for DhcpOption {
                     data: decode_data(&mut Decoder::new(buf)),
                 })
             }
-            OptionCode::VendorOpts => DhcpOption::VendorOpts(VendorOpts {
-                num: decoder.read_u32()?,
-                opts: {
-                    let mut opt_decoder = Decoder::new(decoder.read_slice(len - 4)?);
-                    DhcpOptions::decode(&mut opt_decoder)?
-                },
-            }),
+            OptionCode::VendorOpts => {
+                if len < 4 {
+                    return Err(DecodeError::NotEnoughBytes);
+                }
+                DhcpOption::VendorOpts(VendorOpts {
+                    num: decoder.read_u32()?,
+                    opts: {
+                        let mut opt_decoder = Decoder::new(decoder.read_slice(len - 4)?);
+                        DhcpOptions::decode(&mut opt_decoder)?
+                    },
+                })
+            }
             OptionCode::InterfaceId => DhcpOption::InterfaceId(decoder.read_slice(len)?.to_vec()),
             OptionCode::ReconfMsg => DhcpOption::ReconfMsg(decoder.read_u8()?.into()),
             OptionCode::ReconfAccept => DhcpOption::ReconfAccept,

@@ -716,6 +716,12 @@ mod response {
         message: Message,
         valid_until: Instant,
         name_server_group: Option<String>,
+        /// 🔐 P2-5：AAAA 被上游链路**刻意压制**的标记（双栈优选测速落败 / force-AAAA-SOA）。
+        ///
+        /// 含义："应答里没有 AAAA"不是"上游真没有"，而是"用户/策略决定不给"。
+        /// DNS64 中间件看到此标记必须跳过合成——补救不得推翻压制指令。
+        /// 不参与序列化与相等性（这是链路内部的传递标记，不是应答内容）。
+        aaaa_suppressed: bool,
     }
 
     impl PartialEq for DnsResponse {
@@ -761,6 +767,7 @@ mod response {
                 message,
                 valid_until,
                 name_server_group: None,
+                aaaa_suppressed: false,
             }
         }
 
@@ -769,6 +776,7 @@ mod response {
                 message: Message::query(),
                 valid_until: Instant::now(),
                 name_server_group: None,
+                aaaa_suppressed: false,
             }
         }
 
@@ -802,6 +810,16 @@ mod response {
         pub fn with_name_server_group(mut self, group_name: String) -> Self {
             self.name_server_group = Some(group_name);
             self
+        }
+
+        /// 🔐 P2-5：本应答的 AAAA 是否被上游链路刻意压制（双栈优选落败 / force-AAAA-SOA）。
+        pub fn aaaa_suppressed(&self) -> bool {
+            self.aaaa_suppressed
+        }
+
+        /// 🔐 P2-5：标记"本应答的 AAAA 是被刻意压掉的"（供 DNS64 判断是否跳过合成）。
+        pub fn set_aaaa_suppressed(&mut self, suppressed: bool) {
+            self.aaaa_suppressed = suppressed;
         }
 
         pub fn records(&self) -> &[Record] {
@@ -912,6 +930,7 @@ mod response {
                 message,
                 valid_until,
                 name_server_group: None,
+                aaaa_suppressed: false,
             }
         }
     }

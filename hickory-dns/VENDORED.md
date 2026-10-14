@@ -147,6 +147,71 @@
   三种写法，并确认不认识的名字仍然报错（不会被静默当成 A）。
 - 本节编号排在 4.6 之后只是**为了不动既有编号**（4.6 有两处交叉引用）；性质上它属于"我们改的"。
 
+### 4.8 修复"内嵌测试目标无法编译"（2026-10-13，R-P1-2）
+
+**背景**：本目录的测试目标自拷入起就无法编译（proto 33 个错误 / resolver 23 个错误），第 5 节承诺的
+上游补丁回归手段实际不可用。根因是两层：① 拷入时删除了 `[dev-dependencies]` 与 `test-support`，
+而内联测试仍在引用它们；② 拷入快照处于上游开发中途——同文件里既有"应答类型校验"又有用查询报文
+伪造应答的测试，后者注定失败（上游 v0.26.0-alpha.1 发布版的 `dns_response.rs` 没有这些测试写法，
+证明这不是上游稳定状态）。
+
+**改动清单**：
+
+1. **`Cargo.toml`（workspace）**：`[workspace.dependencies]` 恢复 `test-support = { path = "tests/test-support" }`；
+   同步修正了旧注释——原文说该写法"不合法"，实际上游原样就是合法的 path 依赖，当初删它只因目录未拷入。
+2. **`crates/proto/Cargo.toml`、`crates/resolver/Cargo.toml`**：补回 `[dev-dependencies]`，逐字对齐
+   上游 0.26.0-alpha.1（resolver 含 `test-util`、`serde_json`、`toml`——`tokio::time::advance` 需要 `test-util`）。
+3. **新增 `tests/test-support/`**（2 文件）与 `crates/proto/tests/test-data/`（11 文件）：
+   从上游 v0.26.0-alpha.1 标签取得，是内联测试引用而拷入时缺失的部分。
+4. **新增 `crates/resolver/tests/`** 4 个夹具（`hosts`、`resolv.conf-linux/-macos/-simple`），
+   供 `hosts.rs` 的 `test_read_hosts_conf` 使用（`TDNS_WORKSPACE_ROOT` 未设时按 `../..` 相对定位）。
+5. **测试修复（15 项失败全部归因为拷入快照自带的测试材料错误，非程序缺陷）**：
+   - `crates/proto/src/xfer/dns_response.rs`：tests 内 12 处 `Message::query()` 改为
+     `Message::response(0, OpCode::Query)`（伪造应答必须用应答类型，否则被本文件 163 行的类型校验拒绝）；
+   - `crates/proto/src/xfer/dns_multiplexer.rs`：`a_query_answer()` 返回元组的（请求，应答）顺序颠倒
+     （与 axfr 两个测试相反，上游 alpha.1 同样带病）——已换序；
+   - `crates/proto/src/xfer/retry_dns_handle.rs`：测试桩成功路径同样改为应答类型；
+   - `crates/proto/src/tests/udp.rs`：假服务器应答改为应答类型（影响 ipv4/ipv6 两项）。
+6. **`crates/resolver/src/name_server/name_server_pool.rs`**：第 15 行的 `Instant` 补 `cfg(test)` 门控——
+   本地优化（4.6 外的未登记改动引入）在该文件无条件用 `std::time::Instant`，而 `name_server.rs`
+   测试构建下换成 `tokio::time::Instant`，两边类型对不上；生产构建不受影响，此为测试构建一致性修复。
+
+- **验证**：`cargo test -p hickory-proto --lib`＝193 过 / 0 败；`cargo test -p hickory-resolver --lib`＝50 过 / 0 败；
+  主仓库 `cargo test --offline` 602 过 / 0 败；`cargo build --offline` 通过；dhcproto 43+17 过。
+- **注意**：本节改动同时触碰了 4.6 节列出的 8 个文件之一（`caching_client.rs` 的测试辅助函数与
+  `name_server_pool.rs`），但只动测试构造与类型门控，生产路径逻辑未改。
+
+### 4.9 修复 NSEC3 候选列表死循环（2026-10-13，R-P1-1）
+
+**背景**：`crates/proto/src/dnssec/dnssec_dns_handle/nsec3_validation.rs` 的
+`build_encloser_candidates_list` 从查询名逐级 `base_name()` 向上枚举到 SOA 名为止；
+函数没有校验"查询名是 SOA 名子域"这一前提（原 TODO 也承认）。恶意应答可携带与
+查询域无关的 SOA 名（攻击者控制合法签名域即可），此时 `base_name()` 在根名上
+返回自身，循环永不终止——每轮 clone＋哈希塞入 Vec，内存无限增长并卡死
+tokio 工作线程（release 下 debug_assert 无效）。NXDomain 与 NoError/通配符两条
+路径都会到达此函数。
+
+**改动**：
+
+1. 函数入口校验 `soa_name.zone_of(query_name)`：查询名不在 SOA 区域内 → 返回空
+   候选列表，下游两条路径（NXDomain 的 closest_encloser_proof、NoData 的
+   wildcard_based_encloser_proof）都会落到 Bogus 分支（逐路径核实过）。
+   与上游 hickory-dns PR #3597 的修复语义一致。
+2. 循环内加第二道防线：`base_name()` 返回自身（已到根）即返回现有列表，
+   保证循环必然终止，不依赖入口校验单点。
+3. 顺带删除无效的 `debug_assert_ne!(name, Name::root())` 与上游遗留 TODO。
+
+**新增 4 个单测**（r_p1_1_tests）：SOA 无关 → 空列表；SOA 为祖先 → 完整列表
+（回归保护）；查询名等于 SOA 名 → 单元素；`verify_nsec3` 级端到端——SOA 无关的
+NXDomain 应答快速返回 Bogus（修复前该测试会死循环超时）。
+
+**验证**：`cargo test -p hickory-proto --lib --features dnssec-ring`＝261 过 / 0 败
+（比默认构建多 68 个 dnssec 测试）；默认构建 193 过 / 0 败不变；根包 608 过 / 0 败。
+
+**边界**：本仓库当前部署未启用 DNSSEC 验证（validate 默认 false），此缺陷现状
+不可达；按"内嵌即自有代码、发现即修"处理，且该链路随时可能被接线。
+
+
 ### 4.6 拷进来时就带着的改动（**不是我们改的**，内容已无法追溯）
 
 这份副本**不是干净的上游快照**（第 2 节已证明）。除了我们改的那几处之外，还有一批文件在**拷贝进来的时候就已经被人改过**了 —— 我们没有它们的原始版本可比对，也没法说清"改了哪些、为什么改"。所以这一节只做一件事：**把范围写清楚**，免得以后有人误以为"这个目录就等于上游原版"。
@@ -201,9 +266,9 @@ grep -rlP '[\x{4e00}-\x{9fff}]' hickory-dns/crates/
 1. clone 上游，按提交信息找到那个修复（`git log --oneline -- crates/proto crates/resolver`）；
 2. **只把那个补丁挑进来**，不要整目录覆盖粘贴 —— 那会把第 4 节的改动冲掉；
 3. 回归：`cd hickory-dns && cargo test -p hickory-proto`（以及 `-p hickory-resolver`）。
-   内嵌副本**自带上游单测**（`crates/proto/src/tests/`、`crates/resolver/src/tests.rs`，
-   共 **400** 处 `#[test]` / `#[tokio::test]`），所以"改了内嵌库没法验证"并不成立；
-   跑完再在主仓库跑一次单元测试。
+   内嵌副本**自带上游单测**（`crates/proto/src/tests/`、`crates/resolver/src/tests.rs`），
+   且自 2026-10-13（第 4.8 节）起测试目标已可编译、可运行（proto 193 / resolver 50 全过），
+   "改了内嵌库没法验证"并不成立；跑完再在主仓库跑一次单元测试。
 4. 把这次改动**补记进第 4 节**（哪怕只是"把上游某提交的补丁挑进来了"）。
 
 ## 六、与 dhcproto 的关系（"两个 DNS 报文解析器"问题已解决）

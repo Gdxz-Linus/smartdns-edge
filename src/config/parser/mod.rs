@@ -119,6 +119,10 @@ pub enum ConfigItem {
     BindCertFile(PathBuf),
     BindCertKeyFile(PathBuf),
     BindCertKeyPass(String),
+    BindCertGenerate(Option<bool>),
+    BindCertValidityDays(u64),
+    BindCertSan(String),
+    BindCertRootKeyFile(PathBuf),
     BlacklistIp(IpOrSet),
     BogusNxDomain(IpOrSet),
     CacheFile(PathBuf),
@@ -367,6 +371,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         // （`nom` 的 `alt` 实现上限就是 21），再加会**编译不过**。
         // 这里并入元素较少的 group3，语义上同样只是"多认一个关键字"，没有顺序含义。
         map(config("force-no-CNAME"), ConfigItem::ForceNoCNAME),
+        // 🔐 P2-1：三态开关（auto/yes/no），放进元素较少的 group3（group1/2 已满 21）
+        map(config("bind-cert-generate"), ConfigItem::BindCertGenerate),
         map(config("ignore-ip"), ConfigItem::IgnoreIp),
         map(config("local-ttl"), |v: u64| {
             ConfigItem::LocalTtl(sanitize_ttl("local-ttl", v))
@@ -440,6 +446,9 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     ));
 
     let group5 = alt((
+        map(config("bind-cert-validity-days"), ConfigItem::BindCertValidityDays),
+        map(config("bind-cert-san"), ConfigItem::BindCertSan),
+        map(config("bind-cert-root-key-file"), ConfigItem::BindCertRootKeyFile),
         // 🔐 Q12：`ip-rules ...`（自带前缀，不会和别的项撞；放在通用解析器之前）
         map(NomParser::parse, ConfigItem::IpRules),
         map(config("ipset"), ConfigItem::IpSet),

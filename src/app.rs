@@ -94,6 +94,11 @@ impl App {
         // 🔐 13-⑥：热重载可能改了 `trusted-proxy`，管理后台的全局清单也要跟着更新 ——
         // 否则会出现"改了配置不生效"（而那正是本项目反复治理的一类问题）。
         crate::api::init_trusted_proxies(self.cfg.read().await.trusted_proxies());
+        // 🔐 P2-9：热重载同样可能改了 `api-token` —— 口令轮换必须生效（原来 OnceLock
+        // 只认第一次，旧口令继续有效、新口令不生效，必须重启进程）。
+        crate::api::set_configured_token(self.cfg.read().await.api_token().map(ToString::to_string));
+        // 🔐 P2-5：配置矛盾（同组 dns64 + force-AAAA-SOA）在加载期说破，改完配置告警自然消失。
+        self.cfg.read().await.log_dns64_conflicts();
         self.update_middleware_handler().await;
         self.update_listeners().await;
         *self.loaded_at.write().await = Instant::now();
@@ -611,6 +616,9 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
         }
 
         crate::api::set_configured_token(cfg.api_token().map(ToString::to_string));
+
+        // 🔐 P2-5：配置矛盾（同组 dns64 + force-AAAA-SOA）在启动期说破。
+        cfg.log_dns64_conflicts();
 
         // 🔐 P0-5：初始化连接数上限（未配置则按物理内存自动推算，家庭/企业自适应）
         crate::server::limit::init(cfg.max_connections(), cfg.max_connections_per_ip());
@@ -1232,10 +1240,13 @@ fn build_middleware(
         // （没有配置时它直接放行，行为与旧版一致）。
         builder = builder.with(Dns64Middleware::new());
 
-        builder = builder.with(DnsZoneMiddleware::new());
-
-        builder = builder.with(AddressMiddleware);
-
+        // R-P1-1 修复：本机静态数据（hosts 文件、dnsmasq 租约）的中间件必须挂在
+        // DnsZoneMiddleware **外层**。修复前 Zone 在外、Hosts 在内，
+        // LocalPtrZoneProvider 对任何私网 PTR 直接回 NXDOMAIN——内层的
+        // DnsHostsMiddleware / DnsmasqMiddleware 永远没机会应答，
+        // 局域网设备反查主机名（hosts-file + expand-ptr-from-address、DHCP 租约）整体失效。
+        // 语义：本地静态数据（hosts/租约）优先于生成的 zone 数据；
+        // 私网 PTR 无本地数据时仍由 LocalPtr 回 NXDOMAIN（隐私定调不变，不外发）。
         if cfg.resolv_hostanme() {
             builder = builder.with(DnsHostsMiddleware::new());
         }
@@ -1250,6 +1261,10 @@ fn build_middleware(
                 cfg.domain().cloned(),
             ));
         }
+
+        builder = builder.with(DnsZoneMiddleware::new());
+
+        builder = builder.with(AddressMiddleware);
 
         // 把解析结果写进内核集合（nftables 的 set / Linux 的 ipset）
         //

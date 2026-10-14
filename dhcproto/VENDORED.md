@@ -86,6 +86,31 @@ domain.emit(&mut name_encoder)?;
 **这是全仓库唯一一处为了适配 0.26 而改的上游代码。** 如果将来上游 dhcproto 支持了
 hickory-proto 0.26，这一处补丁就可以直接丢掉。
 
+### 3.3 解码健壮性加固（2026-10-13，R-P1-3 + R-P2-12 附属）
+
+背景：审计发现三类畸形输入问题，全部按"构造的畸形报文单测断言不崩溃"验证：
+
+1. **`src/v4/mod.rs` Message::decode 补 magic cookie 校验**：上游留有
+   `// TODO: check magic bytes against expected?`，本仓库补上——magic 不等于
+   `MAGIC` 即返回 `DecodeError`。任意非 DHCP 的 UDP 垃圾包在入口即被拒绝。
+   同时把 decode 重写为先取值再构造 `Message` 的形式（原先的 struct 字面量里
+   没法插入校验逻辑）。
+2. **`src/v4/options.rs` ClasslessStaticRoute（option 121）**：原先
+   `Ipv4Net::new(...).unwrap()`——host 位非零（如 /23 前缀的 dest 第 3 字节最低位为 1）
+   时直接 panic。改为先按前缀掩零主机位（宽容解析）再构造，构造失败返回
+   `DecodeError`。调用方（smartdns 主程序 `src/infra/dhcp.rs`）本就主动请求该选项，
+   局域网内一个畸形 OFFER 即可打崩解析任务，属必改。
+3. **六处 `len - N` 下溢防护**（v4：BulkLeaseQueryStatusCode、ClientFQDN；
+   v6：Authentication、StatusCode、VendorClass、VendorOpts）：畸形长度字段
+   （如 option 151 len=0）原先在 release 下因回绕触发 read_slice 失败使整个
+   options 解码静默截断、debug 下溢出 panic；现统一先判 `len < N` 返回
+   `DecodeError::NotEnoughBytes`。
+
+新增 5 个单测（option 121 host 位掩零 / /24 对齐回归 / option 151 len=0 /
+option 81 len=2 / 坏 magic），`cargo test`＝48 过 / 0 败（+17 文档测试全过）。
+对 smartdns 的使用无接口变化。
+
+
 ## 四、验证方式
 
 统一到内嵌版本后，这几条必须成立（改完顺手跑一次）：

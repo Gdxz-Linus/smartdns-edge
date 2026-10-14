@@ -1101,7 +1101,7 @@ mod tests {
     use super::testing::{sec_lookup_fails_test, sec_lookup_test};
     use super::*;
     use crate::config::{CLOUDFLARE, GOOGLE, ResolverConfig, ResolverOpts};
-    use crate::proto::op::Message;
+    use crate::proto::op::{Message, OpCode};
     use crate::proto::rr::rdata::A;
     use crate::proto::xfer::{DnsRequest, DnsResponse};
     use crate::proto::{NoRecords, ProtoError, ProtoErrorKind};
@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     fn v4_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(Name::root(), RecordType::A));
         message.insert_answers(vec![Record::from_rdata(
             Name::root(),
@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     fn empty() -> Result<DnsResponse, ProtoError> {
-        Ok(DnsResponse::from_message(Message::query()).unwrap())
+        Ok(DnsResponse::from_message(Message::response(0, OpCode::Query)).unwrap())
     }
 
     fn error() -> Result<DnsResponse, ProtoError> {

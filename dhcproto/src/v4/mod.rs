@@ -467,24 +467,46 @@ impl Message {
 
 impl Decodable for Message {
     fn decode(decoder: &mut Decoder<'_>) -> DecodeResult<Self> {
+        let opcode = Opcode::decode(decoder)?;
+        let htype = decoder.read_u8()?.into();
+        let hlen = decoder.read_u8()?;
+        let hops = decoder.read_u8()?;
+        let xid = decoder.read_u32()?;
+        let secs = decoder.read_u16()?;
+        let flags = decoder.read_u16()?.into();
+        let ciaddr = decoder.read_u32()?.into();
+        let yiaddr = decoder.read_u32()?.into();
+        let siaddr = decoder.read_u32()?.into();
+        let giaddr = decoder.read_u32()?.into();
+        let chaddr = decoder.read::<16>()?;
+        let sname = decoder.read_nul_bytes::<64>()?;
+        let fname = decoder.read_nul_bytes::<128>()?;
+        let magic_bytes = decoder.read::<4>()?;
+        if magic_bytes != MAGIC {
+            return Err(DecodeError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid magic cookie",
+            )));
+        }
+        let opts = DhcpOptions::decode(decoder)?;
+
         Ok(Message {
-            opcode: Opcode::decode(decoder)?,
-            htype: decoder.read_u8()?.into(),
-            hlen: decoder.read_u8()?,
-            hops: decoder.read_u8()?,
-            xid: decoder.read_u32()?,
-            secs: decoder.read_u16()?,
-            flags: decoder.read_u16()?.into(),
-            ciaddr: decoder.read_u32()?.into(),
-            yiaddr: decoder.read_u32()?.into(),
-            siaddr: decoder.read_u32()?.into(),
-            giaddr: decoder.read_u32()?.into(),
-            chaddr: decoder.read::<16>()?,
-            sname: decoder.read_nul_bytes::<64>()?,
-            fname: decoder.read_nul_bytes::<128>()?,
-            // TODO: check magic bytes against expected?
-            magic: decoder.read::<4>()?,
-            opts: DhcpOptions::decode(decoder)?,
+            opcode,
+            htype,
+            hlen,
+            hops,
+            xid,
+            secs,
+            flags,
+            ciaddr,
+            yiaddr,
+            siaddr,
+            giaddr,
+            chaddr,
+            sname,
+            fname,
+            magic: magic_bytes,
+            opts,
         })
     }
 }

@@ -70,12 +70,22 @@ pub fn serve(
             .and_then(crate::server::limit::for_listener);
 
         let mut inner_join_set = JoinSet::new();
+        // 🔐 P2-7：accept 连续出错时按指数退避（与 UDP/TCP 同一套 helper），防止 fd 耗尽等
+        // 持续性错误把监听循环打成 100% CPU 空转；日志降频防刷屏。
+        let mut err_streak: u32 = 0;
         loop {
             let (tcp_stream, src_addr) = tokio::select! {
                 tcp_stream = listener.accept() => match tcp_stream {
                     Ok((t, s)) => (t, s),
                     Err(e) => {
-                        log::debug!("TLS stream receive error: {}", e);
+                        err_streak = err_streak.saturating_add(1);
+                        if crate::server::should_log_stream_error(err_streak) {
+                            log::warn!("stream accept error (streak {err_streak}): {e}");
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(crate::server::error_backoff_delay(err_streak)) => {}
+                            _ = cancellation_token.cancelled() => break,
+                        }
                         continue;
                     },
                 },
@@ -84,6 +94,7 @@ pub fn serve(
                     break;
                 },
             };
+            err_streak = 0;
 
             // verify that the src address is safe for responses
             if let Err(e) = sanitize_src_address(src_addr) {

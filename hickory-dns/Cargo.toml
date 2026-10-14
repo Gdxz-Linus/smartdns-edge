@@ -26,8 +26,13 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # hickory
 # 原始清单里还有 `hickory-recursor`（path 指向未被拷入的 crates/recursor）
-# 和一行 `test-support.path = "tests/test-support"`（tests/ 目录未拷入，
-# 且该写法本身也不是合法的依赖声明），二者都会让 workspace 清单无法加载，故移除。
+# 和一行 `test-support.path = "tests/test-support"`（tests/ 目录未拷入，且该写法本身
+# 也不是合法的依赖声明——按上游原样是写在 `[workspace.dependencies]` 下的
+# `test-support = { path = "tests/test-support" }`）。
+# 2026-10-13 修复内嵌测试目标无法编译（R-P1-2）：把上游 tests/test-support 补拷到
+# 上游 tests/test-support 补拷到 hickory-dns/tests/test-support（与上游布局一致，位于 workspace 内），并恢复本行。
+# 相关改动登记在 hickory-dns/VENDORED.md 第 4.8 节。
+test-support = { path = "tests/test-support" }
 hickory-proto = { version = "0.26.0-alpha.1", path = "crates/proto", default-features = false, features = ["std"] }
 
 

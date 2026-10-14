@@ -521,12 +521,17 @@ pub fn add_batch(
         anyhow::bail!("nftset: mixed IPv4/IPv6 addresses in one batch");
     }
 
+    // P1-2 修复：地址长度由地址本身决定（IPv6=16 / IPv4=4），不再由 family 字符串推导。
+    // `#6:inet`（NFPROTO_INET）此前会被误按 4 字节切片 16 字节的 IPv6 地址，
+    // 向内核写入错位垃圾地址（真机已复现：EINVAL）。
+    let addr_len = if first_is_v4 { 4 } else { 16 };
+
     let raw: Vec<u8> = addrs
         .iter()
         .flat_map(|a| addr_to_bytes(*a).to_vec())
         .collect();
 
-    imp::add_batch(family_name, table_name, set_name, &raw, timeout)?;
+    imp::add_batch(family_name, table_name, set_name, &raw, timeout, addr_len)?;
 
     Ok(addrs.len() as i32)
 }
@@ -859,9 +864,12 @@ mod imp {
         set_name: &str,
         addrs: &[u8],
         timeout: u64,
+        addr_len: usize,
     ) -> io::Result<()> {
+        // P1-2 修复：addr_len 由调用方按真实地址族传入（IPv6=16 / IPv4=4）。
+        // 旧实现按 family 字符串推导，`#6:inet`（NFPROTO_INET≠NFPROTO_IPV6）时
+        // 会把 16 字节 IPv6 地址按 4 字节错位切片，向内核写入垃圾地址。
         let family = family_of(family_name);
-        let addr_len = if family == super::NFPROTO_IPV6 { 16 } else { 4 };
         let count = addrs.len() / addr_len.max(1);
         if count == 0 {
             return Ok(());
@@ -976,6 +984,7 @@ mod imp {
         _set_name: &str,
         _addrs: &[u8],
         _timeout: u64,
+        _addr_len: usize,
     ) -> io::Result<()> {
         Err(unsupported())
     }

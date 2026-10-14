@@ -327,7 +327,7 @@ pub(crate) mod tests {
     use test_support::subscribe;
 
     use crate::proto::ProtoError;
-    use crate::proto::op::Message;
+    use crate::proto::op::{Message, OpCode};
     use crate::proto::rr::{Name, RData, Record};
     use crate::proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
 
@@ -349,7 +349,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn v4_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(Name::root(), RecordType::A));
         message.insert_answers(vec![Record::from_rdata(
             Name::root(),
@@ -363,7 +363,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn v6_message() -> Result<DnsResponse, ProtoError> {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.add_query(Query::query(Name::root(), RecordType::AAAA));
         message.insert_answers(vec![Record::from_rdata(
             Name::root(),
@@ -377,7 +377,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn empty() -> Result<DnsResponse, ProtoError> {
-        Ok(DnsResponse::from_message(Message::query()).unwrap())
+        Ok(DnsResponse::from_message(Message::response(0, OpCode::Query)).unwrap())
     }
 
     pub(crate) fn error() -> Result<DnsResponse, ProtoError> {

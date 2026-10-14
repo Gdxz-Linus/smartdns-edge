@@ -32,13 +32,24 @@ pub fn serve(
         let listener_limiter = listener_local_addr.and_then(crate::server::limit::for_listener);
 
         let mut inner_join_set = JoinSet::new();
+        // 🔐 P2-7：连续 accept 错误计数（用于退避与日志降频）。
+        let mut err_streak: u32 = 0;
         loop {
             let (mut quic_streams, src_addr) = tokio::select! {
                 result = server.next() => match result {
                     Ok(Some(c)) => c,
                     Ok(None) => continue,
                     Err(e) => {
-                        log::debug!("error receiving a QUIC connection: {e}");
+                        // 🔐 P2-7：与 UDP/TCP/TLS 监听同口径 —— 连续出错按指数退避，
+                        // 防止持续性错误把循环打成 100% CPU 空转；日志降频防刷屏。
+                        err_streak = err_streak.saturating_add(1);
+                        if crate::server::should_log_stream_error(err_streak) {
+                            log::warn!("error receiving a QUIC connection (streak {err_streak}): {e}");
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(crate::server::error_backoff_delay(err_streak)) => {}
+                            _ = cancellation_token.cancelled() => break,
+                        }
                         continue;
                     }
                 },
@@ -47,7 +58,7 @@ pub fn serve(
                     break;
                 },
             };
-
+            err_streak = 0;
             // verify that the src address is safe for responses
             // TODO: we're relying the quinn library to actually validate responses before we get here, but this check is still worth doing
             if let Err(e) = sanitize_src_address(src_addr) {

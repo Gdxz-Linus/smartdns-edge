@@ -176,7 +176,7 @@ asdfghjkl
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
         let resolver =
-            crate::rustls::TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"))
+            crate::rustls::TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"), None)
                 .expect("测试证书应当能加载");
         let tls = crate::rustls::tls_server_config(
             b"http/1.1",

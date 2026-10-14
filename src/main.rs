@@ -9,6 +9,7 @@ use std::str::FromStr;
 mod api;
 mod app;
 mod cli;
+mod cert_gen;
 mod collections;
 mod config;
 mod dns;
@@ -231,7 +232,17 @@ impl Cli {
                         Some(run_user::DEFAULT_GROUP)
                     };
 
-                    if let Some((uid, gid)) = run_user::target_ids(target_user, target_group) {
+                    // 🔐 P2-1 配套：自签证书必须在降权前生成（降权后对配置目录通常无写权限，
+                    // WSL 真机实测 Permission denied）。生成失败不中断启动（监听侧有兜底报错）。
+                    // 生成后把所有权 chown 给降权目标（对齐 C 版 smartdns.c 的 chown）。
+                    let cert_target = run_user::target_ids(target_user, target_group);
+                    crate::cert_gen::ensure_cert_for_binds(
+                        &cfg,
+                        cert_target.map(|(u, _)| u),
+                        cert_target.map(|(_, g)| g),
+                    );
+
+                    if let Some((uid, gid)) = cert_target {
                         let mut paths = vec![cfg.log_file()];
                         if let Some(audit) = cfg.audit_file() {
                             paths.push(audit);

@@ -83,12 +83,20 @@ impl Drop for ConnectionGuard {
             return;
         }
         self.limiter.current.fetch_sub(1, Ordering::Relaxed);
-        if let Ok(mut map) = self.limiter.per_source.lock() {
-            if let Some(n) = map.get_mut(&self.key) {
-                *n -= 1;
-                if *n == 0 {
-                    map.remove(&self.key);
-                }
+        // 🔐 P2-8：锁中毒（同进程内某次持锁 panic）不能让归还路径失效 ——
+        // 原来的 `if let Ok(...)` 会把这次归还永久跳过，该来源（IPv6 为整个 /64）的
+        // 配额被已关闭的"幽灵连接"持续占用，累计到上限后整个网段被永久拒连。
+        // 锁中毒只说明**有别的线程**在持锁时 panic，map 数据本身仍然可用；
+        // 归还计数是纯数值操作，这里选择恢复数据继续归还（`into_inner` 不过panic）。
+        let mut map = self
+            .limiter
+            .per_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(n) = map.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.key);
             }
         }
     }
@@ -269,6 +277,42 @@ pub fn for_listener(addr: std::net::SocketAddr) -> Option<Arc<ConnectionLimiter>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔐 P2-8：锁中毒后，**归还路径**也不能失效。
+    ///
+    /// 原实现 drop 里用 `if let Ok(...)`：锁中毒时这次归还被永久跳过，
+    /// 该来源的配额被已关闭的"幽灵连接"持续占用，累计到上限后整个网段被拒连。
+    /// 这条测试验证：持锁 panic（锁中毒）之后，已占用配额的连接关闭时仍能归还。
+    #[test]
+    fn poisoned_lock_still_returns_quota_on_drop() {
+        let limiter = Arc::new(ConnectionLimiter::new(Some(2), Some(2)));
+        let ip: IpAddr = "198.51.100.9".parse().unwrap();
+
+        // 先正常占用全部配额
+        let g1 = limiter.acquire(ip).expect("第 1 条应通过");
+        let g2 = limiter.acquire(ip).expect("第 2 条应通过");
+
+        // 把锁弄中毒
+        let poisoner = {
+            let limiter = limiter.clone();
+            std::thread::spawn(move || {
+                let _guard = limiter.per_source.lock().unwrap();
+                panic!("deliberately poisoning the lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+        assert!(limiter.per_source.lock().is_err());
+
+        // 关闭连接 —— 归还必须在锁中毒状态下仍然生效
+        drop(g1);
+        drop(g2);
+
+        // 关键断言：配额已归还（新连接能再次通过）
+        let g3 = limiter
+            .acquire(ip)
+            .expect("P2-8：锁中毒后归还失效会让配额被幽灵连接永久占用，这条必须通过");
+        drop(g3);
+    }
 
     /// 🔐 问题 13-①：**锁中毒之后，限流器仍必须继续工作**。
     ///

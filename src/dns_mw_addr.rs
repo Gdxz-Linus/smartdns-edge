@@ -60,9 +60,18 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 }
             }
 
+            // 🔐 P2-5：AAAA 查询被本地规则回成 SOA（force-AAAA-SOA / address /域/#6）——
+            // 这是"刻意不给 AAAA"的指令，打上压制标记，外层 DNS64 看到标记不合成。
+            // （须在 answers/authorities 被 move 进响应前判定。）
+            let aaaa_suppressed =
+                query_type == RecordType::AAAA && !authorities.is_empty() && answers.is_empty();
+
             let mut lookup = DnsResponse::new_with_deadline(query, answers, valid_until);
             for auth in authorities {
                 lookup.add_authority(auth);
+            }
+            if aaaa_suppressed {
+                lookup.set_aaaa_suppressed(true);
             }
 
             // 🔐 B3：本地 address 规则 / 强制 SOA 的应答走的是这条**早返回**分支，

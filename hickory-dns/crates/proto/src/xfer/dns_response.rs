@@ -686,7 +686,7 @@ impl NegativeType {
 
 #[cfg(all(test, any(feature = "std", feature = "no-std-rand")))]
 mod tests {
-    use crate::op::{Message, Query, ResponseCode};
+    use crate::op::{Message, OpCode, Query, ResponseCode};
     use crate::rr::RData;
     use crate::rr::rdata::{A, CNAME, NS, SOA};
     use crate::rr::{Name, Record, RecordType};
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_contains_answer() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NXDomain);
         message.add_query(Query::query(Name::root(), RecordType::A));
         message.add_answer(Record::from_rdata(
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_nx_type1() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NXDomain);
         message.add_query(an_query());
         message.add_answer(an_cname_record());
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_nx_type2() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NXDomain);
         message.add_query(an_query());
         message.add_answer(an_cname_record());
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_nx_type3() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NXDomain);
         message.add_query(an_query());
         message.add_answer(an_cname_record());
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_nx_type4() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NXDomain);
         message.add_query(an_query());
         message.add_answer(an_cname_record());
@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_no_data_type1() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(another_query());
         message.add_authority(soa());
@@ -862,7 +862,7 @@ mod tests {
 
     #[test]
     fn test_no_data_type2() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(another_query());
         message.add_authority(soa());
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_no_data_type3() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(another_query());
 
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn referral() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(an_query());
         message.add_answer(an_cname_record());
@@ -904,7 +904,7 @@ mod tests {
         assert!(response.contains_answer());
         assert_eq!(ty.unwrap(), NegativeType::Referral);
 
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(another_query());
         message.add_authority(ns1_record());
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn contains_soa() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(Query::query(an_example(), RecordType::SOA));
         message.add_authority(soa());
@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn contains_any() {
-        let mut message = Message::query();
+        let mut message = Message::response(0, OpCode::Query);
         message.set_response_code(ResponseCode::NoError);
         message.add_query(Query::query(xx(), RecordType::ANY));
         message.add_authority(ns1_record());

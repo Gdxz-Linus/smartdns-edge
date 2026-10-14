@@ -390,6 +390,15 @@ fn build_encloser_candidates_list(
     salt: &[u8],
     iterations: u16,
 ) -> Vec<HashedNameInfo> {
+    // R-P1-1 修复：候选列表的前提是查询名是 SOA 名的子域（RFC 5155 的 encloser 语义）。
+    // 恶意应答可携带与查询域无关的 SOA 名；此时 base_name() 在根名上不再变化，
+    // 下面的循环永不终止（内存无限增长并卡死工作线程）。
+    // 查询名不在 SOA 区域内 → 返回空列表，下游按 Proof::Bogus 处理
+    // （与上游 hickory-dns PR #3597 的修复一致）。
+    if !soa_name.zone_of(query_name) {
+        return Vec::new();
+    }
+
     let mut candidates = Vec::with_capacity(query_name.num_labels() as usize);
 
     // `query_name` is our first candidate
@@ -400,9 +409,14 @@ fn build_encloser_candidates_list(
             // `soa_name` is the final candidate, we already added it.
             return candidates;
         }
-        name = name.base_name();
-        // TODO: can `query_name` *not* be a sub-name of `soa_name`?
-        debug_assert_ne!(name, Name::root());
+        let next = name.base_name();
+        // 第二道防线（与入口校验独立）：base_name() 在根名上返回自身，
+        // 若名字不再变化说明 SOA 名不是查询名的祖先（理论上入口校验已拦截，
+        // 此处保证循环必然终止，不依赖单一防线）。
+        if next == name {
+            return candidates;
+        }
+        name = next;
     }
 }
 
@@ -857,5 +871,108 @@ fn wildcard_based_encloser_proof<'a>(
             .map(|record| (closest_encloser_name_info, record)),
         next_closer: next_closer_covering_record.map(|record| (next_closer_name_info, record)),
         closest_encloser_wildcard: wildcard_encloser,
+    }
+}
+
+
+#[cfg(all(test, feature = "std"))]
+mod r_p1_1_tests {
+    use std::println;
+
+    use crate::dnssec::Proof;
+    use crate::op::{Message, MessageType, Query, ResponseCode};
+    use crate::rr::{Name, Record, RecordType};
+    use crate::dnssec::rdata::NSEC3;
+    use crate::rr::rdata::SOA;
+    use alloc::vec::Vec;
+
+    use super::{build_encloser_candidates_list, verify_nsec3};
+
+    fn name(s: &str) -> Name {
+        Name::from_ascii(s).unwrap()
+    }
+
+    /// R-P1-1 修复主用例：SOA 名与查询域无关 → 立即返回空列表（此前死循环）。
+    #[test]
+    fn disjoint_soa_name_yields_empty_candidates() {
+        let query = name("x.victim.com.");
+        let soa = name("evil.com.");
+        let candidates = build_encloser_candidates_list(&query, &soa, &[], 0);
+        assert!(candidates.is_empty(), "disjoint SOA must yield no candidates, got {}", candidates.len());
+    }
+
+    /// 回归保护：SOA 名是查询名的祖先 → 候选列表完整且以 SOA 名结尾。
+    #[test]
+    fn ancestor_soa_name_yields_full_candidates() {
+        let query = name("a.b.c.example.com.");
+        let soa = name("example.com.");
+        let candidates = build_encloser_candidates_list(&query, &soa, &[], 0);
+        assert_eq!(candidates.len(), 4, "a.b.c.example.com -> 4 candidates");
+        assert_eq!(&candidates.last().unwrap().name, &soa, "list must end with soa_name");
+        assert_eq!(&candidates.first().unwrap().name, &query, "list must start with query_name");
+    }
+
+    /// 查询名等于 SOA 名 → 单元素列表（合法边界）。
+    #[test]
+    fn equal_names_yield_single_candidate() {
+        let soa = name("example.com.");
+        let candidates = build_encloser_candidates_list(&soa, &soa, &[], 0);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    /// 构造带 SOA 与 NSEC3 的最小 NXDomain 应答（数据不要求密码学有效，
+    /// proof 判定在 NSEC3 记录收集门槛处就不通过——此处只验证"不挂死、返回 Bogus"）。
+    fn nxdomain_response(soa_name: &Name) -> Message {
+        let mut msg = Message::new(0x1234, MessageType::Response, crate::op::OpCode::Query);
+        msg.set_response_code(ResponseCode::NXDomain);
+        msg.add_query(Query::query(name("x.victim.com."), RecordType::A));
+        msg.add_authority(Record::from_rdata(
+            soa_name.clone(),
+            300,
+            crate::rr::RData::SOA(SOA::new(
+                name("ns.evil.com."),
+                name("hostmaster.evil.com."),
+                1, 2, 3, 4, 5,
+            )),
+        ));
+        // NSEC3 记录：owner 名为 <base32hash>.evil.com 形式
+        let nsec3_owner = Name::parse(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB.evil.com.",
+            Some(&Name::root()),
+        ).unwrap();
+        msg.add_authority(Record::from_rdata(
+            nsec3_owner,
+            300,
+            crate::rr::RData::DNSSEC(crate::dnssec::rdata::DNSSECRData::NSEC3(NSEC3::new(
+                crate::dnssec::Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                Vec::new(),
+                vec![1u8, 2, 3],
+                Vec::new(),
+            ))),
+        ));
+        msg
+    }
+
+    /// R-P1-1 端到端：SOA 名与查询域无关的 NXDomain 应答必须"快速返回 Bogus"，
+    /// 修复前此调用会无限循环（测试超时即为失败）。
+    #[test]
+    fn verify_nsec3_disjoint_soa_returns_bogus_without_hang() {
+        let query = Query::query(name("x.victim.com."), RecordType::A);
+        let soa = name("evil.com.");
+        let msg = nxdomain_response(&soa);
+
+        let nsec3s: Vec<(&Name, &NSEC3)> = msg
+            .authorities()
+            .iter()
+            .filter_map(|rr| rr.data().as_dnssec()?.as_nsec3().map(|d| (rr.name(), d)))
+            .collect();
+        assert!(!nsec3s.is_empty());
+
+        // 不设超时直接调用：修复前会死循环，测试框架超时即为失败信号
+        let proof = verify_nsec3(&query, &soa, ResponseCode::NXDomain, msg.answers(), &nsec3s, 0, 500);
+        assert_eq!(proof, Proof::Bogus);
+        let _ = println!("disjoint-soa NXDomain proof: {proof:?}");
     }
 }

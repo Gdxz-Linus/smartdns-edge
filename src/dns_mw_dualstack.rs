@@ -313,6 +313,15 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             process_resp(&mut that_resp, aaaa_blocked, final_ttl);
         }
 
+        // 🔐 P2-5：双栈优选把 AAAA 压掉（A 测速胜出）是**主动决策**——
+        // 给应答打上"AAAA 被刻意压制"标记，外层的 DNS64 中间件看到标记就不再合成，
+        // 避免"优选刚丢掉的 AAAA 被 DNS64 用合成地址加回来"。
+        // 依据 C 版（pymumu/smartdns）：双栈优选的子查询与 DNS64 互相隔离，压制优先。
+        if aaaa_blocked {
+            this_resp.set_aaaa_suppressed(true);
+            that_resp.set_aaaa_suppressed(true);
+        }
+
         // 🌟 结果入库：把兄弟记录打包推给上层 Cache 冰柜
         ctx.extra_cache_records
             .push((that_resp.query().clone(), that_resp));

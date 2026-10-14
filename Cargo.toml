@@ -238,6 +238,10 @@ console = { version = "0.15.8", optional = true }
 rangemap = "1.5.1"
 mac-addr = "0.3.0"
 fs3 = "0.5.0"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+aes = "0.8"
+cbc = { version = "0.1.2", features = ["alloc"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 uzers = { version = "0.12", default-features = false }

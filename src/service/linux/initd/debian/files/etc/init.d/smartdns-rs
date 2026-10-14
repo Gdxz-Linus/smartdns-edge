@@ -38,8 +38,26 @@ restart) log_daemon_msg "Restarting SmartDNS" "smartdns"
 reload|force-reload) log_daemon_msg "Reloading SmartDNS" "smartdns"
         log_end_msg 0
         ;;
-enable|disable) log_daemon_msg "Enable/disable SmartDNS" "smartdns"
-        log_end_msg 0
+enable)
+        log_daemon_msg "Enabling SmartDNS (rc.d links)" "smartdns"
+        # 🔐 P2-15：原来 enable/disable 分支只打日志就返回 0 —— service install 调它显示成功，
+        # 但 update-rc.d 从未执行，重启后服务不会自启（假成功）。现在真正登记开机自启。
+        if update-rc.d smartdns defaults >/dev/null 2>&1; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+            exit 1
+        fi
+        ;;
+disable)
+        log_daemon_msg "Disabling SmartDNS (rc.d links)" "smartdns"
+        # 🔐 P2-15：真正移除 rc.d 链接；-f 必须带（脚本存在时 update-rc.d remove 需要 force）。
+        if update-rc.d -f smartdns remove >/dev/null 2>&1; then
+            log_end_msg 0
+        else
+            log_end_msg 1
+            exit 1
+        fi
         ;;
 status)
         status_of_proc -p $PIDFILE $DAEMON $NAME && exit 0 || exit $?

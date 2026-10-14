@@ -12,7 +12,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
+#[cfg(not(test))]
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use tokio::time::{Duration, Instant};
 
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, Stream, StreamExt, once};
