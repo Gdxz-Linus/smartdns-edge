@@ -111,7 +111,7 @@
 | serve-expired-prefetch-time | Prefetch timeout | 21600 | seconds. After cache expires, if accessed within this time (default 6h), it serves stale cache instantly and triggers async background renew. | serve-expired-prefetch-time 21600 |
 | dualstack-ip-selection | Dualstack IP selection | yes | [yes\|no]. May be written inside a `group-begin` rule group (domain rule > group > global) | dualstack-ip-selection yes |
 | dualstack-ip-selection-threshold | Dualstack ip select thresholds | 10ms | millisecond. May be written inside a `group-begin` rule group (group > global) | dualstack-ip-selection-threshold [0-1000] |
-| dualstack-ip-allow-force-AAAA | Whether dual-stack selection may suppress A records | no | [yes\|no]. May be written inside a `group-begin` rule group (group > global) | dualstack-ip-allow-force-AAAA yes |
+| dualstack-ip-allow-force-AAAA | Whether dual-stack selection may return only the AAAA records | no | [yes\|no]. May be written inside a `group-begin` rule group (group > global) | dualstack-ip-allow-force-AAAA yes |
 | user | run as user | root | user [username] | user nobody |
 | ca-file | certificate file | /etc/ssl/certs/... | path | ca-file /etc/ssl/certs/ca-certificates.crt |
 | ca-path | certificates path | /etc/ssl/certs | path | ca-path /etc/ssl/certs |

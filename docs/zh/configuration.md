@@ -111,7 +111,7 @@
 | serve-expired-prefetch-time | 缓存过期多久后，再次访问就触发后台更新 | 21600 | 秒 | serve-expired-prefetch-time 21600 |
 | dualstack-ip-selection | 双栈 IP 优选 | yes | [yes\|no]。可写在 `group-begin` 规则组里（域名规则 > 组级 > 全局） | dualstack-ip-selection yes |
 | dualstack-ip-selection-threshold | 双栈 IP 优选阈值 | 10ms | 单位为毫秒（ms）。可写在 `group-begin` 规则组里（组级 > 全局） | dualstack-ip-selection-threshold [0-1000] |
-| dualstack-ip-allow-force-AAAA | 双栈优选时是否允许压掉 A 记录 | no | [yes\|no]。可写在 `group-begin` 规则组里（组级 > 全局） | dualstack-ip-allow-force-AAAA yes |
+| dualstack-ip-allow-force-AAAA | 双栈优选时是否允许只返回 AAAA 记录 | no | [yes\|no]。可写在 `group-begin` 规则组里（组级 > 全局） | dualstack-ip-allow-force-AAAA yes |
 | user | 进程运行用户 | root | user [username] | user nobody |
 | ca-file | TLS 校验用的 CA 证书文件 | /etc/ssl/.../ca-certificates.crt | 合法路径字符串 | ca-file /etc/ssl/certs/ca-certificates.crt |
 | ca-path | CA 证书所在目录 | /etc/ssl/certs | 合法路径字符串 | ca-path /etc/ssl/certs |
