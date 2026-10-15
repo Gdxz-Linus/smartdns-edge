@@ -1,6 +1,6 @@
 ### 概述
 
-修复 **53 个问题**，集中在解析结果的准确性、服务的稳定性与安全防御；新增自签证书自动生成、加密私钥支持等四项功能。升级无需改配置，原有配置文件可直接沿用。
+修复 **63 个问题**，集中在解析结果的准确性、服务的稳定性与安全防御；新增自签证书自动生成、加密私钥支持等四项功能。升级无需改配置，原有配置文件可直接沿用。
 
 ### 新增功能
 
@@ -54,7 +54,7 @@
 
 ## English
 
-Fixed **53 issues**, focused on resolution correctness, service stability and security; four new features including self-signed certificate auto-generation and encrypted private-key support. No config change needed to upgrade.
+Fixed **63 issues**, focused on resolution correctness, service stability and security; four new features including self-signed certificate auto-generation and encrypted private-key support. No config change needed to upgrade.
 
 **Resolution correctness** — dual-stack selection no longer picks wrong addresses (TTL taken from the slower side, empty answers winning races, selection staying active with speed check off, SOA override blocking A-record queries); DNS64 prefix layout is now fully RFC 6052 compliant (all six legal prefix lengths, invalid ones rejected at startup); `\DDD` escapes in names are decoded as decimal per RFC 1035 (was octal); SVCB/HTTPS key notation is now consistent between text and wire form; cache entries that differ only in TTL are no longer silently dropped; PTR queries for private addresses are no longer short-circuited, so LAN hostnames resolve again; ECS cache entries no longer lose their subnet on refresh.
 
