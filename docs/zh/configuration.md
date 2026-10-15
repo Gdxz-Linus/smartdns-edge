@@ -72,7 +72,7 @@
 | srv-record | 指定SRV记录 | 无 | srv-record /domain/[target][,port][,priority][,weight] | srv-record /_vlmcs._tcp/example.com,1688,1,1|
 | https-record | 指定HTTPS记录 | 无 | https-record /domain/[target=][,port=]... <br /> # 表示返回SOA<br /> - 表示忽略规则| https-record /example.com/alpn="h2,http/1.1" |
 | local-domain | 把该域名（含子域名）交给 **mDNS** 那一组解析 | 无 | 可多条；写 `-` 清空。**需要同时开 `mdns-lookup yes`**，否则启动时会告警 | local-domain lan |
-| dns64 | DNS64 转换前缀（AAAA 无真实 IPv6 结果时将 A 记录合成为 AAAA，需网络内有 NAT64 网关） | 无 | ipv6前缀和掩码（不大于 /96）。<br />可写在 `group-begin` 规则组里（组级 > 全局）。<br />同组同时配置 `force-AAAA-SOA` 时压制优先、该组不做合成。<br />内置 `ipv4only.arpa` 探测应答（RFC 7050） | dns64 64:ff9b::/96 |
+| dns64 | DNS64 转换前缀（AAAA 无真实 IPv6 结果时将 A 记录合成为 AAAA，需网络内有 NAT64 网关） | 无 | ipv6前缀和掩码（不大于 /96）。<br />可写在 `group-begin` 规则组里（组级 > 全局）。<br />同组同时配置 `force-AAAA-SOA` 时，优先返回 SOA、不做 DNS64 合成。<br />内置 `ipv4only.arpa` 的识别处理（RFC 7050）：对该域名的查询直接按规范返回固定应答，不发往上游。 | dns64 64:ff9b::/96 |
 | mdns-lookup | 是否启用 mDNS 查询 | no | [yes\|no]。`.local` 与 `local-domain` 声明的域名走组播解析 | mdns-lookup yes|
 | hosts-file | 指定hosts文件 | 无 | hosts文件路径 | hosts-file /etc/hosts |
 | dnsmasq-lease-file | 读取 dnsmasq 的 DHCP 租约，解析局域网设备主机名 | 无 | 租约文件路径 | dnsmasq-lease-file /var/lib/misc/dnsmasq.leases |
