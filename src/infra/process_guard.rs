@@ -53,7 +53,7 @@ fn fixed_lock_path() -> PathBuf {
                 return dir.join("smartdns.lock");
             }
         }
-        return std::env::temp_dir().join("smartdns.lock");
+        std::env::temp_dir().join("smartdns.lock")
     }
 
     #[cfg(not(windows))]

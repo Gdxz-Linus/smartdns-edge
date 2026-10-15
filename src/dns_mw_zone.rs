@@ -42,11 +42,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsZoneMiddle
 mod tests {
 
     use super::*;
+    use crate::dns_mw_hosts::DnsHostsMiddleware;
     use crate::infra::ipset::IpSet;
-    use crate::libdns::proto::rr::rdata::PTR;
     use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::DNSClass;
-    use crate::dns_mw_hosts::DnsHostsMiddleware;
+    use crate::libdns::proto::rr::rdata::PTR;
     use crate::{dns_conf::RuntimeConfig, dns_mw::*};
     use std::net::SocketAddr;
 
@@ -111,9 +111,7 @@ mod tests {
         assert!(local_net.overlap(&net2));
     }
 
-
-
-#[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_localptr_nxdomain_for_private_ptr_not_owned() {
         // R-P1-1 隐私定调回归：私网 PTR 且无本地数据 → NXDOMAIN（不得外发上游）。
         let cfg = RuntimeConfig::builder().build().unwrap();
@@ -132,7 +130,10 @@ mod tests {
             "无本地数据的私网 PTR 不应有 Answer"
         );
         // rcode：设计定调是 NXDOMAIN。若实现走的是"转发上游"，这里会拿到上游应答。
-        println!("private-ptr-not-owned rcode: {:?}", response.response_code());
+        println!(
+            "private-ptr-not-owned rcode: {:?}",
+            response.response_code()
+        );
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_private_ptr_from_hosts_file_answers_before_localptr() {
@@ -168,7 +169,6 @@ mod tests {
             "私网 PTR 应由 hosts 数据回答（修复前被外层 LocalPtr 的 NXDOMAIN 短路）"
         );
     }
-
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_server_hostname() {

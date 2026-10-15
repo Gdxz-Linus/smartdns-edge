@@ -2120,15 +2120,12 @@ impl RuntimeConfigBuilder {
                 // `group-begin X -inherit default` 时直接查表会得到空。
                 // 回退到栈中名为 default 的帧（即顶层配置的现场），语义与 C 版一致：
                 // 继承在推入时解析，只包含截至目前已出现的顶层规则。
-                self.rule_groups
-                    .get(DEFAULT_GROUP)
-                    .cloned()
-                    .or_else(|| {
-                        self.rule_group_stack
-                            .iter()
-                            .find(|(name, _)| name == DEFAULT_GROUP)
-                            .map(|(_, g)| g.clone())
-                    })
+                self.rule_groups.get(DEFAULT_GROUP).cloned().or_else(|| {
+                    self.rule_group_stack
+                        .iter()
+                        .find(|(name, _)| name == DEFAULT_GROUP)
+                        .map(|(_, g)| g.clone())
+                })
             }
             Some(name) => match self.rule_groups.get(name) {
                 Some(g) => Some(g.clone()),
@@ -2934,10 +2931,11 @@ fn resolve_filepath<P: AsRef<Path>>(
     // 为什么单元测试发现不了：单元测试的进程工作目录是 `target/debug/deps`，
     // 那里没有与 conf-file 同名的文件，`exists()` 恰好为假，缺陷被完全掩盖 ——
     // 这条只有**真机端到端**（工作目录里放一个同名诱饵文件）才能暴露。
-    if fallback == RelativePathFallback::ConfigDirOnly && !filepath.is_absolute() {
-        if let Some(dir) = base_file.and_then(|f| f.parent()) {
-            return dir.join(filepath);
-        }
+    if fallback == RelativePathFallback::ConfigDirOnly
+        && !filepath.is_absolute()
+        && let Some(dir) = base_file.and_then(|f| f.parent())
+    {
+        return dir.join(filepath);
     }
 
     filepath.to_path_buf()
@@ -3215,8 +3213,7 @@ mod tests {
         );
     }
 
-
-/// R-P1-6 精确判别：-inherit default 是否把**顶层规则合并进 child 组本身**。
+    /// R-P1-6 精确判别：-inherit default 是否把**顶层规则合并进 child 组本身**。
     /// （find_domain_rule 有 default 回退，会掩盖继承是否生效——必须直接查 child 组的树。）
     #[test]
     fn test_group_inherit_default_merges_top_level_rules() {
@@ -4585,10 +4582,7 @@ mod tests {
     /// 这条测试在所有平台跑（非 Windows 平台同样允许写 `\` 分隔的路径字符串）。
     #[test]
     fn test_expand_conf_pattern_backslash_separators() {
-        let dir = std::env::temp_dir().join(format!(
-            "conf-pattern-bs-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("conf-pattern-bs-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("conf.d")).unwrap();
         std::fs::write(dir.join("conf.d").join("10-a.conf"), "#\n").unwrap();
@@ -4597,9 +4591,7 @@ mod tests {
         // 用平台分隔符拼出合法绝对路径，再把分隔符全部换成 `\`，
         // 模拟 Windows 用户在配置里写的原始写法。
         let posix = dir.join("conf.d").join("*.conf");
-        let backslashed = std::path::PathBuf::from(
-            posix.to_string_lossy().replace('/', "\\"),
-        );
+        let backslashed = std::path::PathBuf::from(posix.to_string_lossy().replace('/', "\\"));
 
         let mut names = expand_conf_pattern(&backslashed, None)
             .iter()
@@ -4958,7 +4950,7 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &["proxy-server", "api-token", "bind-cert
 /// 1. 首关键字属于敏感项 → 只报关键字，值整段隐藏；
 /// 2. 其余行 → 原样返回，但把 URL 里的 `user:pass@` 打码（防"配置项认出来了、行尾粘了个带口令的代理 URL"）。
 pub(crate) fn redact_config_line(line: &str) -> String {
-    if let Some(kw) = line.trim_start().split_whitespace().next() {
+    if let Some(kw) = line.split_whitespace().next() {
         let kw_lower = kw.to_ascii_lowercase();
         if SENSITIVE_CONFIG_KEYS.contains(&kw_lower.as_str()) {
             return format!("{kw} <已隐藏：该行含口令/密码>");

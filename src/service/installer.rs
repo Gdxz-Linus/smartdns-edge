@@ -446,14 +446,11 @@ impl Installer {
                 };
 
                 let display_path = match dest_path.canonicalize() {
-                    Ok(path) => {
-                        let s = path.to_string_lossy();
-                        if s.starts_with(r"\\?\") {
-                            s[4..].to_string()
-                        } else {
-                            s.into_owned()
-                        }
-                    }
+                    Ok(path) => path
+                        .to_string_lossy()
+                        .strip_prefix(r"\\?\")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned()),
                     Err(_) => dest_path.to_string_lossy().into_owned(),
                 };
 

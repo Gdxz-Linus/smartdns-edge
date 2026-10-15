@@ -44,7 +44,7 @@ pub struct ServeState {
 /// - `Referrer-Policy: no-referrer`：后台地址不要随外链泄漏出去；
 /// - CSP：默认什么外部资源都不许加载，只放行内联脚本/样式与 Swagger 文档页用的 CDN
 ///   （文档页 `/api/docs` 是自带网页、需要这两项；其余接口都是 JSON，放行它们不会带来额外风险，
-///    而 `object-src 'none'`、`base-uri 'none'` 仍然挡着插件与 `<base>` 劫持）。
+///   而 `object-src 'none'`、`base-uri 'none'` 仍然挡着插件与 `<base>` 劫持）。
 const SECURITY_CSP: &str = "default-src 'none';      script-src 'self' 'unsafe-inline' https://unpkg.com;      style-src 'self' 'unsafe-inline' https://unpkg.com;      img-src 'self' data:; connect-src 'self';      frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
 
 /// 给路由套上上面那组安全响应头（后台与 `-no-api` 的纯 DoH 监听都用它）。
@@ -263,8 +263,7 @@ impl<T> From<Vec<T>> for DataListPayload<T> {
 // OnceLock 只在第一次生效，热重载改了配置里的 api-token 后新口令到不了这里，
 // 旧口令继续有效、新口令不生效，必须重启进程才能轮换（"改了不生效"类缺陷）。
 // RwLock 读路径每请求一次、无写竞争；None 表示"尚未初始化"（首次访问时按原取值顺序生成）。
-static API_TOKEN: std::sync::RwLock<Option<std::sync::Arc<String>>> =
-    std::sync::RwLock::new(None);
+static API_TOKEN: std::sync::RwLock<Option<std::sync::Arc<String>>> = std::sync::RwLock::new(None);
 static API_TOKEN_FROM_USER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -292,7 +291,9 @@ pub fn set_configured_token(token: Option<String>) {
         };
         *API_TOKEN.write().unwrap() = Some(std::sync::Arc::new(token));
         if let Some(_old) = rotated {
-            crate::log::info!("management console token has been rotated (the previous token no longer works)");
+            crate::log::info!(
+                "management console token has been rotated (the previous token no longer works)"
+            );
         }
     }
 }
@@ -327,7 +328,9 @@ pub fn api_token() -> std::sync::Arc<String> {
             "the management console has no token configured, so one was generated: {token} (to make it permanent, add this line to the configuration: api-token {token})"
         );
         println!("[smartdns] management console token (randomly generated for this run): {token}");
-        println!("[smartdns] to make it permanent, add this line to the configuration file: api-token {token}");
+        println!(
+            "[smartdns] to make it permanent, add this line to the configuration file: api-token {token}"
+        );
         token
     };
     let token = std::sync::Arc::new(token);
@@ -775,7 +778,6 @@ mod auth_limit_tests {
     }
 }
 
-
 #[cfg(test)]
 mod p2_9_tests {
     use super::*;
@@ -803,8 +805,16 @@ mod p2_9_tests {
 
         // 空/空白口令不覆盖
         set_configured_token(None);
-        assert_eq!(api_token().as_str(), "token-third", "空口令不应覆盖已有口令");
+        assert_eq!(
+            api_token().as_str(),
+            "token-third",
+            "空口令不应覆盖已有口令"
+        );
         set_configured_token(Some("   ".into()));
-        assert_eq!(api_token().as_str(), "token-third", "纯空白口令不应覆盖已有口令");
+        assert_eq!(
+            api_token().as_str(),
+            "token-third",
+            "纯空白口令不应覆盖已有口令"
+        );
     }
 }

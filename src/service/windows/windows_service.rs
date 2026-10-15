@@ -113,7 +113,7 @@ fn run_service(_args: Vec<OsString>) -> Result<()> {
 
     // 🔐 问题 47：把句柄放进共享槽位，供**已注册的事件处理器**上报状态使用。
     // 放在"已运行"状态上报**之前**：此后任何 Stop 通知都能立刻上报 STOP_PENDING。
-    let _ = STATUS_HANDLE.set(status_handle.clone());
+    let _ = STATUS_HANDLE.set(status_handle);
 
     let service_type = ServiceType::OWN_PROCESS;
 

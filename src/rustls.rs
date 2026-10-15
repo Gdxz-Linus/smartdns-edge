@@ -344,10 +344,10 @@ fn extract_spki(cert_der: &[u8]) -> Option<Vec<u8>> {
     // 第一个字段可能是 [0] version（v2/v3 证书都有）：先把它跳掉，
     // 这样后面的位置就固定了 —— serialNumber, signature, issuer, validity, subject,
     // subjectPublicKeyInfo（= 第 6 个）。
-    if let Some((tag, _, total)) = read_tlv(rest) {
-        if tag == 0xA0 {
-            rest = &rest[total..];
-        }
+    if let Some((tag, _, total)) = read_tlv(rest)
+        && tag == 0xA0
+    {
+        rest = &rest[total..];
     }
 
     for index in 1..=6 {
@@ -495,11 +495,11 @@ impl TlsServerCertResolver {
                         .collect::<Vec<_>>()
                         .join("");
                     base64::decode(body.trim()).map_err(|e| {
-                            Error::LoadCertificateKeyFailed(
-                                key_path.to_path_buf(),
-                                format!("invalid base64 in encrypted private key: {e}"),
-                            )
-                        })?
+                        Error::LoadCertificateKeyFailed(
+                            key_path.to_path_buf(),
+                            format!("invalid base64 in encrypted private key: {e}"),
+                        )
+                    })?
                 };
                 match decrypt_pkcs8_encrypted_private_key(&der, passphrase) {
                     Ok(plain) => {
@@ -967,20 +967,17 @@ pub fn decrypt_pkcs8_encrypted_private_key(
             "ciphertext not block-aligned",
         ));
     }
-    
+
     let mut buf = encrypted.to_vec();
-    let dec = cbc::Decryptor::<aes::Aes256>::new_from_slices(
-        &derived[..params.key_len],
-        &params.iv,
-    )
-    .map_err(|_| DecryptError::MalformedParameters("bad key/iv length"))?;
+    let dec =
+        cbc::Decryptor::<aes::Aes256>::new_from_slices(&derived[..params.key_len], &params.iv)
+            .map_err(|_| DecryptError::MalformedParameters("bad key/iv length"))?;
     let plain = dec
         .decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf)
         .map_err(|_| DecryptError::WrongPassphrase)?;
 
     Ok(plain.to_vec())
 }
-
 
 /// P2-1 解密模块的单元测试（夹具：tests/test_data/tls/ 下 openssl 预生成的加密私钥）
 ///
@@ -1068,4 +1065,3 @@ mod decrypt_tests {
         assert!(matches!(err, DecryptError::MalformedParameters(_)));
     }
 }
-

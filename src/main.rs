@@ -8,8 +8,8 @@ use std::str::FromStr;
 
 mod api;
 mod app;
-mod cli;
 mod cert_gen;
+mod cli;
 mod collections;
 mod config;
 mod dns;

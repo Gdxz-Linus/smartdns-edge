@@ -415,123 +415,99 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 .unwrap_or_default()
                 || ctx.server_opts.no_serve_expired();
 
-            match self.cache.get(&cache_key, Instant::now()).await {
-                // 🌟 因为 Key 已经包含了 Group，命中必定是同组，免去判断！
-                Some((res, status)) => {
-                    match status {
-                        CacheStatus::Valid => {
-                            debug!(
-                                "name: {} {} using caching (ECS: {:?})",
-                                cache_key.query.name(),
-                                cache_key.query.query_type(),
-                                cache_key.ecs
-                            );
-                            ctx.source = LookupFrom::Cache;
-                            return Ok(res);
-                        }
-                        // 📌 丙-1：这两个现在按规则组取值（逐查询）。
-                        // `ctx.serve_expired()` 是"组级 > 全局"；
-                        // `ctx.serve_expired_reply_ttl()` 同理。
-                        CacheStatus::Expired if ctx.serve_expired() && !no_serve_expired => {
-                            if self.cache.mark_prefetching(&cache_key).await {
-                                // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
-                                // ⚠️ 这个基准必须与本次判断同源：既然"要不要喂"是按组判断的，
-                                // 喂出去的寿命也必须按同一条取值链取，否则两个组会共用同一个
-                                // 时间戳、双栈兄弟记录会对不齐。
-                                let reply_ttl = Duration::from_secs(ctx.serve_expired_reply_ttl());
-                                let sync_valid_until = Instant::now() + reply_ttl;
+            if let Some((res, status)) = self.cache.get(&cache_key, Instant::now()).await {
+                match status {
+                    CacheStatus::Valid => {
+                        debug!(
+                            "name: {} {} using caching (ECS: {:?})",
+                            cache_key.query.name(),
+                            cache_key.query.query_type(),
+                            cache_key.ecs
+                        );
+                        ctx.source = LookupFrom::Cache;
+                        return Ok(res);
+                    }
+                    // 📌 丙-1：这两个现在按规则组取值（逐查询）。
+                    // `ctx.serve_expired()` 是"组级 > 全局"；
+                    // `ctx.serve_expired_reply_ttl()` 同理。
+                    CacheStatus::Expired if ctx.serve_expired() && !no_serve_expired => {
+                        if self.cache.mark_prefetching(&cache_key).await {
+                            // 🌟 核心修复 3：生成全局唯一的同步时间戳基准！
+                            // ⚠️ 这个基准必须与本次判断同源：既然"要不要喂"是按组判断的，
+                            // 喂出去的寿命也必须按同一条取值链取，否则两个组会共用同一个
+                            // 时间戳、双栈兄弟记录会对不齐。
+                            let reply_ttl = Duration::from_secs(ctx.serve_expired_reply_ttl());
+                            let sync_valid_until = Instant::now() + reply_ttl;
 
-                                self.cache
-                                    .set_valid_until_for_prefetch(&cache_key, sync_valid_until)
-                                    .await;
+                            self.cache
+                                .set_valid_until_for_prefetch(&cache_key, sync_valid_until)
+                                .await;
 
-                                let mut guards = vec![PrefetchGuard {
-                                    cache: self.cache.clone(),
-                                    key: cache_key.clone(),
-                                }];
-                                let mut opts = ctx.server_opts.clone();
-                                opts.is_background = true;
-                                let client = self.client.with_new_opt(opts);
+                            let mut guards = vec![PrefetchGuard {
+                                cache: self.cache.clone(),
+                                key: cache_key.clone(),
+                            }];
+                            let mut opts = ctx.server_opts.clone();
+                            opts.is_background = true;
+                            let client = self.client.with_new_opt(opts);
 
-                                if cache_key.query.query_type().is_ip_addr() {
-                                    let other_type = match cache_key.query.query_type() {
-                                        RecordType::A => RecordType::AAAA,
-                                        RecordType::AAAA => RecordType::A,
-                                        other => {
-                                            // 🔐 P0-2：上游已用 is_ip_addr() 过滤（仅 A/AAAA），
-                                            // 到不了这里；真到了也不 panic，退回缓存结果。
-                                            crate::log::warn!(
-                                                "prefetch: unexpected record type {other:?}, skip prefetch"
-                                            );
-                                            return Ok(res);
-                                        }
-                                    };
-                                    let other_key = CacheKey {
-                                        query: Query::query(
-                                            cache_key.query.name().clone(),
-                                            other_type,
-                                        ),
-                                        group: cache_key.group.clone(),
-                                        ecs: cache_key.ecs.clone(),
-                                        opts: cache_key.opts.clone(),
-                                    };
-
-                                    if self.cache.mark_prefetching(&other_key).await {
-                                        // 🌟 核心修复 4：双栈兄弟使用完全一样的基准时间戳，绝对对齐！
-                                        self.cache
-                                            .set_valid_until_for_prefetch(
-                                                &other_key,
-                                                sync_valid_until,
-                                            )
-                                            .await;
-                                        guards.push(PrefetchGuard {
-                                            cache: self.cache.clone(),
-                                            key: other_key,
-                                        });
+                            if cache_key.query.query_type().is_ip_addr() {
+                                let other_type = match cache_key.query.query_type() {
+                                    RecordType::A => RecordType::AAAA,
+                                    RecordType::AAAA => RecordType::A,
+                                    other => {
+                                        // 🔐 P0-2：上游已用 is_ip_addr() 过滤（仅 A/AAAA），
+                                        // 到不了这里；真到了也不 panic，退回缓存结果。
+                                        crate::log::warn!(
+                                            "prefetch: unexpected record type {other:?}, skip prefetch"
+                                        );
+                                        return Ok(res);
                                     }
+                                };
+                                let other_key = CacheKey {
+                                    query: Query::query(cache_key.query.name().clone(), other_type),
+                                    group: cache_key.group.clone(),
+                                    ecs: cache_key.ecs.clone(),
+                                    opts: cache_key.opts.clone(),
+                                };
+
+                                if self.cache.mark_prefetching(&other_key).await {
+                                    // 🌟 核心修复 4：双栈兄弟使用完全一样的基准时间戳，绝对对齐！
+                                    self.cache
+                                        .set_valid_until_for_prefetch(&other_key, sync_valid_until)
+                                        .await;
+                                    guards.push(PrefetchGuard {
+                                        cache: self.cache.clone(),
+                                        key: other_key,
+                                    });
                                 }
-
-                                let client_clone = client.clone();
-                                let self_key = cache_key.clone();
-                                tokio::spawn(async move {
-                                    let _guards = guards;
-                                    // 🔐 R-P1-4 修复：内联刷新与后台预取走**同一个组包函数**
-                                    // （prefetch_query_for 会把原记录的 ECS 装回查询的 EDNS）。
-                                    // 修复前这里手写 Message::query() 不带 ECS——刷新落在
-                                    // "不带 ECS"的那条缓存记录上，带 ECS 的过期条目被
-                                    // set_valid_until_for_prefetch 无限续命却永远刷不到新数据。
-                                    // 后果与 2026-09-18 为预取路径定调过的完全同型（见
-                                    // prefetch_query_for 的文档注释）。
-                                    let msg = prefetch_query_for(&self_key);
-                                    client_clone.send(msg).await;
-                                });
-
-                                // 🌟 统一公式：触发者也老老实实算时间！同样向上取整！
-                                let mut resurrected_res = res;
-                                let ttl_duration =
-                                    sync_valid_until.saturating_duration_since(Instant::now());
-                                let mut actual_ttl = ttl_duration.as_secs() as u32;
-                                if ttl_duration.subsec_nanos() > 0 {
-                                    actual_ttl += 1;
-                                }
-                                resurrected_res.set_new_ttl(actual_ttl);
-
-                                debug!(
-                                    "name: {} {} using caching (Expired) (ECS: {:?})",
-                                    cache_key.query.name(),
-                                    cache_key.query.query_type(),
-                                    cache_key.ecs
-                                );
-                                ctx.source = LookupFrom::Cache;
-                                return Ok(resurrected_res);
                             }
 
-                            // 极小概率兜底：如果有其他并发已经拿了预取锁，但时间戳还未更新完毕
-                            // 📌 丙-1：这里同样按组取值 —— 它已经处在"决定要喂过期数据"之后，
-                            // 若这里退回全局值，同一组的两次应答会带出**两个不同的 TTL**。
-                            let reply_ttl_secs = ctx.serve_expired_reply_ttl() as u32;
-                            let mut fallback_res = res;
-                            fallback_res.set_new_ttl(reply_ttl_secs);
+                            let client_clone = client.clone();
+                            let self_key = cache_key.clone();
+                            tokio::spawn(async move {
+                                let _guards = guards;
+                                // 🔐 R-P1-4 修复：内联刷新与后台预取走**同一个组包函数**
+                                // （prefetch_query_for 会把原记录的 ECS 装回查询的 EDNS）。
+                                // 修复前这里手写 Message::query() 不带 ECS——刷新落在
+                                // "不带 ECS"的那条缓存记录上，带 ECS 的过期条目被
+                                // set_valid_until_for_prefetch 无限续命却永远刷不到新数据。
+                                // 后果与 2026-09-18 为预取路径定调过的完全同型（见
+                                // prefetch_query_for 的文档注释）。
+                                let msg = prefetch_query_for(&self_key);
+                                client_clone.send(msg).await;
+                            });
+
+                            // 🌟 统一公式：触发者也老老实实算时间！同样向上取整！
+                            let mut resurrected_res = res;
+                            let ttl_duration =
+                                sync_valid_until.saturating_duration_since(Instant::now());
+                            let mut actual_ttl = ttl_duration.as_secs() as u32;
+                            if ttl_duration.subsec_nanos() > 0 {
+                                actual_ttl += 1;
+                            }
+                            resurrected_res.set_new_ttl(actual_ttl);
+
                             debug!(
                                 "name: {} {} using caching (Expired) (ECS: {:?})",
                                 cache_key.query.name(),
@@ -539,14 +515,28 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                                 cache_key.ecs
                             );
                             ctx.source = LookupFrom::Cache;
-                            return Ok(fallback_res);
+                            return Ok(resurrected_res);
                         }
-                        // 明确不要过期数据（全局 serve-expired no / 域名级 no-serve-expired）：
-                        // 就地丢弃 —— 上游失败时也不拿它兜底（用户定调）。
-                        CacheStatus::Expired => {}
+
+                        // 极小概率兜底：如果有其他并发已经拿了预取锁，但时间戳还未更新完毕
+                        // 📌 丙-1：这里同样按组取值 —— 它已经处在"决定要喂过期数据"之后，
+                        // 若这里退回全局值，同一组的两次应答会带出**两个不同的 TTL**。
+                        let reply_ttl_secs = ctx.serve_expired_reply_ttl() as u32;
+                        let mut fallback_res = res;
+                        fallback_res.set_new_ttl(reply_ttl_secs);
+                        debug!(
+                            "name: {} {} using caching (Expired) (ECS: {:?})",
+                            cache_key.query.name(),
+                            cache_key.query.query_type(),
+                            cache_key.ecs
+                        );
+                        ctx.source = LookupFrom::Cache;
+                        return Ok(fallback_res);
                     }
+                    // 明确不要过期数据（全局 serve-expired no / 域名级 no-serve-expired）：
+                    // 就地丢弃 —— 上游失败时也不拿它兜底（用户定调）。
+                    CacheStatus::Expired => {}
                 }
-                None => {}
             }
         }
 
@@ -873,7 +863,7 @@ fn spawn_prefetch_task(cache: &Arc<DnsCache>, client_handle: DnsHandle) -> Cance
                         // 目标组的过期条目永远刷不到、还会在默认键上多写一份。
                         // 🔐 处理选项也要跟着复原：刷新必须按**原来那套口径**去算，
                         // 否则算出来的答案会写到"默认口径"的标记下面，这条永远刷不到。
-                        let opts = cache_key.opts.into_server_opts(cache_key.group.clone());
+                        let opts = cache_key.opts.to_server_opts(cache_key.group.clone());
                         let req_client = client.with_new_opt(opts);
                         let cache_clone = cache_arc.clone();
 

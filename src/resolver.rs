@@ -781,7 +781,11 @@ mod tests {
             query_class: cmd.q_class(),
             ..Default::default()
         };
-        assert_eq!(options.query_class, DNSClass::CH, "LookupOptions 必须带上 CH");
+        assert_eq!(
+            options.query_class,
+            DNSClass::CH,
+            "LookupOptions 必须带上 CH"
+        );
 
         // 不指定类别时默认 IN
         let cmd = ResolveCommand::try_parse_from(["dig", "example.com"]).unwrap();
@@ -803,8 +807,12 @@ mod tests {
         assert!(!cmd.json);
 
         // 混合顺序也要全部生效
-        let cmd = ResolveCommand::try_parse_from(["dig", "-1", "example.com", "-U", "--json"]).unwrap();
-        assert!(cmd.json && cmd.short, "格式开关与协议参数任意交错都必须全部生效");
+        let cmd =
+            ResolveCommand::try_parse_from(["dig", "-1", "example.com", "-U", "--json"]).unwrap();
+        assert!(
+            cmd.json && cmd.short,
+            "格式开关与协议参数任意交错都必须全部生效"
+        );
         assert!(cmd.proto.udp, "协议参数本身不受影响");
     }
 }

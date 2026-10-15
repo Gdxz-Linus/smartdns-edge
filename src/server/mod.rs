@@ -51,7 +51,7 @@ pub(crate) fn error_backoff_delay(streak: u32) -> std::time::Duration {
 
 /// 出错日志降频：前 3 次逐条打，之后每 100 次打一条（避免日志被刷爆）。
 pub(crate) fn should_log_stream_error(streak: u32) -> bool {
-    streak <= 3 || streak % 100 == 0
+    streak <= 3 || streak.is_multiple_of(100)
 }
 
 pub fn serve(
@@ -75,7 +75,8 @@ pub fn serve(
     //  会把 TCP 行的限额对象顶掉，TCP 连接按错误的值受限）。
     // TCP 类监听之间同地址会被 bind 失败拦截（无 REUSEPORT），不存在覆盖问题。
     let opts = bind_addr_config.server_opts();
-    let has_listener_limits = opts.max_connections.is_some() || opts.max_connections_per_ip.is_some();
+    let has_listener_limits =
+        opts.max_connections.is_some() || opts.max_connections_per_ip.is_some();
     let is_udp_listener = matches!(bind_addr_config, BindAddrConfig::Udp(_));
     if has_listener_limits && is_udp_listener {
         crate::log::warn!(
@@ -97,6 +98,8 @@ pub fn serve(
 
     let dns_handle = handle.with_new_opt(bind_addr_config.server_opts().clone());
 
+    // 参数个数由配置项决定（证书各开关逐一传入），逐项聚合反而更绕，允许超出默认上限
+    #[allow(clippy::too_many_arguments)]
     fn create_cert_resolver(
         ssl_config: &SslConfig,
         certificate_file: Option<&Path>,
@@ -110,10 +113,7 @@ pub fn serve(
         validity_days: Option<i64>,
         typ: &'static str,
     ) -> Result<Arc<TlsServerCertResolver>, crate::Error> {
-        let mut certificate_file = ssl_config
-            .certificate
-            .as_deref()
-            .or(certificate_file);
+        let mut certificate_file = ssl_config.certificate.as_deref().or(certificate_file);
         let mut certificate_key_file = ssl_config
             .certificate_key
             .as_deref()
@@ -123,8 +123,7 @@ pub fn serve(
         // auto（未配置）= 证书与私钥路径都未配置时生成到默认位置；yes = 强制（文件已存在则幂等跳过）；
         // no = 不生成。用户显式配置了任一路径时绝不生成、绝不覆盖。
         let mut generated_paths: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
-        if (certificate_file.is_none() || certificate_key_file.is_none())
-            && generate != Some(false)
+        if (certificate_file.is_none() || certificate_key_file.is_none()) && generate != Some(false)
         {
             let cert_path = cert_dir.join("smartdns-cert.pem");
             let key_path = cert_dir.join("smartdns-key.pem");
@@ -152,10 +151,10 @@ pub fn serve(
             certificate_key_file = Some(key_path.as_path());
         }
 
-        let certificate_file = certificate_file
-            .ok_or(crate::Error::CertificatePathNotDefined(typ))?;
-        let certificate_key_file = certificate_key_file
-            .ok_or(crate::Error::CertificateKeyPathNotDefined(typ))?;
+        let certificate_file =
+            certificate_file.ok_or(crate::Error::CertificatePathNotDefined(typ))?;
+        let certificate_key_file =
+            certificate_key_file.ok_or(crate::Error::CertificateKeyPathNotDefined(typ))?;
         // 🔐 P2-1：私钥口令取自全局配置（对齐 C 版语义：口令全局一个，随证书三件套作用于全部监听）
         let resolver =
             TlsServerCertResolver::new(certificate_file, certificate_key_file, key_passphrase)?;

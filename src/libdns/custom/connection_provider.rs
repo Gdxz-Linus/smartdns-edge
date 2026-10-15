@@ -573,7 +573,7 @@ async fn new_connection(
                 server_name.clone(),
                 path.clone(),
                 // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
-                Some(http_authority(&server, &server_name, server_addr.port())),
+                Some(http_authority(server, server_name, server_addr.port())),
             ));
 
             let (conn, bg) = exchange.await?;
@@ -637,8 +637,8 @@ async fn new_connection(
                     .disable_grease(*disable_grease)
                     // 🔐 Q15：请求头里的 Host（`-http-host`，或按 C 版规则由地址推出来）
                     .http_host_opt(Some(http_authority(
-                        &server,
-                        &server_name,
+                        server,
+                        server_name,
                         server_addr.port(),
                     )))
                     .build_with_future(
@@ -1057,10 +1057,10 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
             // `send()`；多播上游（mDNS 等）本就没有 connect，走的仍是原路径，不受影响。
             UdpSocket::Tokio(s) => {
                 let res = tokio::net::UdpSocket::poll_send_to(s, cx, buf, target);
-                if let Poll::Ready(Err(err)) = &res {
-                    if is_eisconn(err) {
-                        return tokio::net::UdpSocket::poll_send(s, cx, buf);
-                    }
+                if let Poll::Ready(Err(err)) = &res
+                    && is_eisconn(err)
+                {
+                    return tokio::net::UdpSocket::poll_send(s, cx, buf);
                 }
                 res
             }

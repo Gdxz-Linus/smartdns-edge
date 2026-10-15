@@ -39,7 +39,6 @@ mod tests {
     }
 }
 
-
 /// 三态布尔（auto/yes/no）：`auto` 解析为 None，yes/no 解析为 Some(true/false)。
 /// 供 `bind-cert-generate` 这类“用户未表态时按智能默认走”的配置项使用。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -22,8 +22,7 @@ use crate::libdns::{
         DnsHandle, ProtoError,
         op::{Edns, Message, Query},
         rr::{
-            Record, RecordType,
-            DNSClass,
+            DNSClass, Record, RecordType,
             domain::{IntoName, Name},
             rdata::opt::{ClientSubnet, EdnsOption},
         },
@@ -988,6 +987,7 @@ mod name_server {
     ///    我们声明 1232 只会让内核只读 1232 字节 —— 多出来的部分在 Linux 被**静默截断**（变成残包）、
     ///    在 Windows 被**整包丢弃**（WSAEMSGSIZE），正是本项目最想避免的"查不出来"的故障。
     ///    真要处理超长答案，正确做法是走 TC → TCP 重问（已实现，见本文件 `tcp_fallback`）。
+    ///
     /// 客户端方向是另一条独立的路：对客户端声明的尺寸做 [512, 4096] 收口，超了就贴 TC=1
     /// （`src/app.rs:954`），不受这里的值影响。
     const MAX_PAYLOAD_LEN: u16 = 4096;
@@ -1176,10 +1176,7 @@ mod name_server {
             assert_eq!(opts.query_class, DNSClass::IN);
 
             // 显式 CH：构造查询并应用类别，报文里的类别必须跟着变
-            let mut query = Query::query(
-                Name::from_str("example.com.").unwrap(),
-                RecordType::TXT,
-            );
+            let mut query = Query::query(Name::from_str("example.com.").unwrap(), RecordType::TXT);
             assert_eq!(query.query_class(), DNSClass::IN, "Query::query 默认 IN");
             query.set_query_class(DNSClass::CH);
             assert_eq!(
@@ -1196,13 +1193,16 @@ mod bootstrap {
     use crate::dns_url::DnsUrl;
     use std::time::{Duration, Instant}; // 🌟 修复报错：引入标准库的钟表和时间工具！
 
+    // IP -> (绝对过期时间, 记录集)
+    type IpStore = HashMap<Query, (Instant, Arc<[Record]>)>;
+
     pub struct BootstrapResolver<T: GenericResolver = NameServerGroup>
     where
         T: Send + Sync,
     {
         resolver: Arc<T>,
         // 🌟 修复炸弹一：加入 Instant 记录这个 IP 的绝对过期时间
-        ip_store: RwLock<HashMap<Query, (Instant, Arc<[Record]>)>>,
+        ip_store: RwLock<IpStore>,
     }
 
     impl<T: GenericResolver + Sync + Send> BootstrapResolver<T> {

@@ -28,31 +28,30 @@ fn collect_san(
         rcgen::Ia5String::try_from("smartdns").expect("ascii dns name"),
     )];
 
-    let mut push_dns = |name: &str, sans: &mut Vec<rcgen::SanType>| {
-        if let Ok(san) = rcgen::Ia5String::try_from(name)
-            .map(rcgen::SanType::DnsName)
+    let push_dns = |name: &str, sans: &mut Vec<rcgen::SanType>| {
+        if let Ok(san) = rcgen::Ia5String::try_from(name).map(rcgen::SanType::DnsName)
+            && !sans.contains(&san)
         {
-            if !sans.contains(&san) {
-                sans.push(san);
-            }
+            sans.push(san);
         }
     };
 
     if let Some(name) = server_name {
         push_dns(name, &mut sans);
     }
-    if let Ok(host) = hostname::get() {
-        if let Some(s) = host.to_str() {
-            if !s.is_empty() && s != "(none)" {
-                push_dns(s, &mut sans);
-            }
-        }
+    if let Ok(host) = hostname::get()
+        && let Some(s) = host.to_str()
+        && !s.is_empty()
+        && s != "(none)"
+    {
+        push_dns(s, &mut sans);
     }
     // 本地域名（NIS 域名，getdomainname；仅 Unix——C 版同款来源，Windows 无此概念）
-    if let Some(dom) = local_domain {
-        if !dom.is_empty() && dom != "(none)" {
-            push_dns(dom, &mut sans);
-        }
+    if let Some(dom) = local_domain
+        && !dom.is_empty()
+        && dom != "(none)"
+    {
+        push_dns(dom, &mut sans);
     }
     // 用户追加的自定义条目（对齐 C 版 append_san；支持逗号分隔多个）。
     // 值是合法 IP 时写入 IP Address 类型（客户端按 IP 访问时才匹配），否则按 DNS 名。
@@ -100,7 +99,6 @@ fn collect_san(
 
     sans
 }
-
 
 /// 本地域名（NIS 域名，对齐 C 版 getdomainname）。仅 Unix；Windows 返回 None。
 #[cfg(unix)]
@@ -171,8 +169,7 @@ pub fn generate_self_signed_chain(
     let (ca_kp, ca_cert) = if root_key_path.exists() {
         let pem = std::fs::read_to_string(&root_key_path)
             .map_err(|e| format!("read root CA key {}: {e}", root_key_path.display()))?;
-        let kp =
-            rcgen::KeyPair::from_pem(&pem).map_err(|e| format!("parse root CA key: {e}"))?;
+        let kp = rcgen::KeyPair::from_pem(&pem).map_err(|e| format!("parse root CA key: {e}"))?;
         let cert = ca_params()
             .self_signed(&kp)
             .map_err(|e| format!("self-sign root CA: {e}"))?;
@@ -190,7 +187,8 @@ pub fn generate_self_signed_chain(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&root_key_path, std::fs::Permissions::from_mode(0o400));
+            let _ =
+                std::fs::set_permissions(&root_key_path, std::fs::Permissions::from_mode(0o400));
         }
         info!("generated root CA key: {}", root_key_path.display());
         (kp, cert)
@@ -203,8 +201,8 @@ pub fn generate_self_signed_chain(
         &collect_san(server_name, local_domain.as_deref(), append_san),
         days,
     )
-        .signed_by(&server_kp, &ca_cert, &ca_kp)
-        .map_err(|e| format!("sign server certificate: {e}"))?;
+    .signed_by(&server_kp, &ca_cert, &ca_kp)
+    .map_err(|e| format!("sign server certificate: {e}"))?;
 
     if let Some(parent) = key_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -230,7 +228,6 @@ pub fn generate_self_signed_chain(
     );
     Ok(())
 }
-
 
 /// 🔐 P2-1：启动早期（降权之前）检查并生成自签证书。
 ///
@@ -309,8 +306,7 @@ pub fn ensure_cert_for_binds(
         server_name.as_deref(),
         append_san.as_deref(),
         validity_days,
-    )
-    {
+    ) {
         crate::log::error!("failed to generate a self-signed certificate: {err}");
         return;
     }
@@ -318,7 +314,7 @@ pub fn ensure_cert_for_binds(
     // 🔐 对齐 C 版（smartdns.c:459-467 的 chown）：私钥收紧到 0400 后，运行身份（降权目标）
     // 必须能读——否则降权后监听加载私钥 Permission denied（WSL 真机实测暴露）。
     // 生成文件所有权移交给降权目标用户。
-    if let (Some(uid), Some(gid)) = (target_uid, target_gid) {
+    if let (Some(_uid), Some(_gid)) = (target_uid, target_gid) {
         #[cfg(unix)]
         {
             for path in [&cert_path, &key_path] {

@@ -107,7 +107,10 @@ mod tests {
         // NoRecordsFound 错误（SOA 挂在错误里），两种形态都接受，关键校验 SOA 的 TTL。
         let soa_ttl = match result {
             Ok(response) => {
-                assert!(response.answers().is_empty(), "bogus 命中后 Answer 应被剥离");
+                assert!(
+                    response.answers().is_empty(),
+                    "bogus 命中后 Answer 应被剥离"
+                );
                 response
                     .authorities()
                     .iter()

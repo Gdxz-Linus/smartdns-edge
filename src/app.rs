@@ -96,7 +96,9 @@ impl App {
         crate::api::init_trusted_proxies(self.cfg.read().await.trusted_proxies());
         // 🔐 P2-9：热重载同样可能改了 `api-token` —— 口令轮换必须生效（原来 OnceLock
         // 只认第一次，旧口令继续有效、新口令不生效，必须重启进程）。
-        crate::api::set_configured_token(self.cfg.read().await.api_token().map(ToString::to_string));
+        crate::api::set_configured_token(
+            self.cfg.read().await.api_token().map(ToString::to_string),
+        );
         // 🔐 P2-5：配置矛盾（同组 dns64 + force-AAAA-SOA）在加载期说破，改完配置告警自然消失。
         self.cfg.read().await.log_dns64_conflicts();
         self.update_middleware_handler().await;
@@ -253,7 +255,7 @@ impl App {
             // 处理方式：**只跳过不安全的那条监听**，其余监听照常启动。
             // 若整个重载都失败，会把用户其它正常改动一起废掉，那反而更糟。
             let layer: Vec<_> = cfg.binds().to_vec();
-            let _ = crate::api::warn_plaintext_api(&layer);
+            crate::api::warn_plaintext_api(&layer);
 
             let mut safe_bind_addrs = Vec::with_capacity(new_bind_addrs.len());
             for bind_addr in new_bind_addrs {
@@ -290,7 +292,7 @@ impl App {
                         //   · Windows（本机实测：第二次绑定直接 10048）：每 2/4/8…秒刷一条
                         //     "could not bind" 错误，状态页永远显示"有监听在重试"，排障时把人带偏。
                         // 实测现场见 `probe_a9_reload.py`。
-                        if self.bind_retry.write().await.remove(&bind_addr).is_some() {
+                        if self.bind_retry.write().await.remove(bind_addr).is_some() {
                             log::info!(
                                 "listener {} bound successfully; retry queue cleared",
                                 bind_addr.sock_addr()
@@ -572,7 +574,7 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let count = PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // 限流：前 5 次每次都记，之后每 100 次记一条，避免被刷爆日志/磁盘
-        if count <= 5 || count % 100 == 0 {
+        if count <= 5 || count.is_multiple_of(100) {
             crate::log::warn!("panic caught (occurrence {count}): {info}");
         }
     }));
@@ -841,17 +843,14 @@ pub(crate) fn response_material(
     use crate::libdns::proto::op::Message;
 
     match message {
-        SerialMessage::Raw(raw, addr, protocol, _) => Some((
-            raw.header().clone(),
-            raw.queries().to_vec(),
-            *addr,
-            *protocol,
-        )),
+        SerialMessage::Raw(raw, addr, protocol, _) => {
+            Some((*raw.header(), raw.queries().to_vec(), *addr, *protocol))
+        }
         SerialMessage::Bytes(bytes, addr, protocol, _) => {
             // ① 能完整解析：连问题段一起带走（客户端对号最稳）
             if let Ok(parsed) = Message::from_vec(bytes.as_ref()) {
                 return Some((
-                    parsed.header().clone(),
+                    *parsed.header(),
                     parsed.queries().to_vec(),
                     *addr,
                     *protocol,
@@ -1306,12 +1305,14 @@ fn build_middleware(
     Arc::new(middleware_handler)
 }
 
+// 缓存结构：IP -> (MAC, 过期时间)
+type ArpCache = std::sync::Arc<
+    std::sync::Mutex<lru::LruCache<std::net::IpAddr, (Option<String>, std::time::Instant)>>,
+>;
+
 // 🌟 终极形态：支持 IP 与 MAC 双重分流的客户端规则中间件（搭载全局 LRU 缓存防雪崩）
 struct ClientRuleMiddleware {
-    // 缓存结构：IP -> (MAC, 过期时间)
-    arp_cache: std::sync::Arc<
-        std::sync::Mutex<lru::LruCache<std::net::IpAddr, (Option<String>, std::time::Instant)>>,
-    >,
+    arp_cache: ArpCache,
 }
 
 impl ClientRuleMiddleware {

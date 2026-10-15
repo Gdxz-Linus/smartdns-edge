@@ -466,8 +466,8 @@ mod serial_message {
 
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             match value {
-                SerialMessage::Raw(message, _, ..) => Ok(message.as_ref().clone()),
-                SerialMessage::Bytes(bytes, _, ..) => Message::from_vec(&bytes),
+                SerialMessage::Raw(message, _, _, _) => Ok(message.as_ref().clone()),
+                SerialMessage::Bytes(bytes, _, _, _) => Message::from_vec(&bytes),
             }
         }
     }

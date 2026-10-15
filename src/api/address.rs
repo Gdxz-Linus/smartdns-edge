@@ -92,19 +92,19 @@ async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Sour
     // managed 来源：直接读文件（写接口的数据源），与内存无关
     if let Some(managed_dir) = cfg.managed_dir() {
         let file = managed_dir.join("address.conf");
-        if let Ok(text) = tokio::fs::read_to_string(&file).await {
-            if let Ok((_, config)) = ConfigFile::parse(&text) {
-                for line in config.iter() {
-                    if let ConfigLine::Config {
-                        config: ConfigItem::Address(rule),
-                        ..
-                    } = line
-                    {
-                        rules.push(SourcedAddressRule {
-                            source: AddressRuleSource::Managed,
-                            rule: rule.clone(),
-                        });
-                    }
+        if let Ok(text) = tokio::fs::read_to_string(&file).await
+            && let Ok((_, config)) = ConfigFile::parse(&text)
+        {
+            for line in config.iter() {
+                if let ConfigLine::Config {
+                    config: ConfigItem::Address(rule),
+                    ..
+                } = line
+                {
+                    rules.push(SourcedAddressRule {
+                        source: AddressRuleSource::Managed,
+                        rule: rule.clone(),
+                    });
                 }
             }
         }
@@ -112,27 +112,23 @@ async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Sour
 
     // main 来源：主配置文件里的 address 规则（不能按内存 default 组取 ——
     // 重载后 managed 规则也在里面，会重复出现；P2-11 实测发现的修正）
-    if let Some(path) = cfg.conf_file() {
-        if let Ok(text) = tokio::fs::read_to_string(path).await {
-            if let Ok((_, config)) = ConfigFile::parse(&text) {
-                let managed_domains: std::collections::HashSet<_> = rules
-                    .iter()
-                    .map(|r| r.rule.domain.clone())
-                    .collect();
-                for line in config.iter() {
-                    if let ConfigLine::Config {
-                        config: ConfigItem::Address(rule),
-                        ..
-                    } = line
-                    {
-                        if !managed_domains.contains(&rule.domain) {
-                            rules.push(SourcedAddressRule {
-                                source: AddressRuleSource::Main,
-                                rule: rule.clone(),
-                            });
-                        }
-                    }
-                }
+    if let Some(path) = cfg.conf_file()
+        && let Ok(text) = tokio::fs::read_to_string(path).await
+        && let Ok((_, config)) = ConfigFile::parse(&text)
+    {
+        let managed_domains: std::collections::HashSet<_> =
+            rules.iter().map(|r| r.rule.domain.clone()).collect();
+        for line in config.iter() {
+            if let ConfigLine::Config {
+                config: ConfigItem::Address(rule),
+                ..
+            } = line
+                && !managed_domains.contains(&rule.domain)
+            {
+                rules.push(SourcedAddressRule {
+                    source: AddressRuleSource::Main,
+                    rule: rule.clone(),
+                });
             }
         }
     }
@@ -348,8 +344,6 @@ async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-
-
 /// 🔐 P2-11：该域名的 address 规则是否写在**主配置文件**里（用于写接口的 409 判定）。
 ///
 /// 必须查主配置文件本身，而不是内存 default 组 —— 重载后 managed 规则也会进 default 组，
@@ -390,14 +384,12 @@ async fn main_config_has_address(
 /// 语义约定：**文件已写入**，重载失败时返回 500 并说明"规则已保存但生效失败，
 /// 请检查配置后手动 POST /api/config/reload"——绝不带着假成功返回 2xx。
 async fn apply_written_rules(state: &Arc<ServeState>) -> Result<(), ApiError> {
-    state
-        .app
-        .reload()
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(
+    state.app.reload().await.map_err(|e| {
+        ApiError::Internal(anyhow::anyhow!(
             "the rule was saved to disk but applying it failed: {e:#}; \
              fix the problem and POST /api/config/reload"
-        )))
+        ))
+    })
 }
 
 // 🌟 核心修复：原子化配置文件写入，杜绝断电/强杀导致的配置清零问题

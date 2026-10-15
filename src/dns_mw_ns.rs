@@ -22,7 +22,7 @@ use crate::{
 
 use crate::libdns::proto::rr::domain::usage::LOCAL;
 use crate::libdns::proto::rr::rdata::opt::ClientSubnet;
-use crate::libdns::proto::{op::ResponseCode, rr::rdata::opt::EdnsCode, rr::DNSClass};
+use crate::libdns::proto::{op::ResponseCode, rr::DNSClass, rr::rdata::opt::EdnsCode};
 use futures::FutureExt;
 use rr::rdata::opt::EdnsOption;
 use std::sync::Mutex;
@@ -105,7 +105,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                 }),
             // 🔐 P3-7：服务端转发路径始终沿用客户端查询报文里的类别（通常 IN），
             // 不做任何改写——resolve 命令的显式类别只影响诊断工具自身。
-            query_class: req.queries().first().map(|q| q.query_class()).unwrap_or(DNSClass::IN),
+            query_class: req
+                .queries()
+                .first()
+                .map(|q| q.query_class())
+                .unwrap_or(DNSClass::IN),
         };
 
         // skip nameserver rule
@@ -887,7 +891,7 @@ async fn lookup_ip_with(
     // =================================================================================
     let best_fallback = ok_tasks
         .into_iter()
-        .min_by_key(|res| crate::dns_client::response_rank(res));
+        .min_by_key(crate::dns_client::response_rank);
 
     match best_fallback {
         Some(lookup) => Ok(lookup),

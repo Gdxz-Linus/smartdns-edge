@@ -149,7 +149,7 @@ impl AnswerAffectingOpts {
     ///
     /// 不这么做的话，刷新会按**默认口径**去算，算出来的答案又会写到"默认口径"的标记下面，
     /// 原来那条（带选项的）永远刷不到、只会慢慢过期。
-    pub fn into_server_opts(&self, group: String) -> ServerOpts {
+    pub fn to_server_opts(&self, group: String) -> ServerOpts {
         ServerOpts {
             is_background: true,
             group: Some(group),

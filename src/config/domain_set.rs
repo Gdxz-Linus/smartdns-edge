@@ -187,8 +187,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
-        let resolver = TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"), None)
-            .expect("测试证书应当能加载");
+        let resolver =
+            TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"), None)
+                .expect("测试证书应当能加载");
         let tls = tls_server_config(
             b"http/1.1",
             StdArc::new(resolver) as StdArc<dyn ResolvesServerCert>,
@@ -374,9 +375,12 @@ mod tests {
         let downgrade_to = format!("http://127.0.0.1:{plain_port}/plain.txt");
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tls");
-        let resolver =
-            crate::rustls::TlsServerCertResolver::new(&dir.join("cert.pem"), &dir.join("key.pem"), None)
-                .expect("测试证书应当能加载");
+        let resolver = crate::rustls::TlsServerCertResolver::new(
+            &dir.join("cert.pem"),
+            &dir.join("key.pem"),
+            None,
+        )
+        .expect("测试证书应当能加载");
         let tls = crate::rustls::tls_server_config(
             b"http/1.1",
             Arc::new(resolver) as Arc<dyn rustls::server::ResolvesServerCert>,

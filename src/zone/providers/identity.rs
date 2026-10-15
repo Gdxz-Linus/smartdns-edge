@@ -394,10 +394,7 @@ mod tests {
         );
 
         // 走一遍真实构造路径验证 TTL 落地（生产同一条代码路径）
-        let query = Query::query(
-            Name::from_utf8("hostname.bind.").unwrap(),
-            RecordType::TXT,
-        );
+        let query = Query::query(Name::from_utf8("hostname.bind.").unwrap(), RecordType::TXT);
         let resp = txt_response(query, "test-server".to_string());
         let answers = resp.answers();
         assert!(!answers.is_empty(), "TXT 应答至少要有一条记录");

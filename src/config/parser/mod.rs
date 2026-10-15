@@ -446,9 +446,15 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
     ));
 
     let group5 = alt((
-        map(config("bind-cert-validity-days"), ConfigItem::BindCertValidityDays),
+        map(
+            config("bind-cert-validity-days"),
+            ConfigItem::BindCertValidityDays,
+        ),
         map(config("bind-cert-san"), ConfigItem::BindCertSan),
-        map(config("bind-cert-root-key-file"), ConfigItem::BindCertRootKeyFile),
+        map(
+            config("bind-cert-root-key-file"),
+            ConfigItem::BindCertRootKeyFile,
+        ),
         // 🔐 Q12：`ip-rules ...`（自带前缀，不会和别的项撞；放在通用解析器之前）
         map(NomParser::parse, ConfigItem::IpRules),
         map(config("ipset"), ConfigItem::IpSet),

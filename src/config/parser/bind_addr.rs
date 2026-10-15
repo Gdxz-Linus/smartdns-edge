@@ -277,7 +277,9 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
                     v
                 ),
                 None => {
-                    crate::log::warn!("`-max-connections-per-ip` on a listener has no value; ignored")
+                    crate::log::warn!(
+                        "`-max-connections-per-ip` on a listener has no value; ignored"
+                    )
                 }
             },
             "no-serve-expired" => opts.no_serve_expired = Some(true),
@@ -328,7 +330,10 @@ mod tests {
         // 🔐 P2-2：非法值不再被 `parse().ok()` 静默吞掉 —— 解析失败时保持 None
         // （并打一条 error 日志），行为与"未配置"一致但日志可查。
         let (_, cfg) = UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections 2ooo").unwrap();
-        assert_eq!(cfg.opts.max_connections, None, "非法值必须被拒绝而不是静默取值");
+        assert_eq!(
+            cfg.opts.max_connections, None,
+            "非法值必须被拒绝而不是静默取值"
+        );
 
         let (_, cfg) =
             UdpBindAddrConfig::parse("bind 0.0.0.0:5353 -max-connections-per-ip abc").unwrap();

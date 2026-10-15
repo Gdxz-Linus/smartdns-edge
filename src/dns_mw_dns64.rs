@@ -68,7 +68,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
         // 缺了它，部分系统（Windows/手机）的 IPv6 连通性探测会异常或超时变慢。
         // 仅在配了 dns64 前缀的组生效（与 C 版 is_dns64_request 的第一道判定一致）。
         const IPV4ONLY_ARPA: &str = "ipv4only.arpa.";
-        if req.query().name().to_string().eq_ignore_ascii_case(IPV4ONLY_ARPA) {
+        if req
+            .query()
+            .name()
+            .to_string()
+            .eq_ignore_ascii_case(IPV4ONLY_ARPA)
+        {
             let query = req.query().original().clone();
             let name = query.name().to_owned();
             match query.query_type() {
@@ -287,7 +292,11 @@ mod tests {
             vec!["192.0.0.170", "192.0.0.171"],
             "ipv4only.arpa 的 A 查询必须固定返回 RFC 7050 保留地址"
         );
-        assert_eq!(response.answers()[0].ttl(), 77, "TTL 应取 local-ttl（对齐 C 版）");
+        assert_eq!(
+            response.answers()[0].ttl(),
+            77,
+            "TTL 应取 local-ttl（对齐 C 版）"
+        );
     }
 
     /// 🔐 P2-5 补齐：ipv4only.arpa 的 AAAA 查询回空 NOERROR，且不查上游。
@@ -347,7 +356,10 @@ mod tests {
                 _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
             ) -> Result<DnsResponse, DnsError> {
                 assert!(
-                    req.query().name().to_string().eq_ignore_ascii_case("ipv4only.arpa."),
+                    req.query()
+                        .name()
+                        .to_string()
+                        .eq_ignore_ascii_case("ipv4only.arpa."),
                     "未配 dns64 时该查询应原样穿透"
                 );
                 let mut resp = DnsResponse::empty();
