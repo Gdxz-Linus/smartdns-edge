@@ -163,7 +163,7 @@ SmartDNS-edge同时支持指定特定域名IP地址，并支持高性能匹配�
 
 Powershell
 
-.\smartdns.exe run -c .\smartdns.conf -v
+.\smartdns.exe run -c .\etc\smartdns\smartdns.conf -v
 
 (注：-v 表示开启调试日志输出，方便直观查看解析过程)
 
@@ -193,7 +193,7 @@ Bash
 
 chmod +x ./smartdns
 
-sudo ./smartdns run -c ./smartdns.conf
+sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
 
 **方式二：后台服务运行（推荐，开机自启）**
 
