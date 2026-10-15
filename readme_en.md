@@ -12,10 +12,6 @@ SmartDNS-edge also supports pinning specific domain names to specific IP address
 
 Key features have been tested on Windows and on WSL2 (Linux).
 
-> 📌 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what changed in each release and what to watch out for when upgrading.
->
-> ⚠️ **Upgrading from 1.0.2 or earlier**: log messages and console output are now in **English** (previously Chinese); scripts that match log text need updating.
-
 ## What has been improved
 🚀 SmartDNS-edge: core architecture and feature evolution
 
