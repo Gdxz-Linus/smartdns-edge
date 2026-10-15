@@ -382,13 +382,15 @@ mod tests {
     /// 🔐 Q19/Q20：监听上配的集合对该监听的**每个**查询都生效 —— 即使这个域名没有任何规则
     #[test]
     fn listener_sets_apply_without_any_domain_rule() {
-        let mut opts = ServerOpts::default();
-        opts.nftset = Some(
-            Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
-                .unwrap()
-                .1,
-        );
-        opts.ipset = Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1);
+        let opts = ServerOpts {
+            nftset: Some(
+                Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
+                    .unwrap()
+                    .1,
+            ),
+            ipset: Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1),
+            ..Default::default()
+        };
 
         let (nft, ip) = merge_kernel_sets(Vec::new(), Vec::new(), &opts);
 
@@ -404,13 +406,15 @@ mod tests {
             .1;
         let rule_ip = Vec::<ConfigForIP<IpsetConfig>>::parse("#6:dns6").unwrap().1;
 
-        let mut opts = ServerOpts::default();
-        opts.nftset = Some(
-            Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
-                .unwrap()
-                .1,
-        );
-        opts.ipset = Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1);
+        let opts = ServerOpts {
+            nftset: Some(
+                Vec::<ConfigForIP<NFTsetConfig>>::parse("#4:inet#filter#set4")
+                    .unwrap()
+                    .1,
+            ),
+            ipset: Some(Vec::<ConfigForIP<IpsetConfig>>::parse("#4:dns4").unwrap().1),
+            ..Default::default()
+        };
 
         let (nft, ip) = merge_kernel_sets(rule_nft, rule_ip, &opts);
 

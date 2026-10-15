@@ -104,7 +104,12 @@ fn collect_san(
 #[cfg(unix)]
 fn local_nis_domain() -> Option<String> {
     let mut buf = vec![0u8; 256];
-    let ret = unsafe { libc::getdomainname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    // 长度参数类型因平台而异：Linux 是 size_t(usize)，Apple/BSD 是 c_int(i32)
+    #[cfg(target_vendor = "apple")]
+    let len = buf.len() as libc::c_int;
+    #[cfg(not(target_vendor = "apple"))]
+    let len = buf.len();
+    let ret = unsafe { libc::getdomainname(buf.as_mut_ptr() as *mut libc::c_char, len) };
     if ret != 0 {
         return None;
     }

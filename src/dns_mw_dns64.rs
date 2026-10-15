@@ -223,7 +223,6 @@ mod tests {
 
     /// 🔐 P2-5：应答带 aaaa_suppressed 标记时，DNS64 不合成（压制优先于补救）。
     /// 内层 FlagSetter 中间件模拟"双栈优选/force-AAAA-SOA 压制了 AAAA"的应答。
-
     async fn search_with_query(
         mw: &DnsMiddlewareHandler,
         name: &str,
@@ -245,7 +244,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ipv4only_arpa_a_query() {
         struct FailResponder;
-        use crate::middleware::Middleware as _;
 
         #[async_trait::async_trait]
         impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for FailResponder {
@@ -303,7 +301,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ipv4only_arpa_aaaa_query() {
         struct FailResponder;
-        use crate::middleware::Middleware as _;
 
         #[async_trait::async_trait]
         impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for FailResponder {
@@ -345,7 +342,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ipv4only_arpa_not_intercepted_without_dns64() {
         struct PassthroughChecker;
-        use crate::middleware::Middleware as _;
 
         #[async_trait::async_trait]
         impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for PassthroughChecker {
@@ -388,7 +384,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dns64_skipped_when_suppressed() {
         struct SuppressedResponder;
-        use crate::middleware::Middleware as _;
 
         #[async_trait::async_trait]
         impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for SuppressedResponder {
@@ -451,7 +446,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dns64_synthesizes_when_not_suppressed() {
         struct AOnlyResponder;
-        use crate::middleware::Middleware as _;
 
         #[async_trait::async_trait]
         impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AOnlyResponder {

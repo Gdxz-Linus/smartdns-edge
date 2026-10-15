@@ -67,7 +67,6 @@ mod tests {
 
     /// 🔐 P3-4：bogus 命中后伪造 SOA 的 TTL 必须跟随 rr-ttl 链（组级 → 全局 → 兜底 300），
     /// 不能写死 3600 —— 否则用户调低 rr-ttl 后，否定缓存仍被压制一小时。
-
     async fn search_with_query(
         mw: &DnsMiddlewareHandler,
         name: &str,

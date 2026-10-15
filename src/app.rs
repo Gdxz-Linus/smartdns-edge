@@ -1497,7 +1497,7 @@ mod p0_2_tests {
         ] {
             let request = query_message(op, MessageType::Query);
             let response = not_imp_response(
-                &request.header(),
+                request.header(),
                 request.queries(),
                 addr,
                 crate::libdns::Protocol::Udp,

@@ -2757,8 +2757,10 @@ mod cache_reload_tests {
         };
 
         // 只差一个 `-no-speed-check` → 必须是两个不同的标记
-        let mut no_speed = ServerOpts::default();
-        no_speed.no_speed_check = Some(true);
+        let no_speed = ServerOpts {
+            no_speed_check: Some(true),
+            ..Default::default()
+        };
         let with_no_speed = CacheKey {
             opts: AnswerAffectingOpts::from_server_opts(&no_speed),
             ..base.clone()
@@ -2769,9 +2771,11 @@ mod cache_reload_tests {
         );
 
         // 不影响答案的选项（`-no-api` / 连接数上限）不许把缓存拆开
-        let mut cosmetic = ServerOpts::default();
-        cosmetic.no_api = Some(true);
-        cosmetic.max_connections = Some(123);
+        let cosmetic = ServerOpts {
+            no_api: Some(true),
+            max_connections: Some(123),
+            ..Default::default()
+        };
         assert_eq!(
             base.opts,
             AnswerAffectingOpts::from_server_opts(&cosmetic),
@@ -2781,34 +2785,40 @@ mod cache_reload_tests {
         // 其余每一项都要能区分开
         for (name, o) in [
             ("-no-dualstack-selection", {
-                let mut o = ServerOpts::default();
-                o.no_dualstack_selection = Some(true);
-                o
+                ServerOpts {
+                    no_dualstack_selection: Some(true),
+                    ..Default::default()
+                }
             }),
             ("-force-aaaa-soa", {
-                let mut o = ServerOpts::default();
-                o.force_aaaa_soa = Some(true);
-                o
+                ServerOpts {
+                    force_aaaa_soa: Some(true),
+                    ..Default::default()
+                }
             }),
             ("-force-https-soa", {
-                let mut o = ServerOpts::default();
-                o.force_https_soa = Some(true);
-                o
+                ServerOpts {
+                    force_https_soa: Some(true),
+                    ..Default::default()
+                }
             }),
             ("-no-rule-addr", {
-                let mut o = ServerOpts::default();
-                o.no_rule_addr = Some(true);
-                o
+                ServerOpts {
+                    no_rule_addr: Some(true),
+                    ..Default::default()
+                }
             }),
             ("-no-rule-nameserver", {
-                let mut o = ServerOpts::default();
-                o.no_rule_nameserver = Some(true);
-                o
+                ServerOpts {
+                    no_rule_nameserver: Some(true),
+                    ..Default::default()
+                }
             }),
             ("-no-rule-soa", {
-                let mut o = ServerOpts::default();
-                o.no_rule_soa = Some(true);
-                o
+                ServerOpts {
+                    no_rule_soa: Some(true),
+                    ..Default::default()
+                }
             }),
         ] {
             let k = CacheKey {
@@ -2819,8 +2829,10 @@ mod cache_reload_tests {
         }
 
         // rule_group 也要能区分
-        let mut rg = ServerOpts::default();
-        rg.rule_group = Some("guest".to_string());
+        let rg = ServerOpts {
+            rule_group: Some("guest".to_string()),
+            ..Default::default()
+        };
         let k = CacheKey {
             opts: AnswerAffectingOpts::from_server_opts(&rg),
             ..base.clone()
@@ -2835,9 +2847,11 @@ mod cache_reload_tests {
     #[test]
     fn entry_round_trips_answer_affecting_opts() {
         let mut entries = make_test_entries(1);
-        let mut opts = AnswerAffectingOpts::default();
-        opts.no_speed_check = true;
-        opts.rule_group = Some("guest".to_string());
+        let opts = AnswerAffectingOpts {
+            no_speed_check: true,
+            rule_group: Some("guest".to_string()),
+            ..Default::default()
+        };
         entries[0].opts = opts.clone();
 
         let mut buf = Vec::new();

@@ -293,6 +293,8 @@ mod problem_39_tests {
 
     /// 🔐 问题 39：跳转次数必须被限制（不能是"跟随无限次"）。
     /// 这条钉住的是常量本身，防止日后被改回无限制。
+    // 断言对象是编译期常量——"恒为真"正是要守护的性质，属有意为之
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn redirects_are_limited() {
         assert!(MAX_REDIRECTS > 0, "要允许正常的规范跳转");
@@ -305,6 +307,8 @@ mod problem_39_tests {
     /// 🔐 问题 39：`https_only` 必须开着。
     /// 这是"禁止 https→http 降级"的实现依据 —— ureq 在**每一跳**都检查该开关，
     /// 因此首跳 https、后续跳到 http 同样会被拒绝（若这个开关被关掉，降级就放行了）。
+    // 断言对象是编译期常量——"恒为真"正是要守护的性质，属有意为之
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn https_only_is_enabled() {
         assert!(

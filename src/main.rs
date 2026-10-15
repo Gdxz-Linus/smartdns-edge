@@ -672,6 +672,7 @@ pub mod signal {
         /// 撤掉修复（把 `wait_for_shutdown` 换回裸 `SHUTDOWN_NOTIFY.notified()`）
         /// 之后这条测试会**卡住直到超时**——那正是"通知丢了"的表现。
         #[tokio::test]
+        #[allow(clippy::await_holding_lock)] // 测试串行锁：guard 须跨 await 保护整个用例
         async fn shutdown_request_is_not_lost_when_it_arrives_early() {
             let _guard = lock_and_reset();
 
@@ -696,6 +697,7 @@ pub mod signal {
 
         /// 🔐 对照：**正在等待时**收到通知，同样要能醒来（正常路径不能被改坏）。
         #[tokio::test]
+        #[allow(clippy::await_holding_lock)] // 测试串行锁：guard 须跨 await 保护整个用例
         async fn shutdown_request_wakes_a_waiting_task() {
             let _guard = lock_and_reset();
 
