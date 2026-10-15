@@ -65,9 +65,8 @@ package: patch package-clean package-prepare && zip package-list
 package-prepare:
   @mkdir -p {{dist_dir}}/{{dist_name}}
   cp LICENSE README*.md  {{dist_dir}}/{{dist_name}} || true
-  # 配置文件示例整目录打包（demo 与真实可用示例都在 etc/smartdns 下）
-  @mkdir -p {{dist_dir}}/{{dist_name}}/etc/smartdns
-  cp etc/smartdns/*  {{dist_dir}}/{{dist_name}}/etc/smartdns/ || true
+  # 配置文件与源程序同目录打包（真实配置 + 注释版 demo）
+  cp etc/smartdns/smartdns.conf etc/smartdns/smartdns.conf.demo  {{dist_dir}}/{{dist_name}} || true
   echo "Version: {{version}}" >  {{dist_dir}}/{{dist_name}}/version
   echo "Build date: $(date)" >>  {{dist_dir}}/{{dist_name}}/version
   echo "Branch: $(git rev-parse --abbrev-ref HEAD)" >>  {{dist_dir}}/{{dist_name}}/version

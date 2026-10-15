@@ -163,7 +163,7 @@ Extract the downloaded `.zip` file to a permanent directory (such as `D:\SmartDN
 
 PowerShell
 
-.\smartdns.exe run -c .\etc\smartdns\smartdns.conf -v
+.\smartdns.exe run -c .\smartdns.conf -v
 
 (Note: `-v` turns on debug logging so you can watch the resolution process.)
 
@@ -193,7 +193,7 @@ Bash
 
 chmod +x ./smartdns
 
-sudo ./smartdns run -c ./etc/smartdns/smartdns.conf
+sudo ./smartdns run -c ./smartdns.conf
 
 **Method 2: background service run (recommended, starts automatically at boot)**
 
