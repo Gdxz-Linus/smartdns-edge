@@ -314,13 +314,13 @@ pub fn ensure_cert_for_binds(
     // 🔐 对齐 C 版（smartdns.c:459-467 的 chown）：私钥收紧到 0400 后，运行身份（降权目标）
     // 必须能读——否则降权后监听加载私钥 Permission denied（WSL 真机实测暴露）。
     // 生成文件所有权移交给降权目标用户。
-    if let (Some(_uid), Some(_gid)) = (target_uid, target_gid) {
+    if let (Some(uid), Some(gid)) = (target_uid, target_gid) {
         #[cfg(unix)]
         {
             for path in [&cert_path, &key_path] {
                 let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
             }
         }
-        let _ = (target_uid, target_gid);
+        let _ = (uid, gid);
     }
 }
