@@ -12,7 +12,7 @@ SmartDNS Edge automatically adjusts the cache size based on available system mem
 # Set the maximum number of domain entries in the memory cache
 cache-size 32768
 
-# Enable cache persistence (only takes effect if the target disk has >128MB of free space)
+# Enable cache persistence (saves on shutdown, restores on startup)
 cache-persist yes
 
 # Specify the file path for persistent cache storage
