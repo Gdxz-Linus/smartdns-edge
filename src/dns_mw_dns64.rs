@@ -91,10 +91,22 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                     return Ok(resp);
                 }
                 RecordType::AAAA => {
-                    // 空应答：不查上游，让客户端的探测流程走 AAAA 语义
-                    // （C 版 has_ip=0 + do_reply；这里同样回 NOERROR 空 AAAA）
+                    let ttl = ctx.local_ttl() as u32;
                     let mut resp = DnsResponse::empty();
                     resp.add_query(query);
+                    for ip in ["192.0.0.170", "192.0.0.171"] {
+                        let ipv4: Ipv4Addr = ip.parse().unwrap();
+                        let Some(ipv6) = to_dns64(ipv6_net, ipv4) else {
+                            continue;
+                        };
+                        resp.add_answer(crate::dns::Record::from_rdata(
+                            name.clone(),
+                            ttl,
+                            crate::dns::RData::AAAA(crate::libdns::proto::rr::rdata::AAAA(
+                                ipv6,
+                            )),
+                        ));
+                    }
                     return Ok(resp);
                 }
                 _ => (), // 其它类型照常走原链路
@@ -192,11 +204,9 @@ fn to_dns64(ipv6_net: Ipv6Net, ipv4: Ipv4Addr) -> Option<Ipv6Addr> {
         }
         56 => {
             // 字节 7 为 8 位保留，字节 8 为 u（两者都必须为 0）
-            octets[9..12].copy_from_slice(&v4[0..3]);
-            octets[13] = v4[3];
             octets[7] = 0;
             octets[8] = 0;
-            octets[13] = 0;
+            octets[9..13].copy_from_slice(&v4);
         }
         64 => {
             octets[9..13].copy_from_slice(&v4);
@@ -331,10 +341,46 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(response.answers().is_empty(), "AAAA 应返回空（RFC 7050）");
+        assert_eq!(response.answers().len(), 2, "AAAA 应返回两个 RFC 7050 地址");
         assert_eq!(
             response.response_code(),
             crate::libdns::proto::op::ResponseCode::NoError
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ipv4only_arpa_aaaa_synthesizes_rfc7050_addresses() {
+        let cfg = RuntimeConfig::builder()
+            .with("dns64 64:ff9b::/96")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(Dns64Middleware::new())
+            .build(cfg);
+
+        let response = search_with_query(
+            &mock,
+            "ipv4only.arpa.",
+            RecordType::AAAA,
+            DNSClass::IN,
+            "192.168.1.8:5300".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut ipv6_addresses: Vec<_> = response
+            .answers()
+            .iter()
+            .filter_map(|record| match record.data() {
+                crate::dns::RData::AAAA(address) => Some(address.to_string()),
+                _ => None,
+            })
+            .collect();
+        ipv6_addresses.sort();
+
+        assert_eq!(
+            ipv6_addresses,
+            vec!["64:ff9b::c000:aa", "64:ff9b::c000:ab"]
         );
     }
 
@@ -529,6 +575,24 @@ mod tests {
             ipv6,
             Some(Ipv6Addr::from(expected)),
             "/64 前缀必须按 RFC 6052 §2.2 布局（u 字节在字节 8，IPv4 在字节 9-12）"
+        );
+    }
+
+    #[test]
+    fn test_dns64_56() {
+        // RFC 6052 §2.2：/56 前缀在字节 7 和字节 8（u）各保留一个 0，
+        // IPv4 地址必须完整写入字节 9-12。
+        let ipv6_net = Ipv6Net::from_str("3000::/56").unwrap();
+        let ipv4 = Ipv4Addr::from_str("192.168.0.1").unwrap();
+        let ipv6 = to_dns64(ipv6_net, ipv4);
+
+        let mut expected = [0u8; 16];
+        expected[0..8].copy_from_slice(&[0x30, 0, 0, 0, 0, 0, 0, 0]);
+        expected[9..13].copy_from_slice(&[192, 168, 0, 1]);
+        assert_eq!(
+            ipv6,
+            Some(Ipv6Addr::from(expected)),
+            "/56 前缀必须保留 IPv4 全部 4 字节"
         );
     }
 

@@ -32,7 +32,8 @@ use tokio::time::sleep; // 🌟 引入互斥锁
 pub struct NameServerMiddleware {
     client: DnsClient,
     // 🌟 新增：底层收费站复印机 (合并相同的 4 倍冗余请求)
-    inflight: Arc<Mutex<HashMap<String, broadcast::Sender<Option<DnsResponse>>>>>,
+    inflight:
+        Arc<Mutex<HashMap<String, broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
 }
 
 impl NameServerMiddleware {
@@ -341,7 +342,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         if let Some(mut receiver) = rx {
             // 作为被合并的冗余请求，坐板凳等待复印件，绝不去外网！
             return match receiver.recv().await {
-                Ok(Some(res)) => Ok(res),
+                Ok(Ok(res)) => Ok(res),
+                Ok(Err(e)) => Err(e),
                 _ => Err(ProtoErrorKind::NoConnections.into()),
             };
         }
@@ -437,7 +439,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(tx) = map.remove(&cache_key) {
-                let broadcast_res = actual_result.as_ref().ok().cloned();
+                let broadcast_res = actual_result.clone();
                 let _ = tx.send(broadcast_res);
             }
         }
@@ -1219,7 +1221,18 @@ fn clamp_record_ttl(record: &mut Record, rr_ttl: Option<u32>, ttl_min: u32, ttl_
     let new_ttl = match rr_ttl {
         // rr-ttl 拥有最高统治权
         Some(exact_ttl) => exact_ttl,
-        None => record.ttl().clamp(ttl_min, ttl_max),
+        None => {
+            if ttl_min > ttl_max {
+                if crate::log::warn_once("clamp-ttl-min-exceeds-max") {
+                    crate::log::warn!(
+                        "rr-ttl-min ({ttl_min}) is greater than rr-ttl-max ({ttl_max}), using rr-ttl-max"
+                    );
+                }
+                record.ttl().clamp(ttl_max, ttl_max)
+            } else {
+                record.ttl().clamp(ttl_min, ttl_max)
+            }
+        }
     };
     record.set_ttl(new_ttl);
 }
@@ -1266,6 +1279,14 @@ mod clamp_ttl_tests {
         clamp_record_ttl(&mut hi, None, 55, 66);
         assert_eq!(lo.ttl(), 55);
         assert_eq!(hi.ttl(), 66);
+    }
+
+    /// rr-ttl-min 大于 rr-ttl-max 时安全回退到上限
+    #[test]
+    fn test_clamp_ttl_inverted_min_max_falls_back_to_max() {
+        let mut r = rec(96);
+        clamp_record_ttl(&mut r, None, 600, 300);
+        assert_eq!(r.ttl(), 300, "倒置区间应安全收敛到 rr-ttl-max");
     }
 
     /// rr-ttl 优先级最高：直接覆盖，min/max 不再参与
@@ -1495,7 +1516,8 @@ mod tests {
 // 🌟 制造对讲机工牌：防止 NS 底层带头大哥半路阵亡导致全网死等
 // ==========================================
 struct InflightNsGuard {
-    inflight: Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Option<DnsResponse>>>>>,
+    inflight:
+        Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
     cache_key: String,
     done: bool,
 }
@@ -1506,7 +1528,7 @@ impl Drop for InflightNsGuard {
             // 🚨 发生意外崩溃或中断，强行清理仓库并发送 None 告诉小弟散了！
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(tx) = map.remove(&self.cache_key) {
-                let _ = tx.send(None);
+                let _ = tx.send(Err(ProtoErrorKind::NoConnections.into()));
             }
         }
     }

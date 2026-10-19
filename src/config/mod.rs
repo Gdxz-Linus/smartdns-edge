@@ -485,6 +485,38 @@ pub enum AddressRuleValue {
     },
 }
 
+impl AddressRuleValue {
+    pub fn merge(&mut self, rhs: Self) {
+        use AddressRuleValue::*;
+        match (self, rhs) {
+            (
+                Addr { v4: l_v4, v6: l_v6 },
+                Addr { v4: r_v4, v6: r_v6 },
+            ) => {
+                if let Some(r4) = r_v4 {
+                    let mut list = l_v4.as_ref().map(|v| v.to_vec()).unwrap_or_default();
+                    for ip in r4.iter() {
+                        if !list.contains(ip) {
+                            list.push(*ip);
+                        }
+                    }
+                    *l_v4 = Some(list.into());
+                }
+                if let Some(r6) = r_v6 {
+                    let mut list = l_v6.as_ref().map(|v| v.to_vec()).unwrap_or_default();
+                    for ip in r6.iter() {
+                        if !list.contains(ip) {
+                            list.push(*ip);
+                        }
+                    }
+                    *l_v6 = Some(list.into());
+                }
+            }
+            (lhs, rhs) => *lhs = rhs,
+        }
+    }
+}
+
 impl std::fmt::Display for AddressRuleValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use AddressRuleValue::*;

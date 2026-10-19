@@ -73,7 +73,12 @@ impl DomainRuleMap {
         // append address rule
         for rule in address_rules.iter() {
             for name in expand_domain(&rule.domain) {
-                (name_rule_map.entry(name).or_default()).address = Some(rule.address.clone());
+                let entry = name_rule_map.entry(name).or_default();
+                if let Some(ref mut existing) = entry.address {
+                    existing.merge(rule.address.clone());
+                } else {
+                    entry.address = Some(rule.address.clone());
+                }
             }
         }
 
@@ -250,9 +255,38 @@ impl From<&Name> for crate::collections::TrieKey<Name> {
 mod tests {
 
     use crate::config::{AddressRule, AddressRuleValue};
-    use std::{net::Ipv4Addr, ptr};
+    use std::{net::{Ipv4Addr, Ipv6Addr}, ptr};
 
     use super::*;
+
+    #[test]
+    fn test_address_rule_multi_ip_merge() {
+        let mut r1 = AddressRuleValue::Addr {
+            v4: Some(vec!["1.1.1.1".parse().unwrap()].into()),
+            v6: None,
+        };
+        let r2 = AddressRuleValue::Addr {
+            v4: Some(vec!["1.1.1.2".parse().unwrap()].into()),
+            v6: Some(vec!["::1".parse().unwrap()].into()),
+        };
+        r1.merge(r2);
+        match r1 {
+            AddressRuleValue::Addr { v4, v6 } => {
+                assert_eq!(
+                    v4.unwrap().to_vec(),
+                    vec![
+                        "1.1.1.1".parse::<Ipv4Addr>().unwrap(),
+                        "1.1.1.2".parse::<Ipv4Addr>().unwrap()
+                    ]
+                );
+                assert_eq!(
+                    v6.unwrap().to_vec(),
+                    vec!["::1".parse::<Ipv6Addr>().unwrap()]
+                );
+            }
+            _ => panic!("merge 结果应为 Addr"),
+        }
+    }
 
     #[test]
     fn test_nftset_merge_same_domain() {

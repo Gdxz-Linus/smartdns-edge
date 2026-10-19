@@ -1620,6 +1620,15 @@ impl RuntimeConfigBuilder {
             }
         }
 
+        if let Some(resolv_file) = &cfg.resolv_file {
+            warn!(
+                "resolv-file \"{}\" is parsed but not implemented in the async engine; \
+                 dynamic reload from resolv.conf is not supported. Use 'server' or 'server dhcp://<interface>' \
+                 to configure upstream servers.",
+                resolv_file.display()
+            );
+        }
+
         if cfg.binds.is_empty() {
             cfg.binds.push(UdpBindAddrConfig::default().into())
         }
@@ -2566,7 +2575,7 @@ impl RuntimeConfigBuilder {
                     // 配置文件所在目录（服务方式启动时 CWD 不可靠，对齐 C 版
                     // `_config_foreach_file` 的统一锚定行为）。
                     let normalized = file.as_str().replace('\\', "/");
-                    let anchored = if normalized.starts_with('/') {
+                    let anchored = if std::path::Path::new(file.as_str()).is_absolute() {
                         normalized
                     } else if let Some(base) = self.conf_file.as_ref() {
                         let dir = base
@@ -2990,12 +2999,96 @@ fn detect_broken_proxy_credential(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::{
+        Event, Id, Metadata, Subscriber,
+        dispatcher::{Dispatch, with_default},
+        field::{Field, Visit},
+        Level,
+    };
+
     use crate::{dns::DomainRuleGetter, libdns::Protocol};
     use byte_unit::Byte;
 
     use crate::config::{BindAddr, HttpsBindAddrConfig, ServerOpts, SslConfig};
 
     use super::*;
+
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    struct MessageCapture(String);
+
+    impl Visit for MessageCapture {
+        fn record_debug(&mut self, _field: &Field, value: &dyn std::fmt::Debug) {
+            self.0 = format!("{value:?}");
+        }
+    }
+
+    impl Subscriber for WarningCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.level() <= &Level::WARN
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut message = MessageCapture(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+
+    }
+
+    #[test]
+    fn resolv_file_warning_on_build() {
+        let resolv_file = std::env::temp_dir().join(format!(
+            "smartdns-resolv-warning-{}.conf",
+            std::process::id()
+        ));
+        std::fs::write(&resolv_file, "nameserver 127.0.0.1\n").unwrap();
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let capture = WarningCapture(warnings.clone());
+        let dispatch = Dispatch::new(capture);
+        let mut config = None;
+
+        with_default(&dispatch, || {
+            config = Some(
+                RuntimeConfig::builder()
+                    .with(&format!(
+                        "resolv-file {}",
+                        resolv_file.to_str().unwrap()
+                    ))
+                    .build()
+                    .unwrap(),
+            );
+        });
+
+        let config = config.unwrap();
+        assert_eq!(config.resolv_file(), Some(resolv_file.as_path()));
+        assert!(resolv_file.exists(), "resolv-file 指向的文件必须被读取");
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("not implemented in the async engine")
+                    && message.contains(resolv_file.to_string_lossy().as_ref())),
+            "应捕获 resolv-file 的明确警告，实际: {warnings:?}"
+        );
+
+        let _ = std::fs::remove_file(&resolv_file);
+    }
 
     /// 🔐 问题 24：配置摘要里 `dualstack ip selection` 那一行的三种状态。
     ///
@@ -6564,5 +6657,27 @@ mod rule_group_scope_tests {
         );
         // 说明：glob crate 在 Windows 平台对反斜杠做了分隔符兼容（raw 也能匹配），
         // 缺陷的实际暴露面是「Windows 写的配置拷到 Linux 跑」——归一保证跨平台一致。
+    }
+
+    #[test]
+    fn hosts_file_windows_drive_letter_is_absolute() {
+        let dir = std::env::temp_dir().join(format!("smartdns-hosts-win-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(&conf, "hosts-file C:/Windows/System32/drivers/etc/hosts\n").unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&conf));
+        let pattern = cfg
+            .hosts_file()
+            .expect("hosts-file should parse")
+            .as_str()
+            .to_string();
+
+        assert_eq!(
+            pattern,
+            "C:/Windows/System32/drivers/etc/hosts",
+            "Windows drive-letter paths must not be anchored"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

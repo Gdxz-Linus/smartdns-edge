@@ -43,7 +43,13 @@ impl std::ops::AddAssign for DomainRule {
         }
 
         if rhs.address.is_some() {
-            self.address = rhs.address;
+            if let Some(rhs_addr) = rhs.address {
+                if let Some(ref mut lhs_addr) = self.address {
+                    lhs_addr.merge(rhs_addr);
+                } else {
+                    self.address = Some(rhs_addr);
+                }
+            }
         }
 
         // 🌟 核心修复 1：合并测速模式数组，使用纯循环避免触发系统截断 Bug

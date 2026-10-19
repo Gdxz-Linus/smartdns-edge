@@ -591,14 +591,7 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
     {
         // 恒定时间比较：长度不同、或第几位不同都不提前返回，
         // 免得攻击者靠响应时间差一位一位把口令试出来。
-        let (a, b) = (provided_token.as_bytes(), expected_token.as_bytes());
-        let mut diff = (a.len() ^ b.len()) as u8;
-        for i in 0..a.len().max(b.len()) {
-            let x = *a.get(i).unwrap_or(&0);
-            let y = *b.get(i).unwrap_or(&0);
-            diff |= std::hint::black_box(x ^ y);
-        }
-        if diff == 0 {
+        if verify_token_constant_time(provided_token, &expected_token) {
             // 口令正确，放行。注意：正确口令永远不会被限速挡住——
             // 否则攻击者只要故意错几次，就能把你的管理员锁在后台之外。
             if let Some(ip) = client_ip {
@@ -631,10 +624,29 @@ async fn api_auth_middleware(req: Request, next: Next) -> Result<Response, Statu
     Err(StatusCode::UNAUTHORIZED)
 }
 
+fn verify_token_constant_time(provided_token: &str, expected_token: &str) -> bool {
+    let hash_provided = ring::digest::digest(&ring::digest::SHA256, provided_token.as_bytes());
+    let hash_expected = ring::digest::digest(&ring::digest::SHA256, expected_token.as_bytes());
+    let (a, b) = (hash_provided.as_ref(), hash_expected.as_ref());
+
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= std::hint::black_box(a[i] ^ b[i]);
+    }
+    diff == 0 && provided_token.len() == expected_token.len()
+}
+
 #[cfg(test)]
 mod auth_limit_tests {
     use super::*;
     use std::net::IpAddr;
+
+    #[test]
+    fn test_token_constant_time_comparison() {
+        assert!(verify_token_constant_time("correct-token", "correct-token"));
+        assert!(!verify_token_constant_time("wrong-token", "correct-token"));
+        assert!(!verify_token_constant_time("short", "correct-token"));
+    }
 
     /// 🔐 问题 13-②：**内部错误详情不得出现在响应体里**。
     ///

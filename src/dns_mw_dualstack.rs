@@ -195,7 +195,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             }
 
             // 单边容错 2：that 报错，this 拿到了真实 IP
-            (Ok(this), Err(_)) if this.records().iter().any(|r| r.record_type().is_ip_addr()) => {
+            (Ok(this), Err(_)) => {
                 crate::log::debug!(
                     "dual-stack IP selection: {}; partial failure tolerated ({} survived)",
                     req.query().original().name(),
@@ -207,7 +207,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             }
 
             // 宁缺毋滥：双双 Err，或者一死一空包。直接把底层报错抛出给用户，促使其重试！
-            (Err(e), _) | (_, Err(e)) => {
+            (Err(e), _) => {
                 return Err(e);
             }
         };
@@ -770,5 +770,68 @@ mod aligned_ttl_tests {
                 "开关没开时 {qt:?} 不该被旁路"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod partial_failure_tests {
+    use super::*;
+    use crate::dns_mw::DnsMockMiddleware;
+    use crate::libdns::proto::op::ResponseCode;
+    use crate::libdns::proto::rr::RecordType;
+    use crate::libdns::proto::rr::{RData, rdata::CNAME};
+
+    struct CNameOnlyAWithFailedSibling;
+
+    #[async_trait::async_trait]
+    impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for CNameOnlyAWithFailedSibling {
+        async fn handle(
+            &self,
+            _ctx: &mut DnsContext,
+            req: &DnsRequest,
+            _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+        ) -> Result<DnsResponse, DnsError> {
+            if req.query().query_type() != RecordType::A {
+                return Err(ResponseCode::ServFail.into());
+            }
+
+            let query = req.query().original().to_owned();
+            let mut resp = DnsResponse::empty();
+            resp.add_query(query.clone());
+            resp.add_answer(crate::dns::Record::from_rdata(
+                query.name().clone(),
+                300,
+                RData::CNAME(CNAME("target.test.".parse().unwrap())),
+            ));
+            Ok(resp)
+        }
+    }
+
+    #[tokio::test]
+    async fn cname_only_primary_survives_sibling_failure() {
+        let cfg = crate::dns_conf::RuntimeConfig::builder()
+            .with("server 127.0.0.1:1")
+            .build()
+            .unwrap();
+        let mock = DnsMockMiddleware::builder()
+            .with_extra_middleware(DnsDualStackIpSelectionMiddleware::new())
+            .with_extra_middleware(CNameOnlyAWithFailedSibling)
+            .build(cfg);
+
+        let resp = mock
+            .lookup("primary.test.", RecordType::A)
+            .await
+            .expect("successful A response must survive sibling failure");
+
+        assert!(
+            resp.answers()
+                .iter()
+                .any(|r| r.record_type() == RecordType::CNAME)
+        );
+        assert!(
+            resp.answers()
+                .iter()
+                .all(|r| r.record_type() != RecordType::AAAA)
+        );
     }
 }

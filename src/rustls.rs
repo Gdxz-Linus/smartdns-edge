@@ -969,12 +969,21 @@ pub fn decrypt_pkcs8_encrypted_private_key(
     }
 
     let mut buf = encrypted.to_vec();
-    let dec =
-        cbc::Decryptor::<aes::Aes256>::new_from_slices(&derived[..params.key_len], &params.iv)
-            .map_err(|_| DecryptError::MalformedParameters("bad key/iv length"))?;
-    let plain = dec
-        .decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf)
-        .map_err(|_| DecryptError::WrongPassphrase)?;
+    let plain = match params.key_len {
+        16 => {
+            let dec = cbc::Decryptor::<aes::Aes128>::new_from_slices(&derived, &params.iv)
+                .map_err(|_| DecryptError::MalformedParameters("bad key/iv length"))?;
+            dec.decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf)
+                .map_err(|_| DecryptError::WrongPassphrase)?
+        }
+        32 => {
+            let dec = cbc::Decryptor::<aes::Aes256>::new_from_slices(&derived, &params.iv)
+                .map_err(|_| DecryptError::MalformedParameters("bad key/iv length"))?;
+            dec.decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf)
+                .map_err(|_| DecryptError::WrongPassphrase)?
+        }
+        _ => return Err(DecryptError::UnsupportedAlgorithm),
+    };
 
     Ok(plain.to_vec())
 }

@@ -258,6 +258,7 @@ pub fn ensure_cert_for_binds(
             crate::config::BindAddrConfig::Tls(_)
                 | crate::config::BindAddrConfig::Https(_)
                 | crate::config::BindAddrConfig::H3(_)
+                | crate::config::BindAddrConfig::Quic(_)
         )
     });
     if !has_tls_bind {
@@ -268,6 +269,7 @@ pub fn ensure_cert_for_binds(
             crate::config::BindAddrConfig::Tls(x) => Some(&x.ssl_config),
             crate::config::BindAddrConfig::Https(x) => Some(&x.ssl_config),
             crate::config::BindAddrConfig::H3(x) => Some(&x.ssl_config),
+            crate::config::BindAddrConfig::Quic(x) => Some(&x.ssl_config),
             _ => None,
         };
         match ssl {

@@ -1,4 +1,8 @@
-use std::{borrow::Borrow, net::IpAddr, sync::Arc};
+use std::{
+    borrow::Borrow,
+    net::IpAddr,
+    sync::{Arc, RwLock},
+};
 
 use crate::libdns::proto::{
     op::Query,
@@ -13,6 +17,21 @@ use crate::{
 };
 
 pub type DnsMiddlewareHost = MiddlewareHost<DnsContext, DnsRequest, DnsResponse, DnsError>;
+
+type ArpLookupFn = fn(IpAddr) -> Option<String>;
+static TEST_ARP_LOOKUP: RwLock<Option<ArpLookupFn>> = RwLock::new(None);
+
+#[cfg(test)]
+pub fn set_test_arp_lookup(lookup: Option<ArpLookupFn>) {
+    *TEST_ARP_LOOKUP.write().unwrap() = lookup;
+}
+
+fn lookup_client_mac_from_arp(client_ip: IpAddr) -> Option<String> {
+    if let Some(test_lookup) = *TEST_ARP_LOOKUP.read().unwrap() {
+        return test_lookup(client_ip);
+    }
+    crate::infra::arp::lookup_client_mac_from_arp(client_ip)
+}
 
 /// IPv6 的 v4-mapped 地址先归一成 IPv4 —— 否则同一个设备会因为"用了哪种写法"
 /// 落到不同的客户端规则上（`::ffff:192.168.1.5` 与 `192.168.1.5` 必须同组）。
@@ -140,7 +159,16 @@ impl DnsMiddlewareHandler {
         // 🔐 13-⑥：⚠️ 这里**必须用 `client_ip`（真实对端）**，不能用 `grouping_ip` ——
         // 后者来自可伪造的 `X-Forwarded-For`，拿它做放行判定等于把 ACL 交给调用方自报。
         // 这是本功能最要紧的一条安全约束。
-        let matched_rule = client_rules.iter().find(|s| s.match_ip(&client_ip));
+        let mut matched_rule = client_rules.iter().find(|s| s.match_ip(&client_ip));
+        if matched_rule.is_none()
+            && client_rules
+                .iter()
+                .any(|s| matches!(s.client, crate::dns_conf::Client::Mac(_)))
+        {
+            if let Some(mac) = lookup_client_mac_from_arp(client_ip) {
+                matched_rule = client_rules.iter().find(|s| s.match_mac(&mac));
+            }
+        }
         if !server_opts.is_background
             && (cfg.acl_enable() || server_opts.acl())
             && matched_rule.is_none()
@@ -537,6 +565,40 @@ mod tests {
             Some(ResponseCode::Refused),
             "被 ACL 拒掉时应当回 REFUSED（不是 SERVFAIL）"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acl_enable_allows_matched_mac_client() {
+        use crate::config::ServerOpts;
+        use std::sync::{Mutex, OnceLock};
+
+        fn test_arp_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        fn test_arp_lookup(_client_ip: IpAddr) -> Option<String> {
+            Some("01:23:45:67:89:ab".to_string())
+        }
+
+        let _arp_guard = test_arp_lock().lock().unwrap();
+        set_test_arp_lookup(Some(test_arp_lookup));
+
+        let name = "acl-mac.example.com";
+        let cfg = RuntimeConfig::builder()
+            .with("acl-enable yes")
+            .with("client-rules 01-23-45-67-89-AB -group trusted")
+            .build()
+            .unwrap();
+        let mw = DnsMockMiddleware::builder()
+            .with_a_record(name, "10.1.1.1".parse().unwrap())
+            .build(cfg);
+
+        let res = mw
+            .search(&req_from(name, "127.0.0.1:55020"), &ServerOpts::default())
+            .await;
+        set_test_arp_lookup(None);
+        assert!(res.is_ok(), "matched MAC client must pass ACL: {res:?}");
     }
 
     /// 🔐 13-⑥：把"选组用的是哪个地址"这件事**直接钉在纯逻辑上**。

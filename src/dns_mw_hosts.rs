@@ -150,18 +150,14 @@ impl DnsHostsMiddleware {
 /// （`handle` 里 `hosts.lookup_static_host(...)` 返回 `None` 就会 `next.run(...)`），
 /// 比"让客户端超时"好得多；同时限流告警，让人知道 hosts 没生效。
 async fn read_hosts_blocking(pattern: Option<String>) -> (Hosts, bool) {
-    match tokio::task::spawn_blocking(move || match pattern {
-        Some(ref pattern) => read_hosts(pattern),
-        None => (Hosts::default(), false),
-    })
-    .await
+    match tokio::task::spawn_blocking(move || read_hosts_files(&hosts_paths(pattern.as_deref())))
+        .await
     {
         Ok(v) => v,
         Err(err) => {
             if crate::log::warn_once("hosts-read-task-failed") {
                 crate::log::warn!(
-                    "the hosts-file read task failed ({}); falling back to no static hosts for now \
-                     (queries still go to the upstreams). If this repeats, check the log for a task panic",
+                    "the hosts-file read task failed ({}); falling back to no static hosts for now",
                     err
                 );
             }
@@ -265,45 +261,38 @@ fn system_hosts_paths() -> Vec<String> {
     Vec::new()
 }
 
-fn read_hosts(pattern: &str) -> (Hosts, bool) {
-    let mut hosts = Hosts::default();
-    // 🔐 P2：是否读到过非空白内容（用来识别"原子替换瞬间读到的空文件"）
-    let mut has_content = false;
-    match glob::glob(pattern) {
-        Ok(paths) => {
-            for entry in paths {
-                let path = match entry {
-                    Ok(path) => {
-                        if !path.is_file() {
-                            continue;
-                        }
-                        path
-                    }
-                    Err(err) => {
-                        log::error!("cannot resolve a path matched by {}: {}", pattern, err);
-                        continue;
-                    }
-                };
-
-                let content = match std::fs::read(&path) {
-                    Ok(content) => content,
-                    Err(err) => {
-                        log::error!("cannot read hosts file {}: {}", path.display(), err);
-                        continue;
-                    }
-                };
-
-                if content.iter().any(|b| !b.is_ascii_whitespace()) {
-                    has_content = true;
-                }
-
-                if let Err(err) = hosts.read_hosts_conf(&content[..]) {
-                    log::error!("{}", err);
-                }
-            }
+fn hosts_paths(hosts_file_pattern: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(pattern) = hosts_file_pattern {
+        if let Ok(entries) = glob::glob(pattern) {
+            paths.extend(entries.flatten());
         }
-        Err(err) => {
-            log::error!("cannot list the hosts file directory: {}", err);
+    }
+    paths.extend(system_hosts_paths().into_iter().map(PathBuf::from));
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn read_hosts_files(paths: &[PathBuf]) -> (Hosts, bool) {
+    let mut hosts = Hosts::default();
+    let mut has_content = false;
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let content = match std::fs::read(path) {
+            Ok(content) => content,
+            Err(err) => {
+                log::error!("cannot read hosts file {}: {}", path.display(), err);
+                continue;
+            }
+        };
+        if content.iter().any(|b| !b.is_ascii_whitespace()) {
+            has_content = true;
+        }
+        if let Err(err) = hosts.read_hosts_conf(&content[..]) {
+            log::error!("{}", err);
         }
     }
     (hosts, has_content)
@@ -332,7 +321,7 @@ mod tests {
 
         let empty = dir.path.join("empty.hosts");
         std::fs::write(&empty, b"\n   \n")?;
-        let (_, has_content) = read_hosts(empty.to_str().unwrap());
+        let (_, has_content) = read_hosts_files(&[empty]);
         assert!(
             !has_content,
             "只有空白的 hosts 文件应报告 has_content=false"
@@ -340,9 +329,42 @@ mod tests {
 
         let filled = dir.path.join("filled.hosts");
         std::fs::write(&filled, b"127.0.0.1  p2-test.local\n")?;
-        let (_, has_content) = read_hosts(filled.to_str().unwrap());
+        let (_, has_content) = read_hosts_files(&[filled]);
         assert!(has_content, "有内容的 hosts 文件应报告 has_content=true");
 
+        Ok(())
+    }
+
+    #[test]
+    fn hosts_paths_without_pattern_include_system_hosts() {
+        let paths = hosts_paths(None);
+        let system_paths = system_hosts_paths()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(paths, system_paths);
+    }
+
+    #[test]
+    fn read_hosts_files_reads_configured_hosts() -> anyhow::Result<()> {
+        let dir = TempDirGuard::new("hosts-files")?;
+        let hosts_file = dir.path.join("hosts");
+        std::fs::write(&hosts_file, b"1.2.3.4 merged-hosts-test\n")?;
+
+        let (hosts, has_content) = read_hosts_files(&[hosts_file]);
+        assert!(has_content);
+        let ips = match hosts.lookup_static_host(&Query::query(
+            "merged-hosts-test".parse().unwrap(),
+            RecordType::A,
+        )) {
+            Some(lookup) => lookup
+                .records()
+                .iter()
+                .filter_map(|record| record.data().ip_addr())
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        assert_eq!(ips, vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
         Ok(())
     }
 

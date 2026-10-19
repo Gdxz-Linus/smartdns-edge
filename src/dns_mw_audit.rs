@@ -1,6 +1,6 @@
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -58,28 +58,33 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
 impl DnsAuditMiddleware {
     /// `console` = 🔐 Q9：审计行同时打到控制台（stdout）。
     /// `syslog` = 🔐 Q8：审计改送系统日志（**不再写文件**、行首不带时间戳，与 C 版一致）。
-    pub fn new<P: AsRef<Path>>(
-        path: P,
+    pub fn new(
+        path: Option<PathBuf>,
         audit_size: u64,
         audit_num: usize,
         mode: Option<u32>,
         console: bool,
         syslog: bool,
     ) -> Self {
-        let audit_file = path.as_ref().to_owned();
+        let audit_path = path;
 
         // 🌟 扩大缓冲池，配合 try_send 吸收突发流量
         let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(1024);
 
         tokio::spawn(async move {
             // 🔐 P3：先把审计档的目录准备好 —— 同上，不再依赖"构建时顺手建出来的 ./logs"。
-            if let Err(err) = crate::infra::mapped_file::ensure_parent_dir(&audit_file) {
-                crate::log::error!(
-                    "cannot create the audit directory ({}): {err}; audit output may not reach the file",
-                    audit_file.display()
-                );
+            if let Some(audit_file) = &audit_path {
+                if let Err(err) = crate::infra::mapped_file::ensure_parent_dir(audit_file) {
+                    crate::log::error!(
+                        "cannot create the audit directory ({}): {err}; audit output may not reach the file",
+                        audit_file.display()
+                    );
+                }
             }
-            let mut audit_file = MappedFile::open(audit_file, audit_size, Some(audit_num), mode);
+            let mut audit_file = audit_path
+                .as_ref()
+                .filter(|_| !syslog && audit_num > 0)
+                .map(|audit_file| MappedFile::open(audit_file, audit_size, Some(audit_num), mode));
             const BUF_SIZE: usize = 10;
             // 改用 Vec 方便利用 std::mem::replace 进行内存腾挪
             let mut buf: Vec<DnsAuditRecord> = Vec::with_capacity(BUF_SIZE);
@@ -106,13 +111,21 @@ impl DnsAuditMiddleware {
                             // 一次 I/O 故障不该让审计彻底停摆。
                             // 先取出路径：闭包 `move` 会把 `audit_file` 整个搬走，
                             // 而 panic 分支需要用它**重新打开**（句柄被辅道任务带走、拿不回来）。
-                            let audit_path = audit_file.path().to_path_buf();
+                            let audit_path = audit_file.as_ref().map(|file| file.path().to_path_buf());
+                            let audit_file_for_task = audit_file.take();
                             match tokio::task::spawn_blocking(move || {
+                                let mut audit_file = audit_file_for_task;
                                 if syslog {
                                     // 🔐 Q8：改送系统日志（C 版 `audit.c:145-166` 也是"送 syslog 就不写文件"）
                                     write_audit_to_syslog(&records_to_write, console);
-                                } else if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write, console) {
-                                    warn!("log audit failed {}", err);
+                                } else if let Some(ref mut file) = audit_file {
+                                    if let Err(err) = record_audit_to_file(file, &records_to_write, console) {
+                                        warn!("log audit failed {}", err);
+                                    }
+                                } else if console {
+                                    for record in &records_to_write {
+                                        println!("{record}");
+                                    }
                                 }
                                 audit_file // 活干完了，把文件句柄交还给主循环
                             }).await {
@@ -124,12 +137,14 @@ impl DnsAuditMiddleware {
                                         "the audit writer task panicked ({join_err}); \
                                          reopening the audit file and continuing"
                                     );
-                                    audit_file = MappedFile::open(
-                                        audit_path,
-                                        audit_size,
-                                        Some(audit_num),
-                                        mode,
-                                    );
+                                    if let Some(audit_path) = &audit_path {
+                                        audit_file = Some(MappedFile::open(
+                                            audit_path,
+                                            audit_size,
+                                            Some(audit_num),
+                                            mode,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -143,12 +158,20 @@ impl DnsAuditMiddleware {
 
                                     // 🌟 核心修复 2：同上，转移至系统辅道执行磁盘 I/O
                                     // 🔐 问题 53-②：同样**不能 unwrap**（理由见上一处）。
-                                    let audit_path = audit_file.path().to_path_buf();
+                                    let audit_path = audit_file.as_ref().map(|file| file.path().to_path_buf());
+                                    let audit_file_for_task = audit_file.take();
                                     match tokio::task::spawn_blocking(move || {
+                                        let mut audit_file = audit_file_for_task;
                                         if syslog {
                                             write_audit_to_syslog(&records_to_write, console);
-                                        } else if let Err(err) = record_audit_to_file(&mut audit_file, &records_to_write, console) {
-                                            warn!("log audit failed {}", err);
+                                        } else if let Some(ref mut file) = audit_file {
+                                            if let Err(err) = record_audit_to_file(file, &records_to_write, console) {
+                                                warn!("log audit failed {}", err);
+                                            }
+                                        } else if console {
+                                            for record in &records_to_write {
+                                                println!("{record}");
+                                            }
                                         }
                                         audit_file
                                     }).await {
@@ -158,12 +181,14 @@ impl DnsAuditMiddleware {
                                                 "the audit writer task panicked ({join_err}); \
                                                  reopening the audit file and continuing"
                                             );
-                                            audit_file = MappedFile::open(
-                                                audit_path,
-                                                audit_size,
-                                                Some(audit_num),
-                                                mode,
-                                            );
+                                            if let Some(audit_path) = &audit_path {
+                                                audit_file = Some(MappedFile::open(
+                                                    audit_path,
+                                                    audit_size,
+                                                    Some(audit_num),
+                                                    mode,
+                                                ));
+                                            }
                                         }
                                     }
                                 }
@@ -346,13 +371,37 @@ fn record_audit_to_file(
 
 #[cfg(test)]
 mod tests {
-
+    use std::path::Path;
     use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::{RData, RecordType};
     use std::io::Read;
     use std::str::FromStr;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_audit_middleware_console_only() {
+        let middleware = DnsAuditMiddleware::new(None, 102400, 2, None, true, false);
+
+        let query = Query::query(Name::from_str("www.example.com").unwrap(), RecordType::A);
+        let result = Ok(DnsResponse::from_rdata(
+            query.to_owned(),
+            RData::A("93.184.216.34".parse().unwrap()),
+        ));
+        let audit = DnsAuditRecord {
+            id: 11,
+            date: "2022-11-11 20:18:11.099966887 +08:00".parse().unwrap(),
+            client: "127.0.0.1".to_string(),
+            query,
+            result,
+            elapsed: Duration::from_millis(10),
+            speed: Duration::from_millis(11),
+            lookup_source: LookupFrom::Server("default".to_string()),
+        };
+
+        middleware.audit_sender.send(audit).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+    }
 
     #[test]
     fn test_dns_audit_to_string() {

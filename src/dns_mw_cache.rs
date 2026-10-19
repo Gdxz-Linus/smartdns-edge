@@ -54,7 +54,7 @@ pub struct DnsCacheMiddleware {
         Mutex<
             std::collections::HashMap<
                 CacheKey,
-                tokio::sync::broadcast::Sender<Option<DnsResponse>>,
+                tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>,
             >,
         >,
     >,
@@ -554,10 +554,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
 
         if let Some(mut receiver) = rx {
             return match receiver.recv().await {
-                Ok(Some(res)) => {
+                Ok(Ok(res)) => {
                     ctx.source = LookupFrom::Cache;
                     Ok(res)
                 }
+                Ok(Err(e)) => Err(e),
                 _ => Err(ProtoErrorKind::NoConnections.into()),
             };
         }
@@ -634,7 +635,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 {
                     let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(tx) = map.remove(&cache_key) {
-                        let broadcast_res = Some(lookup.clone());
+                        let broadcast_res = Ok(lookup.clone());
                         let _ = tx.send(broadcast_res);
                     }
                 }
@@ -645,7 +646,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 {
                     let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(tx) = map.remove(&cache_key) {
-                        let _ = tx.send(None);
+                        let _ = tx.send(Err(err.clone()));
                     }
                 }
                 inflight_guard.done = true;
@@ -2109,7 +2110,7 @@ struct InflightCacheGuard {
         Mutex<
             std::collections::HashMap<
                 CacheKey,
-                tokio::sync::broadcast::Sender<Option<DnsResponse>>,
+                tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>,
             >,
         >,
     >,
@@ -2122,7 +2123,7 @@ impl Drop for InflightCacheGuard {
         if !self.done {
             let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(tx) = map.remove(&self.key) {
-                let _ = tx.send(None);
+                let _ = tx.send(Err(ProtoErrorKind::NoConnections.into()));
             }
         }
     }

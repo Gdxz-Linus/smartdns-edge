@@ -124,9 +124,20 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
                 return Ok(None);
             };
 
-            match incoming.await {
-                Ok(conn) => {
-                    let peer = conn.remote_address();
+            let conn = match tokio::time::timeout(std::time::Duration::from_secs(5), incoming).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(err)) => {
+                    log::debug!("QUIC handshake failed: {err}");
+                    continue;
+                }
+                Err(_) => {
+                    log::debug!("QUIC handshake timed out (5s), dropping stalled connection");
+                    continue;
+                }
+            };
+
+            {
+                let peer = conn.remote_address();
 
                     // 🔐 A6（2026-09-17）：连接数上限。DoH3 以前是**唯一没有闸门**的监听，
                     // 攻击者可以无限开 QUIC 连接；现在与其它五条监听同口径：
@@ -166,12 +177,6 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
                     }
 
                     return Ok(Some((h3_quinn::Connection::new(conn), Some(peer))));
-                }
-                Err(err) => {
-                    // 单个连接握手失败不该拖垮整个监听（与上游行为一致：记录后继续）
-                    log::warn!("DoH3 connection setup failed and was dropped: {err}");
-                    continue;
-                }
             }
         }
     }

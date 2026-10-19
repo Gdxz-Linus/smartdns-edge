@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1205,9 +1206,11 @@ fn build_middleware(
         // check if audit enabled.
         // 🔐 P3-11：`audit-num 0`＝禁用审计文件输出（对齐 C 版 tlog_open 语义：
         // maxlogcount<=0 不写文件）。audit-syslog / audit-console 不受影响。
-        if cfg.audit_enable() && cfg.audit_file().is_some() && cfg.audit_num() > 0 {
+        let has_file = cfg.audit_file().is_some() && cfg.audit_num() > 0 && !cfg.audit_syslog();
+        let has_output = cfg.audit_console() || cfg.audit_syslog();
+        if cfg.audit_enable() && (has_file || has_output) {
             builder = builder.with(DnsAuditMiddleware::new(
-                cfg.audit_file().unwrap(),
+                cfg.audit_file().map(PathBuf::from),
                 cfg.audit_size(),
                 cfg.audit_num(),
                 cfg.audit_file_mode().into(),
@@ -1225,9 +1228,7 @@ fn build_middleware(
         // `next.run()`** 的，如果本中间件挂在缓存内层，缓存命中路径就会整个绕过它
         // （非 A/AAAA 类型会在缓存命中时把 CNAME 漏给客户端）。
         // 挂在最外层也就覆盖了规则组 CNAME（`DnsCNameMiddleware`）产生的 CNAME。
-        if cfg.force_no_cname() {
-            builder = builder.with(DnsForceNoCNameMiddleware);
-        }
+        builder = builder.with(DnsForceNoCNameMiddleware);
 
         if cfg.rule_groups().values().any(|x| !x.cnames.is_empty()) {
             builder = builder.with(DnsCNameMiddleware);
@@ -1303,6 +1304,53 @@ fn build_middleware(
     };
 
     Arc::new(middleware_handler)
+}
+
+#[cfg(test)]
+mod force_no_cname_mount_tests {
+    use super::*;
+    use crate::libdns::proto::op::{Message, Query};
+    use crate::libdns::proto::rr::RecordType;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn bind_level_force_no_cname_is_mounted_without_global_flag() {
+        let cfg = Arc::new(
+            RuntimeConfig::builder()
+                .with("server 127.0.0.1:1")
+                .with("dualstack-ip-selection no")
+                .with("address /target.test/1.2.3.4")
+                .with("cname /alias.test/target.test")
+                .build()
+                .unwrap(),
+        );
+
+        let (_incoming, dns_handle) = DnsHandle::new();
+        let mut dns_cache = None;
+        let dns_client = cfg.create_dns_client().await;
+        let handler = build_middleware(&cfg, &dns_handle, dns_client, &mut dns_cache);
+
+        let mut message = Message::query();
+        message.add_query(Query::query("alias.test.".parse().unwrap(), RecordType::A));
+        let req = DnsRequest::new(
+            message,
+            "127.0.0.1:5300".parse::<SocketAddr>().unwrap(),
+            crate::libdns::Protocol::Udp,
+        );
+        let opts = ServerOpts {
+            force_no_cname: Some(true),
+            ..Default::default()
+        };
+
+        let response = handler.search(&req, &opts).await.unwrap();
+        let types = response
+            .answers()
+            .iter()
+            .map(|record| record.record_type())
+            .collect::<Vec<_>>();
+
+        assert_eq!(types, vec![RecordType::A]);
+    }
 }
 
 // 缓存结构：IP -> (MAC, 过期时间)
