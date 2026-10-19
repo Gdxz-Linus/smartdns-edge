@@ -46,7 +46,7 @@ SmartDNS Edge is a local DNS intelligent gateway rewritten in the Rust programmi
 
 *   **11. Seamless Optimistic Caching & Heat-Based Prefetching Management**
 
-    Supports "Serve-Expired" optimistic caching; when upstream networks disconnect or proxies briefly freeze, the system prioritizes returning historical records instantly to open webpages without delay. Limits background prefetching updates to records with a query heat of $\ge 2$ that have not exceeded the `serve_expired_prefetch_time`, completely eliminating endless prefetching of inactive domains that causes zombie cache accumulation and bandwidth waste.
+    Supports "Serve-Expired" optimistic caching (Stale-While-Revalidate); during the prefetch protection window, access to expired records instantly serves historical data while refresh happens asynchronously in the background. Limits background prefetching updates to records with a query heat of $\ge 2$ that have not exceeded the `serve_expired_prefetch_time`, completely eliminating endless prefetching of inactive domains that causes zombie cache accumulation and bandwidth waste.
 
 *   **12. Multi-Dimensional Physical-Level Attack Defense & Failure Self-Healing**
 

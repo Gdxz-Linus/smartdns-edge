@@ -21,9 +21,9 @@
 | bind | DNS listening port number | [::]:53 | Support binding multiple ports<br />`IP:PORT@DEVICE`: server IP, port number, and device. <br />[-group]: DNS server group used when requesting. <br />[-no-rule-addr / -no-rule-nameserver / -no-rule-ipset / -no-rule-soa]: Skip specific rules.<br />[-ipset [#4\|#6]:name / -nftset [#4\|#6]:family#table#set]: every query on **this listener** also adds its resolved addresses to these sets (independent of, and in addition to, the sets configured on domain rules). <br />[-no-dualstack-selection / -no-speed-check / -no-cache]: Disable corresponding features. <br />[-force-aaaa-soa / -force-https-soa / -no-serve-expired]: Force specific query behaviors. <br />[-force-no-cname]: never return CNAME to clients on this listener. <br />[-no-api]: this listener serves DoH only and does not mount the console. <br />[-max-connections N]: per-listener connection cap. <br />[-max-connections-per-ip N]: per-listener per-source cap. <br />[-acl]: turn on access control for this listener alone (clients matching no client-rules get REFUSED). | bind :53@eth0 |
 | bind-tcp | TCP mode DNS listening port number | [::]:53 | Support binding multiple ports. Same options as `bind`. | bind-tcp :53 |
 | bind-tls | DOT mode DNS listening port number | [::]:853 | Support binding multiple ports. Same options as `bind`. | bind-tls :853 |
-| bind-https | DOH mode DNS listening port number | [::]:853 | Support binding multiple ports. Same options as `bind`. | bind-https :853 |
+| bind-https | DOH mode DNS listening port number | [::]:443 | Support binding multiple ports. Same options as `bind`. | bind-https :853 |
 | bind-http | Plain-HTTP listener, also mounts the management console | none | Support binding multiple ports. Same options as `bind`. Never expose it directly — use an SSH tunnel or add `-no-api` | bind-http 127.0.0.1:6080 |
-| bind-h3 | DNS over HTTP/3 listening port number | none | Support binding multiple ports. Same options as `bind`. | bind-h3 :853 |
+| bind-h3 | DNS over HTTP/3 listening port number | [::]:443 | Support binding multiple ports. Same options as `bind`. | bind-h3 :853 |
 | bind-cert-file | SSL Certificate file path | smartdns-cert.pem | path | bind-cert-file cert.pem |
 | bind-cert-key-file | SSL Certificate key file path | smartdns-key.pem | path | bind-cert-key-file key.pem |
 | bind-cert-key-pass | SSL Certificate key file password (used to decrypt a PKCS#8-encrypted private key; one global passphrase, applies to all encrypted listeners) | None | string | bind-cert-key-pass password |
@@ -32,7 +32,7 @@
 | bind-cert-san | Extra name entries added to the auto-generated certificate (repeatable; an IP value produces an IP-type SAN) | None | domain or IP, repeatable | bind-cert-san dns.test |
 | server-name | DNS name | host name / smartdns | any string like hostname | server-name smartdns |
 | cache-size | Domain name result cache number | 512 | Integer ≥ 0 (0 disables the cache).<br />The cache is split into 64 shards, so the **effective capacity is rounded up to a multiple of 64**; the actual value is printed in the startup log | cache-size 65536 |
-| cache-persist | Enable persist cache | Auto | [yes\|no] (Enabled if >128MB free space) | cache-persist yes |
+| cache-persist | Enable persist cache | no | [yes\|no] (disabled by default; set `yes` explicitly) | cache-persist yes |
 | cache-file | Cache persist file | /var/cache/smartdns.cache | path | cache-file /tmp/smartdns.cache |
 | cache-checkpoint-time | Cache persist time | 24 hours | seconds, 0: disable, other: persist time | cache-checkpoint-time 0 |
 | tcp-idle-time | TCP connection idle timeout | 120 | seconds, integer | tcp-idle-time 120 |
@@ -46,13 +46,13 @@
 | log-level | log level | error | off,fatal,error,warn,notice,info,debug | log-level error |
 | log-file | log path | /var/log/smartdns/smartdns.log | File Pah | log-file /var/log/smartdns.log |
 | log-size | Maximum size of a single log file; archived when exceeded | 128K | number+K,M,G | log-size 128K |
-| log-num | archived log number | 8 | Integer, 0 means turn off the log | log-num 2 |
+| log-num | archived log number | 2 | Integer, 0 means turn off the log | log-num 2 |
 | log-file-mode | archived log file mode | 0640 | Integer | log-file-mode 644 |
 | log-console | enable output log to console | no | [yes\|no] | log-console yes |
 | log-filter | Log filter expression (same syntax as `RUST_LOG`) | None | filter expression | log-filter smartdns=debug |
 | log-syslog | Also send the runtime log to syslog (Linux only) | no | [yes\|no]. Ident `smartdns`, facility `LOG_USER`; other platforms print a notice | log-syslog yes |
 | audit-enable | audit log enable | no | [yes\|no] | audit-enable yes |
-| audit-file | audit log file | /var/log/smartdns-audit.log | File Path | audit-file /var/log/audit.log |
+| audit-file | audit log file | None (must be specified explicitly) | File Path | audit-file /var/log/audit.log |
 | audit-size | Maximum size of a single audit file; archived when exceeded | 128K | number+K,M,G | audit-size 128K |
 | audit-num | archived audit log number | 2 | Integer | audit-num 2 |
 | audit-file-mode | archived audit log file mode | 0640 | Integer | audit-file-mode 644 |
@@ -77,7 +77,7 @@
 | hosts-file | set hosts file | None | hosts file path. | hosts-file /etc/hosts |
 | dnsmasq-lease-file | Read the dnsmasq DHCP lease to resolve LAN hostnames | None | lease file path | dnsmasq-lease-file /var/lib/misc/dnsmasq.leases |
 | domain | Append the LAN domain suffix to the short hostnames in the DHCP lease file | None | domain name. Affects `dnsmasq-lease-file` only, unrelated to `local-domain` | domain home.lan |
-| resolv-file | Load upstream DNS servers from a given resolv.conf file | None | file path | resolv-file /etc/resolv.conf |
+| resolv-file | Load upstream DNS servers from a given resolv.conf file; dynamic watching and reloading are not implemented yet. Prefer `server` or `server dhcp://` for upstreams | None | file path | resolv-file /etc/resolv.conf |
 | resolv-hostname | Resolve the local hostname to the local IP | yes | [yes\|no] | resolv-hostname yes |
 | expand-ptr-from-address | Auto-generate matching PTR records for addresses in address rules | no | [yes\|no] | expand-ptr-from-address yes |
 | num-workers | Worker thread count (auto-computed from CPU when unset; `0` is ignored and falls back to auto) | auto | integer greater than 0 | num-workers 4 | 

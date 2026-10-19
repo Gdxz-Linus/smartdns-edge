@@ -39,7 +39,7 @@ rr-ttl-reply-max 60
 
 ## 4.2 Optimistic Cache (Serve Expired)
 
-Optimistic caching means that when a domain's TTL expires, and the program cannot fetch a new IP due to network or upstream failures, it immediately returns the expired old IP to the client. This prevents the client from hanging while the program silently retries in the background.
+Optimistic caching (Stale-While-Revalidate) means that, during the prefetch protection window, access to an expired record instantly serves the historical data while refresh happens asynchronously in the background.
 
 Enable Serve Expired and Timeout Settings
 

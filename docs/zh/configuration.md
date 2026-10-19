@@ -21,9 +21,9 @@
 | bind | DNS 监听端口号 | [::]:53 | 可绑定多个端口。<br />IP:PORT@DEVICE: 服务器 IP:端口号@设备名<br />[-group]: 请求时使用的 DNS 服务器组<br />[-no-rule-addr]：跳过 address 规则<br />[-no-rule-nameserver]：跳过 Nameserver 规则<br />[-no-rule-ipset]：跳过 ipset 和 nftset 规则<br />[-no-rule-soa]：跳过 SOA(#) 规则<br />[-no-dualstack-selection]：停用双栈测速<br />[-no-speed-check]：停用测速<br />[-no-cache]：停止缓存 <br />[-force-aaaa-soa]: 禁用IPV6查询 <br />[-force-no-cname]: 不向该监听的客户端返回 CNAME <br />[-force-https-soa]: 禁用HTTPS记录查询 <br />[-no-serve-expired]: 禁用过期缓存 <br />[-ipset [#4\|#6]:集合名]：**这个监听**收到的查询，解析出的地址都额外写进这些 ipset 集合（可与域名规则里配的集合并用，各写各的）<br />[-nftset [#4\|#6]:family#table#set]：同上，写进 nftables 的集合<br />[-no-api]: 该监听只提供 DoH，不挂管理后台 <br />[-max-connections N]: 该监听单独设置连接数上限 <br />[-max-connections-per-ip N]: 该监听单独设置单一来源连接数上限 <br />[-acl]: 该监听单独开启访问控制（没匹配到任何 client-rules 的客户端回 REFUSED） | bind :53@eth0 |
 | bind-tcp | DNS TCP 监听端口号 | [::]:53 | 可绑定多个端口，规则选项同 bind | bind-tcp :53 |
 | bind-tls | DNS Over TLS 监听端口号 | [::]:853 | 可绑定多个端口，规则选项同 bind | bind-tls :853 |
-| bind-https | DNS Over HTTPS 监听端口号 | [::]:853 | 可绑定多个端口，规则选项同 bind | bind-https :853 |
+| bind-https | DNS Over HTTPS 监听端口号 | [::]:443 | 可绑定多个端口，规则选项同 bind | bind-https :853 |
 | bind-http | 明文 HTTP 监听，同时挂管理后台 | 无 | 可绑定多个端口，规则选项同 bind。不要直接暴露到公网，建议用 SSH 隧道或加 `-no-api` | bind-http 127.0.0.1:6080 |
-| bind-h3 | DNS Over HTTP/3 监听端口号 | 无 | 可绑定多个端口，规则选项同 bind（挂载管理后台的方式同 bind-https） | bind-h3 :853 |
+| bind-h3 | DNS Over HTTP/3 监听端口号 | [::]:443 | 可绑定多个端口，规则选项同 bind（挂载管理后台的方式同 bind-https） | bind-h3 :853 |
 | bind-cert-file | SSL证书文件路径 | smartdns-cert.pem | 合法路径字符串 | bind-cert-file cert.pem |
 | bind-cert-key-file | SSL证书KEY文件路径 | smartdns-key.pem | 合法路径字符串 | bind-cert-key-file key.pem |
 | bind-cert-key-pass | SSL证书KEY文件密码（私钥为 PKCS#8 加密格式时用于解密；全局一个，作用于全部加密监听） | 无 | 字符串 | bind-cert-key-pass password |
@@ -32,7 +32,7 @@
 | bind-cert-san | 自动生成证书时追加的名称条目（可重复；写 IP 则生成 IP 类型 SAN） | 无 | 域名或 IP，可重复 | bind-cert-san dns.test |
 | server-name | DNS 服务器名称 | 操作系统主机名 / smartdns | 符合主机名规格的字符串 | server-name smartdns |
 | cache-size | 域名结果缓存个数 | 512 | 大于等于 0 的数字（0 表示关闭缓存）。<br />缓存内部分为 64 个分片，**实际容量会向上取整到 64 的倍数**，启动日志会打印实际值 | cache-size 512 |
-| cache-persist | 是否持久化缓存 | 自动 | [yes\|no] (剩余空间超 128MB 时自动启用) | cache-persist yes |
+| cache-persist | 是否持久化缓存 | no | [yes\|no]，默认不开启，需显式配置 yes | cache-persist yes |
 | cache-file | 缓存持久化文件路径 | /var/cache/smartdns.cache | 合法路径字符串 | cache-file /tmp/smartdns.cache |
 | cache-checkpoint-time | 缓存持久化时间 | 24小时 |秒， 0 或 大于120的数字, 0表示禁用周期持久化 | cache-checkpoint-time 0 |
 | tcp-idle-time | TCP 链接空闲超时时间 | 120 |秒， 大于等于 0 的数字 | tcp-idle-time 120 |
@@ -46,16 +46,16 @@
 | log-level | 设置日志级别 | error | off、fatal、error、warn、notice、info 或 debug | log-level error |
 | log-file | 日志文件路径 | /var/log/smartdns/smartdns.log | 合法路径字符串 | log-file /var/log/smartdns/smartdns.log |
 | log-size | 单个日志文件的大小上限，超过就归档 | 128K | 数字 + K、M 或 G | log-size 128K |
-| log-num | 日志归档个数 | 8 | 大于等于 0 的数字，0表示禁用日志 | log-num 2 |
+| log-num | 日志归档个数 | 2 | 大于等于 0 的数字，0表示禁用日志 | log-num 2 |
 | log-file-mode | 日志归档文件权限 | 0640 | 文件权限 | log-file-mode 644 |
 | log-console | 是否输出日志到控制台 | no | [yes\|no] | log-console yes |
 | log-filter | 日志过滤表达式（按模块/关键字筛日志，语法同 `RUST_LOG`） | 无 | 过滤表达式字符串 | log-filter smartdns=debug |
 | log-syslog | 运行日志同时送系统日志（仅 Linux） | no | [yes\|no]。标识 `smartdns`、facility `LOG_USER`；其它平台会提示不生效 | log-syslog yes |
 | audit-enable | 是否启用审计 | no | [yes\|no] | audit-enable yes |
-| audit-file | 审计文件路径 | /var/log/smartdns-audit.log | 合法路径字符串 | audit-file /var/log/smartdns-audit.log |
+| audit-file | 审计文件路径 | 无（需显式指定路径） | 合法路径字符串 | audit-file /var/log/smartdns-audit.log |
 | audit-size | 单个审计文件的大小上限，超过就归档 | 128K | 数字 + K、M 或 G | audit-size 128K |
 | audit-num | 审计归档个数 | 2 | 大于等于 0 的数字 | audit-num 2 |
-| audit-file-mode | 审计归档文件权限 | 0640 | 文件权限 | log-file-mode 644 |
+| audit-file-mode | 审计归档文件权限 | 0640 | 文件权限 | audit-file-mode 644 |
 | audit-console | 是否输出审计日志到控制台 | no | [yes\|no] | audit-console yes |
 | audit-syslog | 审计行送系统日志（仅 Linux） | no | [yes\|no]。需先开 `audit-enable`；开着就不再写审计文件 | audit-syslog yes |
 | acl-enable | 启用访问控制（ACL） | no | [yes\|no] <br />和 client-rules 搭配使用，相当于一份白名单：**开启后，没有匹配到任何 client-rules 的客户端一律收到 REFUSED**（就地拒绝，不查上游、不进缓存），匹配到的照常服务。<br />只想对某一个监听开启时，用 `bind ... -acl`；两者任一为真即生效。<br />不开（默认）时一切照旧。| acl-enable yes | 
@@ -77,7 +77,7 @@
 | hosts-file | 指定hosts文件 | 无 | hosts文件路径 | hosts-file /etc/hosts |
 | dnsmasq-lease-file | 读取 dnsmasq 的 DHCP 租约，解析局域网设备主机名 | 无 | 租约文件路径 | dnsmasq-lease-file /var/lib/misc/dnsmasq.leases |
 | domain | 给 DHCP 租约里的短主机名补上本地域名后缀 | 无 | 域名。只影响 `dnsmasq-lease-file` 的解析，与 `local-domain` 无关 | domain home.lan |
-| resolv-file | 从指定的 resolv.conf 读取上游 DNS 服务器 | 无 | 文件路径 | resolv-file /etc/resolv.conf |
+| resolv-file | 从指定的 resolv.conf 读取上游 DNS 服务器；暂未实现动态监听解析，建议使用 server 或 server dhcp:// 配置上游 | 无 | 文件路径 | resolv-file /etc/resolv.conf |
 | resolv-hostname | 是否把本机主机名解析为本机 IP | yes | [yes\|no] | resolv-hostname yes |
 | expand-ptr-from-address | 是否为 address 里的地址自动生成 PTR 记录 | no | [yes\|no] | expand-ptr-from-address yes |
 | num-workers | 工作线程数（不写则按 CPU 自动推算；写 0 无意义，会被忽略并回落自动值） | 自动 | 大于 0 的整数 | num-workers 4 | 
