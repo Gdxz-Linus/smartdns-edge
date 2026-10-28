@@ -1,6 +1,44 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
+    sync::{Mutex, RwLock},
+    time::{Duration, Instant},
+};
 
+use lru::LruCache;
 use mac_addr::MacAddr;
+use tokio::sync::broadcast;
+
+const ARP_CACHE_CAPACITY: usize = 4096;
+const ARP_CACHE_TTL: Duration = Duration::from_secs(60);
+
+pub type ArpLookupFn = fn(IpAddr) -> Option<String>;
+static TEST_ARP_LOOKUP: RwLock<Option<ArpLookupFn>> = RwLock::new(None);
+#[cfg(test)]
+static TEST_ARP_UNCACHED_LOOKUP: RwLock<Option<ArpLookupFn>> = RwLock::new(None);
+
+pub fn test_lookup_hook() -> Option<ArpLookupFn> {
+    *TEST_ARP_LOOKUP.read().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub fn set_test_arp_lookup(lookup: Option<ArpLookupFn>) {
+    *TEST_ARP_LOOKUP.write().unwrap_or_else(|e| e.into_inner()) = lookup;
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_arp_uncached_lookup(lookup: Option<ArpLookupFn>) {
+    *TEST_ARP_UNCACHED_LOOKUP
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = lookup;
+}
+
+#[cfg(test)]
+fn test_uncached_lookup_hook() -> Option<ArpLookupFn> {
+    *TEST_ARP_UNCACHED_LOOKUP
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedArpEntry {
@@ -11,7 +49,125 @@ struct ParsedArpEntry {
 // 🌟 修复 1：直接去掉冗余且会引发 Panic 的 block_in_place，
 // 因为在外层的 app.rs 中已经使用了 spawn_blocking！
 pub fn lookup_client_mac_from_arp(client_ip: IpAddr) -> Option<String> {
-    client_ipv4_for_arp(client_ip).and_then(lookup_client_mac_from_arp_v4)
+    if let Some(test_lookup) = test_lookup_hook() {
+        return test_lookup(client_ip);
+    }
+
+    let ipv4 = client_ipv4_for_arp(client_ip)?;
+
+    // 缓存与并发折叠的测试需要观察“底层查询”被调用几次；这个注入口放在
+    // 测试钩子之后，避免改变 ACL 测试所依赖的“测试钩子优先直返”语义。
+    #[cfg(test)]
+    if let Some(test_lookup) = test_uncached_lookup_hook() {
+        return test_lookup(client_ip);
+    }
+
+    lookup_client_mac_from_arp_v4(ipv4)
+}
+
+pub struct ArpResolver {
+    cache: Mutex<LruCache<IpAddr, (Option<String>, Instant)>>,
+    inflight: Mutex<HashMap<IpAddr, broadcast::Sender<Option<String>>>>,
+}
+
+impl ArpResolver {
+    pub fn new() -> Self {
+        Self {
+            cache: Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(ARP_CACHE_CAPACITY)
+                    .expect("ARP cache capacity must be non-zero"),
+            )),
+            inflight: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn lookup(&self, ip: IpAddr) -> Option<String> {
+        if let Some(hook) = test_lookup_hook() {
+            return hook(ip);
+        }
+
+        let now = Instant::now();
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((mac, expires_at)) = cache.get(&ip)
+                && now < *expires_at
+            {
+                return mac.clone();
+            }
+        }
+
+        let receiver = {
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(sender) = inflight.get(&ip) {
+                Some(sender.subscribe())
+            } else {
+                let (sender, _) = broadcast::channel(1);
+                inflight.insert(ip, sender);
+                None
+            }
+        };
+
+        if let Some(mut receiver) = receiver {
+            return receiver.recv().await.ok().flatten();
+        }
+
+        let mut guard = InflightGuard::new(&self.inflight, ip);
+        let result = tokio::task::spawn_blocking(move || lookup_client_mac_from_arp(ip))
+            .await
+            .unwrap_or(None);
+
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.put(ip, (result.clone(), Instant::now() + ARP_CACHE_TTL));
+        }
+
+        guard.finish(result.clone());
+        result
+    }
+}
+
+impl Default for ArpResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct InflightGuard<'a> {
+    inflight: &'a Mutex<HashMap<IpAddr, broadcast::Sender<Option<String>>>>,
+    ip: IpAddr,
+    done: bool,
+}
+
+impl<'a> InflightGuard<'a> {
+    fn new(
+        inflight: &'a Mutex<HashMap<IpAddr, broadcast::Sender<Option<String>>>>,
+        ip: IpAddr,
+    ) -> Self {
+        Self {
+            inflight,
+            ip,
+            done: false,
+        }
+    }
+
+    fn finish(&mut self, result: Option<String>) {
+        if self.done {
+            return;
+        }
+
+        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sender) = inflight.remove(&self.ip) {
+            let _ = sender.send(result);
+        }
+        self.done = true;
+    }
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        // 领跑者 panic / 取消时也必须唤醒等待者，否则同 IP 的后续请求会永久挂起。
+        self.finish(None);
+    }
 }
 
 fn client_ipv4_for_arp(client_ip: IpAddr) -> Option<Ipv4Addr> {
@@ -168,8 +324,16 @@ fn lookup_client_mac_from_arp_v4(client_ip: Ipv4Addr) -> Option<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_arp_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn test_sendarp_dest_ip_byte_order() {
@@ -276,6 +440,146 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].ip, "192.168.1.10".parse::<Ipv4Addr>().unwrap());
         assert_eq!(entries[0].mac.to_string(), "aa:bb:cc:dd:ee:ff");
+    }
+    struct TestArpHookGuard;
+
+    impl TestArpHookGuard {
+        fn new(uncached: ArpLookupFn) -> Self {
+            set_test_arp_lookup(None);
+            set_test_arp_uncached_lookup(Some(uncached));
+            Self
+        }
+    }
+
+    impl Drop for TestArpHookGuard {
+        fn drop(&mut self) {
+            set_test_arp_lookup(None);
+            set_test_arp_uncached_lookup(None);
+        }
+    }
+
+    static MISS_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counting_miss_lookup(ip: IpAddr) -> Option<String> {
+        if ip != IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)) {
+            return None;
+        }
+        MISS_LOOKUP_CALLS.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+
+    #[tokio::test]
+    async fn resolver_caches_a_miss() {
+        let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _hooks = TestArpHookGuard::new(counting_miss_lookup);
+        MISS_LOOKUP_CALLS.store(0, Ordering::SeqCst);
+
+        let resolver = ArpResolver::new();
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+
+        assert_eq!(resolver.lookup(ip).await, None);
+        assert_eq!(resolver.lookup(ip).await, None);
+        assert_eq!(
+            MISS_LOOKUP_CALLS.load(Ordering::SeqCst),
+            1,
+            "查不到的 MAC 也必须缓存，第二次查询不能再打底层"
+        );
+    }
+
+    static FOLD_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn slow_lookup(ip: IpAddr) -> Option<String> {
+        if ip != IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)) {
+            return None;
+        }
+        FOLD_LOOKUP_CALLS.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        Some("aa:bb:cc:dd:ee:ff".to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolver_folds_concurrent_lookups_for_the_same_ip() {
+        let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _hooks = TestArpHookGuard::new(slow_lookup);
+        FOLD_LOOKUP_CALLS.store(0, Ordering::SeqCst);
+
+        let resolver = ArpResolver::new();
+        let ip: IpAddr = "192.0.2.11".parse().unwrap();
+        let expected = Some("aa:bb:cc:dd:ee:ff".to_string());
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+
+        let (r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+            async {
+                barrier.wait().await;
+                resolver.lookup(ip).await
+            },
+        );
+
+        for result in [r1, r2, r3, r4, r5, r6, r7, r8] {
+            assert_eq!(result, expected);
+        }
+        assert_eq!(
+            FOLD_LOOKUP_CALLS.load(Ordering::SeqCst),
+            1,
+            "同一 IP 的并发查询必须折叠成一次底层查询"
+        );
+    }
+
+    static HIT_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counting_hit_lookup(ip: IpAddr) -> Option<String> {
+        if ip != IpAddr::V4(Ipv4Addr::new(192, 0, 2, 12)) {
+            return None;
+        }
+        HIT_LOOKUP_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some("11:22:33:44:55:66".to_string())
+    }
+
+    #[tokio::test]
+    async fn resolver_caches_a_hit() {
+        let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _hooks = TestArpHookGuard::new(counting_hit_lookup);
+        HIT_LOOKUP_CALLS.store(0, Ordering::SeqCst);
+
+        let resolver = ArpResolver::new();
+        let ip: IpAddr = "192.0.2.12".parse().unwrap();
+        let expected = Some("11:22:33:44:55:66".to_string());
+
+        assert_eq!(resolver.lookup(ip).await, expected);
+        assert_eq!(resolver.lookup(ip).await, expected);
+        assert_eq!(
+            HIT_LOOKUP_CALLS.load(Ordering::SeqCst),
+            1,
+            "命中的 MAC 必须缓存，第二次查询不能再打底层"
+        );
     }
 }
 

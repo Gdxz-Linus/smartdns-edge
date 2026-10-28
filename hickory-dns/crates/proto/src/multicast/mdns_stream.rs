@@ -14,17 +14,17 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use futures_util::stream::{Stream, StreamExt};
-use futures_util::{FutureExt, TryFutureExt, future, ready};
+use futures_util::{future, ready, FutureExt, TryFutureExt};
 use once_cell::sync::Lazy;
 use socket2::{self, Socket};
 use tokio::net::UdpSocket;
 use tracing::{debug, trace};
 
-use crate::BufDnsStreamHandle;
 use crate::multicast::MdnsQueryType;
 use crate::runtime::TokioRuntimeProvider;
 use crate::udp::UdpStream;
 use crate::xfer::SerialMessage;
+use crate::BufDnsStreamHandle;
 
 pub(crate) const MDNS_PORT: u16 = 5353;
 /// mDNS ipv4 address, see [multicast-addresses](https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml)
@@ -346,9 +346,12 @@ impl NextRandomUdpSocket {
                 }
             }
             SocketAddr::V6(..) => {
-                let ipv6_if = self.ipv6_if.unwrap_or_else(|| {
-                    panic!("for ipv6 multicasting the interface must be specified")
-                });
+                let ipv6_if = self.ipv6_if.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "for ipv6 multicasting the interface must be specified",
+                    )
+                })?;
 
                 socket.set_multicast_loop_v6(true)?;
                 socket.set_multicast_if_v6(ipv6_if)?;
@@ -428,8 +431,9 @@ impl Future for NextRandomUdpSocket {
                 (self.backoff_ms * 2).min(5_000)
             };
             self.backoff_ms = delay;
-            self.backoff_sleep =
-                Some(Box::pin(tokio::time::sleep(std::time::Duration::from_millis(delay))));
+            self.backoff_sleep = Some(Box::pin(tokio::time::sleep(
+                std::time::Duration::from_millis(delay),
+            )));
             let sleep = self.backoff_sleep.as_mut().unwrap();
             ready!(std::future::Future::poll(sleep.as_mut(), cx));
             self.backoff_sleep = None;

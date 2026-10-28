@@ -586,7 +586,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         );
                     } else {
                         self.cache
-                            .insert_full_response(cache_key.clone(), lookup.clone(), Instant::now())
+                            .insert_full_response(
+                                cache_key.clone(),
+                                lookup.clone(),
+                                Instant::now(),
+                                ctx.server_opts.is_background,
+                            )
                             .await;
                     }
 
@@ -611,7 +616,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             );
                         } else {
                             self.cache
-                                .insert_full_response(extra_key, extra_resp, Instant::now())
+                                .insert_full_response(
+                                    extra_key,
+                                    extra_resp,
+                                    Instant::now(),
+                                    ctx.server_opts.is_background,
+                                )
                                 .await;
                         }
                     }
@@ -1079,6 +1089,28 @@ impl DnsCache {
         &self.shards[idx]
     }
 
+    #[cfg(test)]
+    fn hits_for_test(&self, key: &CacheKey) -> usize {
+        self.get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peek(key)
+            .map(|e| e.stats.hits)
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn set_hits_for_test(&self, key: &CacheKey, hits: usize) {
+        if let Some(entry) = self
+            .get_shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(key)
+        {
+            entry.stats.hits = hits;
+        }
+    }
+
     pub async fn clear(&self) {
         for shard in self.shards.iter() {
             shard.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -1213,6 +1245,10 @@ impl DnsCache {
         key: CacheKey,
         response: DnsResponse,
         now: Instant,
+        // 🔐 编号 54：这次写入是不是「后台预取」触发的。
+        // 预取后必须把热度重置为 1（用户定调，见 README 第 29 行）；
+        // 普通查询写入则保留已有热度，不抹掉真实访问累积。
+        from_prefetch: bool,
     ) -> DnsResponse {
         let mut min_ttl = MAX_TTL;
 
@@ -1268,7 +1304,12 @@ impl DnsCache {
             entry.data = cache_resp.clone();
             entry.valid_until = valid_until;
             entry.is_in_prefetching = false;
-            entry.stats.hits = 1;
+            if from_prefetch {
+                // 用户定调（README 第 29 行）：过期缓存被后台预取后，热度重置为 1，
+                // 需再次被真实访问才触发下次预取 —— 防止冷门域名被反复预取、浪费后台流量。
+                entry.stats.hits = 1;
+            }
+            // 非预取写入：保留 entry.stats.hits 原值，不抹掉真实访问累积的热度。
         } else {
             cache.put(
                 key.clone(),
@@ -1714,7 +1755,9 @@ fn deserialize_best_effort(data: &[u8]) -> (Vec<DnsCacheEntry>, Option<ProtoErro
 /// （`insert_full_response` 里 `min_ttl.min(MAX_TTL)`），
 /// 因此正常产出的文件不可能超过它 —— 超过即说明文件损坏或被改写。
 ///
-/// ⚠️ **不是崩溃防护**：实测 `Instant ± Duration` 溢出时会**饱和**、不 panic。
+/// ⚠️ **不是崩溃防护**：`Instant ± Duration` 在**溢出时会 panic**
+/// （std 用 `checked_*.expect()`，不是饱和）。本处的取值来自 u32 秒数
+/// （上限约 136 年），远小于溢出阈值（约 146 年），因此不构成实际风险。
 /// 这道校验挡的是**语义污染**（超大值让条目"永不新鲜"或"瞬间远古"，
 /// 带偏 `serve-expired` 与预取/清理判断），并让异常**可见**。
 ///
@@ -1760,7 +1803,14 @@ fn is_our_archive(file_name: &str, candidate: &str) -> bool {
         || (rest.starts_with('v') && rest.contains("-incompatible-"));
     tag_ok && rest.len() > 15 && {
         // 末尾是 `YYYYMMDD-HHMMSS`
-        let stamp = &rest[rest.len() - 15..];
+        //
+        // 🔐 编号 55：必须用 `get()` 而不是 `&rest[..]` —— 按字节下标切 `&str` 时，
+        // 若切点落在多字节 UTF-8 字符中间（文件名含中文、emoji），Rust 会 panic。
+        // `candidate` 是缓存目录里的文件名，用户完全可以放一个中文名的文件进去。
+        // `get()` 返回 `None` 时判为「不是我们产出的存档」，即不删 —— 比 panic 安全。
+        let Some(stamp) = rest.get(rest.len() - 15..) else {
+            return false;
+        };
         let b = stamp.as_bytes();
         b[8] == b'-'
             && b.iter()
@@ -1967,10 +2017,10 @@ impl<'r> BinDecodable<'r> for DnsCacheEntry {
         //   · `tag == 2`（还剩多久）→ `Instant::now() + Duration`；
         //   · `tag == 5`（已过期多久）→ `Instant::now() - Duration`。
         //
-        // ⚠️ **实测更正**：这两个运算**不会 panic** ——
-        // `Instant ± Duration` 在溢出时**饱和**处理（实测 `u32::MAX` 秒既不加爆也不减崩，
-        // 减法饱和到"约 136 年之前"）。报告原文也写明"不会造成崩溃"。
-        // 所以本项**不是崩溃类缺陷**，危害是**语义污染**：
+        // ⚠️ **更正**：`Instant ± Duration` 在**溢出时会 panic**（std 用 `checked_*.expect()`，
+        // 不是饱和）。本处的取值来自 u32 秒数（上限约 136 年），远小于溢出阈值（约 146 年），
+        // 所以观察不到 panic —— 但**不能**据此断言"不会 panic"。
+        // 本项**不是崩溃类缺陷**，危害是**语义污染**：
         //   · `tag == 2` 写入超大值 ⇒ 该条目在**极长时间内**都被当成"新鲜"，
         //     永远不会被预取/清理，`serve-expired` 的判断也被带偏；
         //   · `tag == 5` 写入超大值 ⇒ 条目一下子变成"远古数据"，
@@ -2254,8 +2304,9 @@ mod cache_reload_tests {
 
     /// 🔐 问题 35：缓存文件里的时间字段必须做范围校验。
     ///
-    /// ⚠️ 危害是**语义污染**而非崩溃（`Instant ± Duration` 溢出会饱和、不 panic）：
-    /// 超大值会让条目"永不新鲜"（tag 2）或"瞬间远古"（tag 5），带偏 `serve-expired`。
+    /// ⚠️ 危害是**语义污染**而非本项要防的崩溃；`Instant ± Duration` 溢出本身会 panic
+    /// （std 用 `checked_*.expect()`，不是饱和）。超大值会让条目"永不新鲜"（tag 2）
+    /// 或"瞬间远古"（tag 5），带偏 `serve-expired`。
     #[test]
     fn file_time_fields_are_range_checked() {
         // 正常范围内：原样采信（不能把合法值也改掉）
@@ -2270,8 +2321,8 @@ mod cache_reload_tests {
 
     /// 🔐 问题 35 的核心回归：**越界时间必须被钳制，且异常可见**。
     ///
-    /// ⚠️ **实测更正（重要）**：`Instant ± Duration` 溢出**不会 panic**（饱和处理），
-    /// 所以本项**不是崩溃类缺陷**。它挡的是**语义污染**：
+    /// ⚠️ **更正**：`Instant ± Duration` 溢出会 panic（std 用 `checked_*.expect()`，
+    /// 不是饱和），所以本项**不是崩溃类缺陷**。它挡的是**语义污染**：
     /// 未钳制时该条目会变成"约 136 年之前的数据"，`serve-expired` 的窗口被整个跳过。
     ///
     /// 做法：先**正常序列化**一条真实条目（保证格式与实现一致、不随布局漂移），
@@ -3030,6 +3081,29 @@ mod archive_naming_tests {
             );
         }
     }
+
+    /// 🔐 编号 55：文件名含多字节字符时，`is_our_archive` 不能 panic。
+    #[test]
+    fn is_our_archive_does_not_panic_on_multibyte_names() {
+        // 构造一个末尾 15 字节落在多字节字符中间的候选名。
+        // 第一个是任务给出的样例；第二个追加一个 ASCII 字节，确保切点真的落在
+        // UTF-8 字符内部（第一个样例的切点恰好仍在字符边界上）。
+        for candidate in [
+            "smartdns.cache.corrupt-2026中文中文中",
+            "smartdns.cache.corrupt-2026中文中文中x",
+        ] {
+            assert!(
+                !is_our_archive("smartdns.cache", candidate),
+                "多字节文件名不能被误判为我们的存档"
+            );
+        }
+
+        // 正常的存档名仍要被识别
+        assert!(is_our_archive(
+            "smartdns.cache",
+            "smartdns.cache.corrupt-20260101-000000"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -3138,6 +3212,57 @@ mod prefetch_query_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         shard.peek(key).map(|e| e.stats.hits).unwrap_or(0)
+    }
+
+    /// 🔐 编号 54：预取写入把热度重置为 1（用户定调），普通查询写入保留已有热度。
+    #[tokio::test]
+    async fn prefetch_resets_hits_but_a_normal_write_keeps_them() {
+        use std::net::Ipv4Addr;
+
+        let cache = DnsCache::new(1024, false, 0, 0, 0);
+        let name = Name::from_ascii("hits.prefetch.test.").unwrap();
+        let mut msg = Message::query();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name.clone(),
+            300,
+            RData::A(Ipv4Addr::new(10, 0, 0, 1).into()),
+        ));
+        let resp: DnsResponse = msg.into();
+        let key = CacheKey {
+            query: Query::query(name, RecordType::A),
+            group: "default".to_string(),
+            ecs: None,
+            opts: AnswerAffectingOpts::default(),
+        };
+
+        // 首次写入（普通查询）
+        cache
+            .insert_full_response(key.clone(), resp.clone(), Instant::now(), false)
+            .await;
+
+        // 手动把热度抬到 5，模拟被真实访问 5 次
+        cache.set_hits_for_test(&key, 5);
+
+        // 普通查询触发的刷新：热度必须保留
+        cache
+            .insert_full_response(key.clone(), resp.clone(), Instant::now(), false)
+            .await;
+        assert_eq!(
+            cache.hits_for_test(&key),
+            5,
+            "普通查询写入不能抹掉真实访问累积的热度"
+        );
+
+        // 预取触发的刷新：热度必须重置为 1（用户定调）
+        cache
+            .insert_full_response(key.clone(), resp.clone(), Instant::now(), true)
+            .await;
+        assert_eq!(
+            cache.hits_for_test(&key),
+            1,
+            "预取后热度必须重置为 1，需再次被真实访问才触发下次预取"
+        );
     }
 
     #[test]
@@ -3357,7 +3482,7 @@ mod prefetch_marker_tests {
         let fresh: DnsResponse = msg.into();
 
         cache
-            .insert_full_response(key.clone(), fresh, Instant::now())
+            .insert_full_response(key.clone(), fresh, Instant::now(), false)
             .await;
 
         assert!(

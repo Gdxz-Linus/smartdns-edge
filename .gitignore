@@ -46,3 +46,6 @@ dist
 
 localhost.crt
 localhost.key
+
+# 本地开发计划文件（不随仓库发布）
+/.hermes/

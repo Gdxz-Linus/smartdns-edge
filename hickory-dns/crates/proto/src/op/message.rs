@@ -610,7 +610,11 @@ impl Message {
     /// the max payload value as it's defined in the EDNS OPT pseudo-RR.
     pub fn max_payload(&self) -> u16 {
         let max_size = self.edns.as_ref().map_or(512, Edns::max_payload);
-        if max_size < 512 { 512 } else { max_size }
+        if max_size < 512 {
+            512
+        } else {
+            max_size
+        }
     }
 
     /// # Return value
@@ -651,6 +655,8 @@ impl Message {
     }
 
     /// Attempts to read the specified number of `Query`s
+    ///
+    /// 由 `Message::read` 调用（编号 31 修复后不再是死代码）。
     pub fn read_queries(decoder: &mut BinDecoder<'_>, count: usize) -> ProtoResult<Vec<Query>> {
         // 🔐 R-P2-8：count 来自报文头声明（攻击者可控，最大 65535），按声明预分配
         // 会被放大成内存耗尽。容量钳在 8，随实际数据增长（对齐上游 hickory main）。
@@ -1064,11 +1070,11 @@ impl<'r> BinDecodable<'r> for Message {
         //  this could improve error detection while decoding.
 
         // get the questions
+        // 🔐 编号 31：count 来自报文头声明（对端可控，u16 最大 65535）。Query 实测 96 字节，
+        // 按声明预分配会让一个 12 字节的畸形报文触发约 6 MB 的一次性分配。容量钳在 8，
+        // 随实际数据增长（与 read_records 的 R-P2-8 修复同口径）。
         let count = header.query_count() as usize;
-        let mut queries = Vec::with_capacity(count);
-        for _ in 0..count {
-            queries.push(Query::read(decoder)?);
-        }
+        let queries = Self::read_queries(decoder, count)?;
 
         // get all counts before header moves
         let answer_count = header.answer_count() as usize;
@@ -1163,18 +1169,52 @@ pub enum MessageSignature {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "__dnssec")]
-    use crate::rr::RecordType;
+    #[cfg(feature = "std")]
+    use crate::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
     use crate::rr::rdata::A;
     #[cfg(feature = "std")]
     use crate::rr::rdata::OPT;
-    #[cfg(feature = "std")]
-    use crate::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
+    #[cfg(feature = "__dnssec")]
+    use crate::rr::RecordType;
     use crate::rr::{Name, RData};
     #[cfg(feature = "std")]
     use crate::std::net::IpAddr;
     #[cfg(feature = "std")]
     use crate::std::string::ToString;
+
+    #[test]
+    fn query_count_is_not_preallocated() {
+        // 头声明 65535 条查询，但正文一个字节都没有 —— 必须快速失败而不是先分配 6 MB。
+        // 12 字节头：id(2) flags(2) qd(2) an(2) ns(2) ar(2)
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xAB, 0xCD]); // id
+        bytes.extend_from_slice(&[0x01, 0x00]); // flags: RD
+        bytes.extend_from_slice(&65535u16.to_be_bytes()); // qdcount = 65535
+        bytes.extend_from_slice(&[0x00, 0x00]); // ancount
+        bytes.extend_from_slice(&[0x00, 0x00]); // nscount
+        bytes.extend_from_slice(&[0x00, 0x00]); // arcount
+
+        let mut decoder = BinDecoder::new(&bytes);
+        assert!(Message::read(&mut decoder).is_err(), "畸形报文必须解析失败");
+    }
+
+    #[test]
+    fn a_normal_query_still_parses_the_same() {
+        // 正常报文：1 条查询 example.com A IN。改动只动预分配容量，解析结果必须一致。
+        let mut msg = Message::query();
+        msg.add_query(Query::query(
+            Name::from_ascii("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let wire = msg.to_vec().unwrap();
+
+        let mut decoder = BinDecoder::new(&wire);
+        let parsed = Message::read(&mut decoder).expect("正常报文必须解析成功");
+        assert_eq!(parsed.queries().len(), 1);
+        assert_eq!(parsed.queries()[0].name().to_ascii(), "example.com.");
+        assert_eq!(parsed.queries()[0].query_type(), RecordType::A);
+        assert_eq!(parsed.queries()[0].query_class(), crate::rr::DNSClass::IN);
+    }
 
     #[test]
     fn test_emit_and_read_header() {
@@ -1500,11 +1540,9 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("more than one edns record present")
-        );
+        assert!(error
+            .to_string()
+            .contains("more than one edns record present"));
     }
 
     #[cfg(feature = "std")]
@@ -1530,10 +1568,9 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("record type OPT only allowed in additional section")
-        );
+        assert!(err
+            .to_string()
+            .contains("record type OPT only allowed in additional section"));
     }
 
     #[cfg(all(feature = "std", feature = "__dnssec"))]
@@ -1565,11 +1602,9 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("more than one edns record present")
-        );
+        assert!(error
+            .to_string()
+            .contains("more than one edns record present"));
     }
 
     #[cfg(all(feature = "std", feature = "__dnssec"))]
@@ -1591,10 +1626,9 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("record type TSIG only allowed in additional section")
-        );
+        assert!(err
+            .to_string()
+            .contains("record type TSIG only allowed in additional section"));
     }
 
     #[cfg(all(feature = "std", feature = "__dnssec"))]
@@ -1616,10 +1650,9 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("record type SIG only allowed in additional section")
-        );
+        assert!(err
+            .to_string()
+            .contains("record type SIG only allowed in additional section"));
     }
 
     #[cfg(all(feature = "std", feature = "__dnssec"))]

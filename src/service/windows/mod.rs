@@ -6,7 +6,7 @@ use std::{
 use super::{
     SERVICE_NAME,
     installer::{InstallStrategy::*, Installer, UninstallStrategy::*},
-    service_manager::{ServiceCommand, ServiceCommands, ServiceDefinition},
+    service_manager::{ServiceCommand, ServiceCommands, ServiceDefinition, ServiceManager},
 };
 
 mod shell_escape;
@@ -16,14 +16,31 @@ pub const CONF_PATH: &str = "smartdns.conf";
 
 pub use self::windows_service::run;
 
+/// 🔐 编号 51：从可执行文件路径推导配置文件的绝对路径。
+///
+/// 原来 `current_exe()` 失败时用裸文件名 `smartdns.exe` 兜底，`parent()` 得到空路径，
+/// 配置路径退化成相对路径 `smartdns.conf`。Windows 服务以 `CWD=System32` 启动，
+/// 于是服务去 System32 找配置，必然找不到，而报错信息完全指不到根因。
+fn conf_path_from_exe(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    exe.parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(CONF_PATH))
+}
+
 #[inline]
-pub(super) fn create_service_definition() -> ServiceDefinition {
-    let current_exe =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("smartdns.exe"));
-    let current_dir = current_exe
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new(""));
-    let conf_path_abs = current_dir.join("smartdns.conf");
+pub(super) fn create_service_definition() -> Result<ServiceDefinition, String> {
+    let current_exe = std::env::current_exe().map_err(|err| {
+        format!(
+            "cannot determine the path of the running executable ({err}); \
+             refusing to build a service definition with a guessed configuration path"
+        )
+    })?;
+    let conf_path_abs = conf_path_from_exe(&current_exe).ok_or_else(|| {
+        format!(
+            "the executable path {} has no parent directory; cannot locate {CONF_PATH}",
+            current_exe.display()
+        )
+    })?;
 
     // 🌟 新增这一行：提取 exe 的绝对路径，后面配置防火墙要用
     // 🔐 P2：这个路径要插进 PowerShell 的**双引号**字符串里（下面两条防火墙规则），
@@ -230,7 +247,47 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
         }),
     };
 
-    ServiceDefinition::new(crate::NAME.to_string(), installer, commands)
+    Ok(ServiceDefinition::new(
+        crate::NAME.to_string(),
+        installer,
+        commands,
+    ))
+}
+
+/// `service_manager()` 在 `src/service/mod.rs` 中仍按原签名直接 `.into()`。
+/// 本批次只允许修改三个文件，因此在这里把 `Result` 的失败路径转换为明确的
+/// 用户可见错误并非零退出，而不是 panic 或带着猜测路径继续安装服务。
+impl From<Result<ServiceDefinition, String>> for ServiceManager {
+    fn from(result: Result<ServiceDefinition, String>) -> Self {
+        match result {
+            Ok(definition) => definition.into(),
+            Err(err) => {
+                eprintln!("[smartdns] cannot build the Windows service definition: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod conf_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn conf_path_is_derived_from_the_executable_directory() {
+        let exe = Path::new("C:/Program Files/SmartDNS/smartdns.exe");
+        assert_eq!(
+            conf_path_from_exe(exe),
+            Some(Path::new("C:/Program Files/SmartDNS/smartdns.conf").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_bare_file_name_yields_no_conf_path() {
+        // 没有父目录（或父目录为空）时必须返回 None，而不是退化成相对路径
+        assert_eq!(conf_path_from_exe(Path::new("smartdns.exe")), None);
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +325,7 @@ mod tests {
     /// 本来就应该由 PowerShell 自己回答。
     #[test]
     fn export_generated_powershell_commands_for_syntax_check() {
-        let def = create_service_definition();
+        let def = create_service_definition().expect("service definition must be available");
 
         let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
@@ -331,7 +388,7 @@ mod tests {
     /// 用一条廉价但精准的断言把这类错误挡在提交之前。
     #[test]
     fn generated_powershell_commands_contain_no_c_style_comments() {
-        let def = create_service_definition();
+        let def = create_service_definition().expect("service definition must be available");
 
         let all: [(&str, Option<&ServiceCommand>); 6] = [
             ("install", def.commands().install.as_ref()),
@@ -367,7 +424,7 @@ mod tests {
     /// 测试会立刻失败并指出是哪一处。
     #[test]
     fn install_command_keeps_the_failure_visibility_fixes() {
-        let def = create_service_definition();
+        let def = create_service_definition().expect("service definition must be available");
         let install = def
             .commands()
             .install

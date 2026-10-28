@@ -189,6 +189,13 @@ impl Icmpv6Packet {
                         want: 48,
                     }));
                 }
+                let next_header = icmpv6_payload[10];
+                if next_header != 58 {
+                    return Err(SurgeError::from(MalformedPacketError::PayloadTooShort {
+                        got: icmpv6_payload.len(),
+                        want: 48,
+                    }));
+                }
                 let identifier = u16::from_be_bytes(icmpv6_payload[44..46].try_into().unwrap());
                 let sequence = u16::from_be_bytes(icmpv6_payload[46..48].try_into().unwrap());
                 let mut packet = Icmpv6Packet::default();

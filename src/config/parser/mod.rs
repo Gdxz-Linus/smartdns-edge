@@ -173,9 +173,6 @@ pub enum ConfigItem {
     /// 🔐 Q2/Q4：写进集合的条目带不带过期时间（TTL×3）
     IpSetTimeout(bool),
     NftSetTimeout(bool),
-    /// 🔐 Q3/Q5：`-no-speed`（本实现一律全写，等于常开）
-    IpSetNoSpeed(bool),
-    NftSetNoSpeed(bool),
     /// 🔐 Q6：nftset 详细日志
     NftSetDebug(bool),
     /// 🔐 Q10：整机同时处理的查询数上限（0 = 不限）
@@ -384,7 +381,9 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(config("log-level"), ConfigItem::LogLevel),
         map(config("log-num"), ConfigItem::LogNum),
         map(config("log-size"), ConfigItem::LogSize),
-        map(config("max-reply-ip-num"), ConfigItem::MaxReplyIpNum),
+        map(config("max-reply-ip-num"), |v| {
+            ConfigItem::MaxReplyIpNum(sanitize_max_reply_ip_num(v))
+        }),
         map(config("mdns-lookup"), ConfigItem::MdnsLookup),
         map(config("nameserver"), ConfigItem::ForwardRule),
         map(config("proxy-server"), ConfigItem::ProxyConfig),
@@ -459,9 +458,7 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(NomParser::parse, ConfigItem::IpRules),
         map(config("ipset"), ConfigItem::IpSet),
         map(config("ipset-timeout"), ConfigItem::IpSetTimeout),
-        map(config("ipset-no-speed"), ConfigItem::IpSetNoSpeed),
         map(config("nftset-timeout"), ConfigItem::NftSetTimeout),
-        map(config("nftset-no-speed"), ConfigItem::NftSetNoSpeed),
         map(config("nftset-debug"), ConfigItem::NftSetDebug),
         // 🔐 Q10：整机同时处理的查询数上限（默认 65535，0 = 不限）
         map(config("max-query-limit"), ConfigItem::MaxQueryLimit),

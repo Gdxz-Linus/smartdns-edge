@@ -251,7 +251,19 @@ impl Cli {
                     }
 
                     match cfg.user() {
-                        Some(user) => run_user::with(user, None).expect("switch user failed"),
+                        Some(user) => {
+                            // 🔐 编号 48：原来用 `.expect("switch user failed")` —— 用户名写错
+                            // （用户不存在）时直接 panic，用户只看到一句栈回溯。
+                            // 改为打印具体原因后以非零码退出：降权失败后继续以 root 跑 DNS 服务，
+                            // 等于把「本应降权」的承诺变成空话，比不启动更危险。
+                            if let Err(err) = run_user::with(user, None) {
+                                log::error!(
+                                    "cannot switch to user `{user}`: {err}; refusing to keep running as root. \
+                                     Check the `user` line in your configuration (or remove it to use the built-in default)."
+                                );
+                                std::process::exit(1);
+                            }
+                        }
                         None => run_user::try_drop_privs(),
                     }
                 }
@@ -783,7 +795,13 @@ mod run_user {
 
     pub fn try_drop_privs() {
         if let Err(err) = with(DEFAULT_USER, Some(DEFAULT_GROUP)) {
-            log::error!("failed to drop privs: {}", err);
+            // 🔐 编号 48：原来只记一条 error 就继续以 root 运行 —— 降权是安全边界，
+            // 失败后静默继续等于安全措施形同虚设。这里改为直接退出。
+            log::error!(
+                "failed to drop privileges to `{DEFAULT_USER}:{DEFAULT_GROUP}`: {err}; \
+                 refusing to keep running as root"
+            );
+            std::process::exit(1);
         }
     }
 

@@ -377,6 +377,15 @@ mod imp {
                 // 超时/被打断：拿不到回执就当"内核没理我们"，直接报错，不无限等
                 return Err(err);
             }
+            // 🔐 编号 67：`recv` 返回 0 表示对端已关闭（netlink 套接字被关闭），
+            // 此时 `classify_ack` 判为 `NotMine` 后 `continue` 会**无限空转**占满一个 CPU 核心。
+            // 直接按连接关闭报错。
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "netlink socket closed while waiting for an ack",
+                ));
+            }
 
             match classify_ack(&buf, n as usize, seq) {
                 AckOutcome::NotMine => continue,
@@ -790,5 +799,12 @@ mod tests {
         let mut other_type = ack_packet(7, 0, 36, 36);
         other_type[4..6].copy_from_slice(&3u16.to_ne_bytes());
         assert_eq!(classify_ack(&other_type, 36, 7), AckOutcome::NotMine);
+    }
+
+    #[test]
+    fn zero_length_read_is_not_mistaken_for_an_ack() {
+        let buf = [0u8; 1024];
+        // 忙循环在 read_ack 层由 n == 0 的 UnexpectedEof 分支解决。
+        assert!(matches!(classify_ack(&buf, 0, 1), AckOutcome::NotMine));
     }
 }

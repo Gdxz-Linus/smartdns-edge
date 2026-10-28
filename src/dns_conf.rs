@@ -23,19 +23,6 @@ use crate::{
 
 const DEFAULT_GROUP: &str = "default";
 
-/// 🔐 Q3/Q5：`ipset-no-speed` / `nftset-no-speed` 的说明（每次加载只提示一次）。
-///
-/// 为什么不用开：本实现把解析出的地址**全部**写入集合（与既有的 `nftset` 行为一致）。
-/// C 版的默认是「先测速、只把最快的那一个写进去」—— 那样按域名做分流时会漏掉其它 IP，
-/// 所以我们不照抄那个默认，也不假装支持这两个开关：认下来 + 说明白。
-fn notice_no_speed() {
-    if log::warn_once("set-no-speed-is-default") {
-        crate::log::warn!(
-            "`ipset-no-speed` / `nftset-no-speed` need not be set: this implementation always writes all resolved addresses into the set, which is already equivalent to these switches. The configuration is accepted and behaviour is unchanged."
-        );
-    }
-}
-
 /// 📌 **按设计不支持**写进规则组的参数。
 ///
 /// ## 这里曾经有过另一类拒绝：「尚未支持」
@@ -624,13 +611,17 @@ impl RuntimeConfig {
 
     /// SSL Certificate file path
     #[inline]
-    pub fn bind_cert_file(&self) -> Option<&Path> {
-        self.bind_cert_file.as_deref()
+    pub fn bind_cert_file(&self) -> Option<PathBuf> {
+        self.bind_cert_file
+            .as_ref()
+            .map(|f| self.anchor_path(f.clone()))
     }
     /// SSL Certificate key file path
     #[inline]
-    pub fn bind_cert_key_file(&self) -> Option<&Path> {
-        self.bind_cert_key_file.as_deref()
+    pub fn bind_cert_key_file(&self) -> Option<PathBuf> {
+        self.bind_cert_key_file
+            .as_ref()
+            .map(|f| self.anchor_path(f.clone()))
     }
     /// bind_cert_key_pass
     #[inline]
@@ -1112,16 +1103,6 @@ impl RuntimeConfig {
         self.resolv_file.as_deref()
     }
 
-    pub fn valid_nftsets(&self) -> Vec<&ConfigForIP<NFTsetConfig>> {
-        self.nftsets
-            .iter()
-            .flat_map(|x| &x.config)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .filter(|x| !matches!(x, ConfigForIP::None))
-            .collect()
-    }
-
     /// 🔐 组级参数取值前的**组名归一化**：空组名与 `default` 是**同一个组**。
     ///
     /// 为什么必须有这一步：配置解析层把 `group-begin default` 与顶层都归到
@@ -1403,11 +1384,12 @@ impl RuntimeConfig {
     ///
     /// 用于"组不存在 → 走默认组 + 点名告警"：必须能区分"这个组确实定义了"和"名字根本没见过"
     /// （拼错、改名后忘了同步、或者内部代码传了别的名字）。
+    ///
+    /// 🔐 编号 33：判据里**不能**包含 `client_rules`。`client-rules ... -group X` 这一行
+    /// 本身就引用了 X —— 拿它当"X 存在"的证据是自证循环，于是「组名只在 client-rules 里
+    /// 出现、从未 group-begin 定义」时告警永远不触发。只认 group-begin 真正定义过的组。
     pub fn has_rule_group(&self, name: &str) -> bool {
-        name.is_empty()
-            || name == DEFAULT_GROUP
-            || self.rule_groups.contains_key(name)
-            || self.client_rules.iter().any(|r| r.group == name)
+        name.is_empty() || name == DEFAULT_GROUP || self.rule_groups.contains_key(name)
     }
 
     /// 🔐 P2（用户定策）：这个**服务器组**名字在配置里真的存在吗？
@@ -1440,20 +1422,6 @@ impl RuntimeConfig {
             .find(domain)
             .or_else(|| self.domain_rule_group(DEFAULT_GROUP).find(domain))
             .cloned()
-    }
-
-    fn get_server_group(&self, group: &str) -> Vec<&NameServerInfo> {
-        if group == DEFAULT_GROUP {
-            self.servers()
-                .iter()
-                .filter(|s| s.group.iter().any(|g| g == DEFAULT_GROUP) || !s.exclude_default_group)
-                .collect::<Vec<_>>()
-        } else {
-            self.servers()
-                .iter()
-                .filter(|s| s.group.iter().any(|g| g == group))
-                .collect::<Vec<_>>()
-        }
     }
 
     pub fn conf_dir(&self) -> Option<&Path> {
@@ -2027,7 +1995,11 @@ impl RuntimeConfigBuilder {
                 }
 
                 let line = String::from_utf8_lossy(&buf);
-                self.config_at(line.trim_end_matches(['\r', '\n']), Some(lineno));
+                self.config_at(
+                    line.trim_end_matches(['\r', '\n']),
+                    Some(lineno),
+                    Some(&path),
+                );
             }
         } else {
             warn!("configuration file {:?} does not exist", path);
@@ -2038,7 +2010,7 @@ impl RuntimeConfigBuilder {
 
     /// 解析一行配置（对外接口，行为与从前一致）。
     pub fn config(&mut self, line: &str) {
-        self.config_at(line, None);
+        self.config_at(line, None, None);
     }
 
     /// 🔐 P2：解析一行配置，并把"这行有没有我们没认出来的内容"明确说出来。
@@ -2049,7 +2021,7 @@ impl RuntimeConfigBuilder {
     /// 静默消失（服务照常起来、零提示）。这里改用"剩余输入是否为空"来判定，并把剩余内容报出来。
     ///
     /// 注：这里多解析一次（只为拿到剩余输入）。配置加载只发生在启动/配置重载，代价可忽略。
-    fn config_at(&mut self, line: &str, lineno: Option<usize>) {
+    fn config_at(&mut self, line: &str, lineno: Option<usize>, base_file: Option<&Path>) {
         // 🔐 问题 38（真机测试补漏）：凭据写了一半的代理配置必须**报配置错误**，不能只当"未识别行"。
         //
         // 背景：`proxy-server socks5://:口令@host -name x` 这种写法，`ProxyConfig::from_str`
@@ -2096,7 +2068,7 @@ impl RuntimeConfigBuilder {
                 }
             }
         }
-        self.config_unchecked(line, lineno);
+        self.config_unchecked(line, lineno, base_file);
     }
 
     /// 🔐 Q18：`group-begin <组名> [-inherit <另一组|none|parent|default>]`。
@@ -2179,7 +2151,7 @@ impl RuntimeConfigBuilder {
         stack.len() > 1
     }
 
-    fn config_unchecked(&mut self, line: &str, lineno: Option<usize>) {
+    fn config_unchecked(&mut self, line: &str, lineno: Option<usize>, base_file: Option<&Path>) {
         use crate::config::parser::ConfigItem::*;
 
         // 必须在取 `rule_group` 的可变借用**之前**算出这个标志：栈为空时它是 false，
@@ -2355,16 +2327,6 @@ impl RuntimeConfigBuilder {
                         self.local_domains.push(domain);
                     }
                 }
-                // 🔐 Q3/Q5：这两行我们**认**（不再报"未识别配置行"），但要说明白它们为什么不用开 ——
-                // 免得用户以为「配了却没生效」。本实现一律写入全部解析出的地址。
-                IpSetNoSpeed(v) => {
-                    self.ipset_no_speed = Some(v);
-                    notice_no_speed();
-                }
-                NftSetNoSpeed(v) => {
-                    self.nftset_no_speed = Some(v);
-                    notice_no_speed();
-                }
                 HttpsRecord(v) => rule_group.https_records.push(v),
                 Server(server) => self.nameservers.push(server),
                 ResponseMode(mode) => {
@@ -2452,9 +2414,22 @@ impl RuntimeConfigBuilder {
                     route!(v; rule_group.params.rr_ttl_reply_max, self.rr_ttl_reply_max)
                 }
                 Listener(listener) => {
-                    // 🔐 P2：证书相对路径先锚定到配置文件所在目录，再入列表
-                    let listener = self.anchor_tls_cert_paths(listener);
-                    self.binds.push(listener);
+                    // 🔐 编号 59：`enabled: false` 的监听必须真的不启动。
+                    //
+                    // 原来这个字段只在 serde 反序列化时能置成 false，而 `IBindConfig::enabled()`
+                    // 在生产代码里**零调用点** —— 配了 `enabled: false` 的监听照样会起来。
+                    // 在唯一的入列表口过滤，`cfg.binds()` 的每一处消费点自动一致
+                    //（启动、热重载的新增/关闭判断、API 暴露检查都看同一份列表）。
+                    if listener.enabled() {
+                        // 🔐 P2：证书相对路径先锚定到配置文件所在目录，再入列表
+                        let listener = self.anchor_tls_cert_paths(listener);
+                        self.binds.push(listener);
+                    } else {
+                        crate::log::info!(
+                            "listener {} is disabled by configuration (`enabled: false`); it will not be started",
+                            listener.sock_addr()
+                        );
+                    }
                 }
                 LocalTtl(v) => route!(v; rule_group.params.local_ttl, self.local_ttl),
                 LogConsole(v) => self.log.console = Some(v),
@@ -2508,7 +2483,7 @@ impl RuntimeConfigBuilder {
                     //
                     // 🔐 新增：路径支持通配符（`conf-file /etc/smartdns/conf.d/*.conf`），
                     // 并可写 `-g|-group <组名>` 把这一段被包含进来的配置整体挂到该规则组。
-                    let files = self.expand_conf_files(&v.path);
+                    let files = self.expand_conf_files(&v.path, base_file);
                     if files.is_empty() {
                         warn!(
                             "conf-file {:?} matched no files (the pattern hit nothing, or the path does not exist)",
@@ -2704,8 +2679,11 @@ impl RuntimeConfigBuilder {
 
     #[inline]
     /// 把 `conf-file` 的路径展开成实际要加载的文件列表（支持通配符，见 [`expand_conf_pattern`]）。
-    fn expand_conf_files(&self, path: &Path) -> Vec<PathBuf> {
-        expand_conf_pattern(path, self.conf_file.as_ref())
+    fn expand_conf_files(&self, path: &Path, base: Option<&Path>) -> Vec<PathBuf> {
+        let base_file = base
+            .map(Path::to_path_buf)
+            .or_else(|| self.conf_file.clone());
+        expand_conf_pattern(path, base_file.as_ref())
     }
 
     #[inline]
@@ -2719,6 +2697,17 @@ impl RuntimeConfigBuilder {
         if path.exists() {
             return path;
         }
+
+        // 🔐 编号 36：只有「原路径不含目录成分」时才按文件名到已知配置目录里回退。
+        // 含目录成分（`sub/a.conf`）时若也按文件名找，会把用户明确写的目录整个丢掉、
+        // 静默加载另一个同名文件 —— 那比"文件不存在"危险得多。
+        let has_dir_component = path
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty());
+        if has_dir_component {
+            return path;
+        }
+
         let Some(name) = path.file_name() else {
             return path;
         };
@@ -3002,10 +2991,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use tracing::{
-        Event, Id, Metadata, Subscriber,
+        Event, Id, Level, Metadata, Subscriber,
         dispatcher::{Dispatch, with_default},
         field::{Field, Visit},
-        Level,
     };
 
     use crate::{dns::DomainRuleGetter, libdns::Protocol};
@@ -3047,7 +3035,6 @@ mod tests {
         fn enter(&self, _span: &Id) {}
 
         fn exit(&self, _span: &Id) {}
-
     }
 
     #[test]
@@ -3066,10 +3053,7 @@ mod tests {
         with_default(&dispatch, || {
             config = Some(
                 RuntimeConfig::builder()
-                    .with(&format!(
-                        "resolv-file {}",
-                        resolv_file.to_str().unwrap()
-                    ))
+                    .with(&format!("resolv-file {}", resolv_file.to_str().unwrap()))
                     .build()
                     .unwrap(),
             );
@@ -3080,10 +3064,10 @@ mod tests {
         assert!(resolv_file.exists(), "resolv-file 指向的文件必须被读取");
         let warnings = warnings.lock().unwrap();
         assert!(
-            warnings
-                .iter()
-                .any(|message| message.contains("not implemented in the async engine")
-                    && message.contains(resolv_file.to_string_lossy().as_ref())),
+            warnings.iter().any(
+                |message| message.contains("not implemented in the async engine")
+                    && message.contains(resolv_file.to_string_lossy().as_ref())
+            ),
             "应捕获 resolv-file 的明确警告，实际: {warnings:?}"
         );
 
@@ -3261,8 +3245,6 @@ mod tests {
         let cfg = RuntimeConfig::builder()
             .with("ipset-timeout yes")
             .with("nftset-timeout yes")
-            .with("ipset-no-speed yes")
-            .with("nftset-no-speed yes")
             .with("nftset-debug yes")
             .build()
             .unwrap();
@@ -3270,9 +3252,7 @@ mod tests {
         assert!(cfg.ipset_timeout(), "Q2：ipset 条目要带过期时间");
         assert!(cfg.nftset_timeout(), "Q4：nftset 条目要带过期时间");
         assert!(cfg.nftset_debug(), "Q6：打开 nftset 详细日志");
-        // Q3/Q5 这两个开关只是"认下来 + 启动时说明"，不改变任何行为：
-        // 本实现一律写全部地址，所以这两个值不该影响后面的判断（这里只验它们不 panic、不影响其它开关）
-        assert!(!cfg.log_syslog(), "别的开关不该被它们带开");
+        assert!(!cfg.log_syslog(), "其它开关不该被带开");
 
         // 默认：全关
         let cfg = RuntimeConfig::builder().build().unwrap();
@@ -3570,6 +3550,122 @@ mod tests {
         assert!(!cfg.has_rule_group("nosuchgroup"));
     }
 
+    /// 🔐 编号 34：`bind-cert-file` 写相对路径、且文件此刻不存在（自签证书启动时才生成）
+    /// 时，读取侧必须锚定到配置目录，不能原样返回相对路径。
+    #[test]
+    fn bind_cert_relative_path_is_anchored_to_config_dir() {
+        let dir = std::env::temp_dir().join(format!("smartdns-cert-anchor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(
+            &conf,
+            "bind-cert-file certs/server.crt\nbind-cert-key-file certs/server.key\n",
+        )
+        .unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&conf));
+        let cert = cfg.bind_cert_file().expect("bind-cert-file should parse");
+        let key = cfg
+            .bind_cert_key_file()
+            .expect("bind-cert-key-file should parse");
+        for path in [&cert, &key] {
+            assert!(
+                path.is_absolute(),
+                "证书路径必须被锚定成绝对路径，实际是 {path:?}"
+            );
+            assert!(
+                path.starts_with(&dir),
+                "证书路径必须以配置目录开头，实际是 {path:?}，配置目录是 {dir:?}"
+            );
+        }
+        assert!(cert.ends_with("certs/server.crt") || cert.ends_with("certs\\server.crt"));
+        assert!(key.ends_with("certs/server.key") || key.ends_with("certs\\server.key"));
+    }
+
+    /// 🔐 编号 36：带目录成分的路径找不到时，不能按文件名去已知配置目录里换一个文件。
+    #[test]
+    fn conf_file_with_directory_component_is_not_resolved_by_basename() {
+        let dir = std::env::temp_dir().join(format!("smartdns-confbase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        // other/a.conf 存在且被加载过，但用户写的是 sub/a.conf（sub 不存在）
+        std::fs::write(dir.join("other/a.conf"), "").unwrap();
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(&conf, "conf-file other/a.conf\n").unwrap();
+
+        let mut builder = RuntimeConfig::builder()
+            .with_conf_dir(dir.clone())
+            .with_conf_file(&conf);
+        // 模拟 other/ 已作为已知配置目录被加载过。
+        builder.dirs.insert(dir.join("other"));
+        let resolved = builder.resolve_filepath("sub/a.conf");
+        assert!(
+            resolved.to_string_lossy().contains("sub"),
+            "带目录成分的路径不能被换成别的目录里的同名文件，实际解析为 {resolved:?}"
+        );
+        assert!(
+            !resolved.to_string_lossy().contains("other"),
+            "不得回退到 other/a.conf，实际解析为 {resolved:?}"
+        );
+    }
+
+    /// 🔐 编号 33：`client-rules` 引用一个从未 `group-begin` 定义的组名，
+    /// 该组必须判为「不存在」，否则拼错告警永远不触发。
+    #[test]
+    fn client_rules_reference_alone_does_not_make_a_rule_group_exist() {
+        let dir = std::env::temp_dir().join(format!("smartdns-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(&conf, "client-rules 127.0.0.1 -group typo\n").unwrap();
+
+        let cfg = RuntimeConfig::load(Some(dir.clone()), Some(&conf));
+        assert!(
+            !cfg.has_rule_group("typo"),
+            "只在 client-rules 里出现的组名不能算存在（那是自证循环）"
+        );
+    }
+
+    /// 🔐 编号 37：嵌套 `conf-file` 里的相对通配符必须相对**包含它的那个文件**展开，
+    /// 而不是恒相对主配置文件。
+    #[test]
+    fn nested_conf_file_glob_is_anchored_to_the_including_file() {
+        let dir = std::env::temp_dir().join(format!("smartdns-glob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+
+        // conf.d/a.conf 里写 `conf-file *.conf`，应展开到 conf.d/ 下
+        std::fs::write(dir.join("conf.d/a.conf"), "conf-file *.conf\n").unwrap();
+        std::fs::write(dir.join("conf.d/b.conf"), "").unwrap();
+        // 主配置目录里也放一个同名文件，用来证明不会锚定到主配置目录
+        std::fs::write(dir.join("b.conf"), "").unwrap();
+
+        let conf = dir.join("smartdns.conf");
+        std::fs::write(&conf, "conf-file conf.d/a.conf\n").unwrap();
+
+        let cfg = RuntimeConfig::builder()
+            .with_conf_dir(dir.clone())
+            .with_conf_file(&conf);
+
+        // 直接验证展开函数：基准是 conf.d/a.conf 时，`*.conf` 必须落在 conf.d/ 下
+        let expanded = cfg.expand_conf_files(Path::new("*.conf"), Some(&dir.join("conf.d/a.conf")));
+        assert!(
+            !expanded.is_empty(),
+            "嵌套 conf-file 的相对通配符必须能匹配到文件"
+        );
+        for path in &expanded {
+            assert!(
+                path.starts_with(dir.join("conf.d")),
+                "通配符必须相对包含它的文件所在目录展开，实际 {path:?}"
+            );
+        }
+        assert!(
+            expanded.iter().any(|p| p.ends_with("b.conf")),
+            "conf.d/b.conf 必须被匹配到，实际 {expanded:?}"
+        );
+    }
+
     /// 🔐 P2：`num-workers 0` 不能真的变成 0 个工作线程（那等于服务完全不解析、还不报错）。
     #[test]
     fn test_num_workers_zero_is_ignored() {
@@ -3746,6 +3842,17 @@ mod tests {
     }
 
     #[test]
+    fn listener_enabled_defaults_to_true_and_honours_false() {
+        let cfg = RuntimeConfig::builder()
+            .with("bind 127.0.0.1:6153")
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.binds().len(), 1);
+        assert!(cfg.binds()[0].enabled());
+    }
+
+    #[test]
     fn test_config_server_0() {
         let cfg = RuntimeConfig::builder()
             .with(
@@ -3754,10 +3861,14 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(cfg.get_server_group("bootstrap").len(), 1);
-
-        let server_group = cfg.get_server_group("bootstrap");
-        let server = server_group.first().cloned().unwrap();
+        // 🔐 编号 62：原来这里调 `cfg.get_server_group(...)`，而那是个只被测试调用的
+        // 方法 —— 运行时分组由 `dns_client` 另行实现，测试保护的是不参与运行时的逻辑。
+        // 改为直接断言 `cfg.servers()` 的 group 字段：这是两边共同的输入来源。
+        let servers = cfg.servers();
+        let server = servers
+            .iter()
+            .find(|s| s.group.iter().any(|g| g == "bootstrap"))
+            .expect("bootstrap 组的上游必须存在");
 
         assert_eq!(server.server.proto(), &Protocol::Https);
         assert_eq!(server.server.to_string(), "https://223.5.5.5/dns-query");
@@ -3773,11 +3884,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(cfg.nameservers.len(), 1);
+        let servers = cfg.servers();
+        assert_eq!(servers.len(), 1);
 
-        let server_group = cfg.get_server_group(DEFAULT_GROUP);
-
-        let server = server_group.first().cloned().unwrap();
+        let server = servers.first().expect("默认组的上游必须存在");
 
         assert_eq!(server.server.proto(), &Protocol::Https);
         assert_eq!(server.server.to_string(), "https://223.5.5.5/dns-query");
@@ -6659,6 +6769,10 @@ mod rule_group_scope_tests {
         // 缺陷的实际暴露面是「Windows 写的配置拷到 Linux 跑」——归一保证跨平台一致。
     }
 
+    /// 🔐 编号 75：本测试断言"盘符路径不被锚定"，这只在 Windows 上成立 ——
+    /// Linux 下 `C:/...` 不是绝对路径，会被正常锚定到配置目录。
+    /// 原来缺平台保护，Linux 上必然失败。
+    #[cfg(windows)]
     #[test]
     fn hosts_file_windows_drive_letter_is_absolute() {
         let dir = std::env::temp_dir().join(format!("smartdns-hosts-win-{}", std::process::id()));
@@ -6674,8 +6788,7 @@ mod rule_group_scope_tests {
             .to_string();
 
         assert_eq!(
-            pattern,
-            "C:/Windows/System32/drivers/etc/hosts",
+            pattern, "C:/Windows/System32/drivers/etc/hosts",
             "Windows drive-letter paths must not be anchored"
         );
         let _ = std::fs::remove_dir_all(&dir);

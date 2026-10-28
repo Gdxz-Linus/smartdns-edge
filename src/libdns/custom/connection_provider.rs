@@ -384,6 +384,12 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
     }
 }
 
+/// HTTP 代理不转发 UDP；UDP 上游必须降级为 TCP 才能穿过 HTTP CONNECT。
+fn udp_over_http_requires_tcp(proto: &ProtocolConfig, proxy: Option<&ProxyConfig>) -> bool {
+    matches!(proto, ProtocolConfig::Udp)
+        && matches!(proxy.map(|p| p.proto), Some(proxy::ProxyProtocol::Http))
+}
+
 async fn new_connection(
     server: &DnsUrl,
     server_addr: SocketAddr,
@@ -416,6 +422,19 @@ async fn new_connection(
                     path: path.clone(),
                     prefer: crate::dns_url::HttpsPrefer::H2,
                 };
+            }
+            // 🔐 编号 65：HTTP 代理不支持 UDP 转发（协议限制）。
+            // 原来 `handshake_udp` 直接返回错误，整条查询链路失败，用户看到的是"DNS 完全不能用"。
+            // DNS over TCP 可以过 HTTP CONNECT，所以这里降级为 TCP —— 查询能通，用户无感。
+            ProtocolConfig::Udp => {
+                if udp_over_http_requires_tcp(&ProtocolConfig::Udp, runtime_proviver.proxy.as_ref())
+                {
+                    crate::log::warn!(
+                        "UDP upstream {} cannot go through an HTTP proxy (HTTP proxies do not forward UDP); querying over TCP instead",
+                        server.host()
+                    );
+                    effective_proto = ProtocolConfig::Tcp;
+                }
             }
             _ => {}
         }
@@ -1289,5 +1308,40 @@ mod p1_9_direct_udp_tests {
             socket.deref().peer_addr().is_err(),
             "多播上游不能被 connect，否则 mDNS 会彻底失效"
         );
+    }
+}
+
+#[cfg(test)]
+mod proxy_downgrade_tests {
+    use super::*;
+    use crate::proxy::ProxyProtocol;
+
+    fn proxy(proto: ProxyProtocol) -> ProxyConfig {
+        ProxyConfig {
+            proto,
+            server: "127.0.0.1:8080".parse().unwrap(),
+            username: None,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn http_proxy_downgrades_only_udp_upstreams() {
+        let http = proxy(ProxyProtocol::Http);
+        assert!(udp_over_http_requires_tcp(
+            &ProtocolConfig::Udp,
+            Some(&http)
+        ));
+        assert!(!udp_over_http_requires_tcp(
+            &ProtocolConfig::Tcp,
+            Some(&http)
+        ));
+
+        let socks = proxy(ProxyProtocol::Socks5);
+        assert!(!udp_over_http_requires_tcp(
+            &ProtocolConfig::Udp,
+            Some(&socks)
+        ));
+        assert!(!udp_over_http_requires_tcp(&ProtocolConfig::Udp, None));
     }
 }

@@ -76,16 +76,21 @@ where
     loop {
         tracing::trace!("loop");
         let conn = tokio::select! {
-            res = acceptor.accept() => match res {
-                Ok(x) => x,
-                Err(e) => {
-                    tracing::error!("accept error : {e}");
-                    return Err(e);
-                }
-            },
+            res = acceptor.accept() => res,
             _ = &mut sig => {
                 tracing::trace!("cancellation triggered");
                 return Ok(());
+            }
+        };
+        let conn = match conn {
+            Ok(x) => x,
+            Err(e) => {
+                // 🔐 编号 73：原来任何一次 accept 错误都 `return Err(e)`，
+                // **整个 accept 循环退出**，服务不再接受新连接。
+                // QUIC 的 accept 错误通常是单个连接的问题（握手失败、对端异常），
+                // 不该终止整个监听。这里记日志后继续接受下一个连接。
+                tracing::warn!("accept error (continuing to accept): {e}");
+                continue;
             }
         };
 
@@ -132,7 +137,8 @@ where
                             return;
                         }
                     };
-                    if let Err(e) = serve_request::<AC, _, _>(req, stream, h_svc_cp.clone(), peer).await
+                    if let Err(e) =
+                        serve_request::<AC, _, _>(req, stream, h_svc_cp.clone(), peer).await
                     {
                         tracing::warn!("server request failed: {}", e);
                     }

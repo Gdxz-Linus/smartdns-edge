@@ -13,7 +13,7 @@ use std::{
 use tokio::{
     io,
     io::{AsyncReadExt, AsyncWriteExt},
-    net::UdpSocket,
+    net::{TcpStream, UdpSocket},
 };
 
 // Error and Result
@@ -492,6 +492,30 @@ impl AddrKind {
     }
 }
 
+/// 🔐 编号 43：算出 UDP 中继实际该 connect 到哪个地址。
+///
+/// RFC 1928 §6 允许代理在 `BND.ADDR/BND.PORT` 里回 `0.0.0.0:0`（或 `[::]:0`），
+/// 含义是「用你连我的这个地址」。不少 SOCKS5 服务端就是这么回的。
+/// 原来代码无条件拿应答地址去 `connect()`，遇到这种情况会失败，
+/// 整条 UDP 上游被判为不可用 —— 而代理本身是好的。
+///
+/// 另外 `AddrKind::Domain` 会拼出 `domain:port` 交给 `connect` 做一次系统解析，
+/// 与「已经连上代理的 TCP 对端」这一事实脱节；这种情况同样退回 peer 地址。
+fn resolve_udp_relay_addr(proxy_addr: &AddrKind, peer: SocketAddr) -> SocketAddr {
+    match proxy_addr {
+        AddrKind::Ip(addr) => {
+            let unspecified = addr.ip().is_unspecified();
+            if unspecified || addr.port() == 0 {
+                peer
+            } else {
+                *addr
+            }
+        }
+        // 域名无法在「已连上 TCP 对端」的语境下安全解析，直接用 peer。
+        AddrKind::Domain(_, _) => peer,
+    }
+}
+
 impl From<(IpAddr, u16)> for AddrKind {
     fn from(value: (IpAddr, u16)) -> Self {
         Self::Ip(value.into())
@@ -643,15 +667,14 @@ pub fn rejected_by_source() -> u64 {
     UDP_SOURCE_REJECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-impl<S> SocksDatagram<S>
-where
-    S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
-{
+// UDP ASSOCIATE 需要 TCP 对端地址作为 RFC 1928 §6 的兜底；
+// 这里只对生产实际使用的 TcpStream 提供 associate，避免给泛型流加 peer_addr 约束。
+impl SocksDatagram<TcpStream> {
     /// Creates `SocksDatagram`. Performs [`UDP ASSOCIATE`] under the hood.
     ///
     /// [`UDP ASSOCIATE`]: https://tools.ietf.org/html/rfc1928#page-7
     pub async fn associate<A>(
-        mut proxy_stream: S,
+        mut proxy_stream: TcpStream,
         socket: UdpSocket,
         auth: Option<Auth>,
         association_addr: Option<A>,
@@ -663,15 +686,26 @@ where
             .map(Into::into)
             .unwrap_or_else(|| AddrKind::Ip(SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0)));
         let proxy_addr = init(&mut proxy_stream, Command::UdpAssociate, addr, auth).await?;
-        socket.connect(proxy_addr.to_socket_addr()).await?;
+
+        // 🔐 编号 43：代理可能回 `0.0.0.0:0` 表示「用你连我的这个地址」，
+        // 也可能回域名。这两种情况都必须退回已建立的 TCP 对端地址。
+        let peer = proxy_stream.peer_addr()?;
+        let relay_addr = resolve_udp_relay_addr(&proxy_addr, peer);
+        socket.connect(relay_addr).await?;
+
         Ok(Self {
             socket,
-            proxy_addr,
+            proxy_addr: AddrKind::Ip(relay_addr),
             stream: proxy_stream,
             expected_source: std::sync::OnceLock::new(),
         })
     }
+}
 
+impl<S> SocksDatagram<S>
+where
+    S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
+{
     /// 仅供测试：跳过 SOCKS5 握手直接组装，用于验证来源校验这条生产代码路径。
     #[cfg(test)]
     pub(crate) fn from_parts_for_test(socket: UdpSocket, proxy_addr: AddrKind, stream: S) -> Self {
@@ -1169,6 +1203,35 @@ mod tests {
             return skip_no_proxy("connect_no_auth_panic");
         };
         connect(&addr, false).await;
+    }
+
+    /// 🔐 编号 43：代理回 `0.0.0.0:0` / `[::]:0` / 域名时，必须退回已建立的 TCP 对端地址。
+    #[test]
+    fn udp_relay_addr_falls_back_to_peer_when_proxy_returns_unspecified() {
+        let peer: SocketAddr = "192.0.2.10:1080".parse().unwrap();
+
+        // 0.0.0.0:0 —— RFC 1928 §6 允许的「用你连我的这个地址」
+        let v4_unspecified = AddrKind::Ip("0.0.0.0:0".parse().unwrap());
+        assert_eq!(resolve_udp_relay_addr(&v4_unspecified, peer), peer);
+
+        // [::]:0
+        let v6_unspecified = AddrKind::Ip("[::]:0".parse().unwrap());
+        assert_eq!(resolve_udp_relay_addr(&v6_unspecified, peer), peer);
+
+        // 端口为 0 但地址具体
+        let zero_port = AddrKind::Ip("198.51.100.1:0".parse().unwrap());
+        assert_eq!(resolve_udp_relay_addr(&zero_port, peer), peer);
+
+        // 域名
+        let domain = AddrKind::Domain("proxy.example".to_string(), 1080);
+        assert_eq!(resolve_udp_relay_addr(&domain, peer), peer);
+
+        // 正常的代理地址必须原样使用
+        let normal = AddrKind::Ip("198.51.100.1:1080".parse().unwrap());
+        assert_eq!(
+            resolve_udp_relay_addr(&normal, peer),
+            "198.51.100.1:1080".parse::<SocketAddr>().unwrap()
+        );
     }
 
     type TestDatagram = SocksDatagram<TcpStream>;

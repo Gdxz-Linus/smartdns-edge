@@ -153,14 +153,15 @@ impl ReplyMap {
         seq: PingSequence,
     ) -> Result<oneshot::Receiver<Reply>, SurgeError> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .0
-            .lock()
-            .insert(ReplyToken(host, ident, seq), tx)
-            .is_some()
-        {
+        let mut map = self.0.lock();
+        let token = ReplyToken(host, ident, seq);
+        // 🔐 编号 69：原来直接 `insert` 再判返回值 —— 那时旧 waiter **已经被顶掉了**，
+        // 返回错误已经晚了，先登记的那个永远收不到应答、只能等超时。
+        // 改为先判重、确认不存在再插入（持锁期间原子）。
+        if map.contains_key(&token) {
             return Err(SurgeError::IdenticalRequests { host, ident, seq });
         }
+        map.insert(token, tx);
         Ok(rx)
     }
 
@@ -257,8 +258,13 @@ async fn recv_task(socket: AsyncSocket, reply_map: ReplyMap) {
                                 _ => continue,
                             };
 
-                            Icmpv4Packet::decode(message, socket.sock_type, src_addr, local_addr_ip4)
-                                .map(IcmpPacket::V4)
+                            Icmpv4Packet::decode(
+                                message,
+                                socket.sock_type,
+                                src_addr,
+                                local_addr_ip4,
+                            )
+                            .map(IcmpPacket::V4)
                         }
                         IpAddr::V6(src_addr) => {
                             Icmpv6Packet::decode(message, src_addr).map(IcmpPacket::V6)
@@ -287,5 +293,25 @@ async fn recv_task(socket: AsyncSocket, reply_map: ReplyMap) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_waiter_does_not_displace_the_first_one() {
+        let map = ReplyMap::default();
+        let host: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut first = map
+            .new_waiter(host, Some(PingIdentifier(1)), PingSequence(1))
+            .unwrap();
+        let second = map.new_waiter(host, Some(PingIdentifier(1)), PingSequence(1));
+        assert!(second.is_err(), "重复登记必须报错");
+        assert!(
+            matches!(first.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "先登记的 waiter 不能被顶掉"
+        );
     }
 }

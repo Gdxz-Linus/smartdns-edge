@@ -206,8 +206,22 @@ impl<'a> Decoder<'a> {
     pub fn read_domains(&mut self, length: usize) -> DecodeResult<Vec<Name>> {
         let mut name_decoder = BinDecoder::new(self.read_slice(length)?);
         let mut names = Vec::new();
-        while let Ok(name) = Name::read(&mut name_decoder) {
-            names.push(name);
+        // 🔐 编号 72：原来是 `while let Ok(name) = Name::read(...)` —— 把**任何错误**都当成
+        // "读完了"，包括真正的解码错误。畸形报文里前几个域名合法、后面损坏时，
+        // 损坏点之后的域名被**静默丢弃**，调用方拿到"看起来正常但少了几项"的列表。
+        // 改为区分"正常结束（无剩余字节）"与"解码失败"。
+        loop {
+            // 没有剩余字节：正常结束
+            if name_decoder.is_empty() {
+                break;
+            }
+            match Name::read(&mut name_decoder) {
+                Ok(name) => names.push(name),
+                Err(e) => {
+                    // 有剩余字节却读不出域名 ⇒ 真正的解码失败，如实上报
+                    return Err(e.into());
+                }
+            }
         }
         Ok(names)
     }
@@ -220,5 +234,28 @@ impl<'a> Decoder<'a> {
     /// return slice of buffer start at index of unread data
     pub fn buffer(&self) -> &[u8] {
         self.buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_domains_reports_a_decode_error_instead_of_silently_stopping() {
+        // 一个合法的域名（example.com）后面跟一个非法长度字节
+        let mut buf = Vec::new();
+        // 合法域名：7example3com0
+        buf.extend_from_slice(&[7, b'e', b'x', b'a', b'm', b'p', b'l', b'e']);
+        buf.extend_from_slice(&[3, b'c', b'o', b'm', 0]);
+        // 非法：0x40 的高两位是 01，既不是标签长度也不是压缩指针
+        buf.push(0x40);
+
+        let mut dec = Decoder::new(&buf);
+        let result = dec.read_domains(buf.len());
+        assert!(
+            result.is_err(),
+            "损坏的域名必须报错，不能静默丢弃（实际 {result:?}）"
+        );
     }
 }

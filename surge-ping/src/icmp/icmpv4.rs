@@ -211,11 +211,27 @@ impl Icmpv4Packet {
                         want: 32,
                     }));
                 }
-                // icmp unused(4) + ip header(20) + echo icmp(4)
+                // icmp unused(4) + ip header(ihl * 4) + echo icmp(4)
                 let real_ip_packet = ipv4::Ipv4Packet::new(&icmp_payload[4..])
                     .ok_or_else(|| SurgeError::from(MalformedPacketError::NotIpv4Packet))?;
-                let identifier = u16::from_be_bytes(icmp_payload[28..30].try_into().unwrap());
-                let sequence = u16::from_be_bytes(icmp_payload[30..32].try_into().unwrap());
+                let ip_header_len = (real_ip_packet.get_header_length() as usize) * 4;
+                if icmp_payload.len() < 4 + ip_header_len + 4 {
+                    return Err(SurgeError::from(MalformedPacketError::PayloadTooShort {
+                        got: icmp_payload.len(),
+                        want: 4 + ip_header_len + 4,
+                    }));
+                }
+                let echo_offset = 4 + ip_header_len;
+                let identifier = u16::from_be_bytes(
+                    icmp_payload[echo_offset..echo_offset + 2]
+                        .try_into()
+                        .unwrap(),
+                );
+                let sequence = u16::from_be_bytes(
+                    icmp_payload[echo_offset + 2..echo_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                );
 
                 packet
                     .source(ipv4_packet.get_source())
@@ -264,11 +280,27 @@ impl Icmpv4Packet {
                     }));
                 }
 
-                // icmp unused(4) + ip header(20) + echo icmp(4)
+                // icmp unused(4) + ip header(ihl * 4) + echo icmp(4)
                 let real_ip_packet = ipv4::Ipv4Packet::new(&icmp_payload[4..])
                     .ok_or_else(|| SurgeError::from(MalformedPacketError::NotIpv4Packet))?;
-                let identifier = u16::from_be_bytes(icmp_payload[28..30].try_into().unwrap());
-                let sequence = u16::from_be_bytes(icmp_payload[30..32].try_into().unwrap());
+                let ip_header_len = (real_ip_packet.get_header_length() as usize) * 4;
+                if icmp_payload.len() < 4 + ip_header_len + 4 {
+                    return Err(SurgeError::from(MalformedPacketError::PayloadTooShort {
+                        got: icmp_payload.len(),
+                        want: 4 + ip_header_len + 4,
+                    }));
+                }
+                let echo_offset = 4 + ip_header_len;
+                let identifier = u16::from_be_bytes(
+                    icmp_payload[echo_offset..echo_offset + 2]
+                        .try_into()
+                        .unwrap(),
+                );
+                let sequence = u16::from_be_bytes(
+                    icmp_payload[echo_offset + 2..echo_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                );
 
                 packet
                     .source(src_addr)
@@ -354,5 +386,49 @@ mod tests {
             ("10.0.242.34").parse().unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn error_packet_with_ip_options() {
+        let embedded_ipv4 = [
+            0x66, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 127, 0, 0, 1,
+            10, 0, 0, 2, 0x94, 0x04, 0x00, 0x00,
+        ];
+        let mut icmp = vec![3, 1, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&embedded_ipv4);
+        icmp.extend_from_slice(&[0, 65, 0, 1]);
+
+        let mut decoded_ipv4 = [
+            0x45, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 172, 217, 14,
+            110, 10, 0, 242, 34,
+        ]
+        .to_vec();
+        decoded_ipv4.extend_from_slice(&icmp);
+        let from_ipv4 = Icmpv4Packet::decode(
+            &decoded_ipv4,
+            SockType::RAW,
+            "172.217.14.110".parse().unwrap(),
+            "10.0.242.34".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(from_ipv4.get_identifier(), 65.into());
+        assert_eq!(from_ipv4.get_sequence(), 1.into());
+        assert_eq!(
+            from_ipv4.get_real_dest(),
+            "10.0.0.2".parse::<Ipv4Addr>().unwrap()
+        );
+
+        let from_icmp = Icmpv4Packet::decode_from_icmp(
+            &icmp,
+            "172.217.14.110".parse().unwrap(),
+            "10.0.242.34".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(from_icmp.get_identifier(), 65.into());
+        assert_eq!(from_icmp.get_sequence(), 1.into());
+        assert_eq!(
+            from_icmp.get_real_dest(),
+            "10.0.0.2".parse::<Ipv4Addr>().unwrap()
+        );
     }
 }

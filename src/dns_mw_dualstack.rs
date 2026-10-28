@@ -74,7 +74,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError>
             && crate::config::resolve_dualstack_selection(
                 ctx.domain_rule
                     .as_ref()
-                    .map(|rule| rule.dualstack_ip_selection),
+                    .map(|_| ctx.domain_rule.get(|rule| rule.dualstack_ip_selection)),
                 ctx.cfg()
                     .group_params(ctx.effective_rule_group())
                     .dualstack_ip_selection,

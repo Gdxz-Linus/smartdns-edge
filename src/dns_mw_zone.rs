@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use crate::dns::*;
+use crate::infra::arp::ArpResolver;
 use crate::middleware::*;
 use crate::zone::{IdentityZoneProvider, LocalPtrZoneProvider, RuleZoneProvider, ZoneManager};
 
@@ -8,11 +11,11 @@ pub struct DnsZoneMiddleware {
 }
 
 impl DnsZoneMiddleware {
-    pub fn new() -> Self {
+    pub fn new(arp_resolver: Arc<ArpResolver>) -> Self {
         Self {
             manager: ZoneManager::new()
                 .with_provider(LocalPtrZoneProvider::new())
-                .with_provider(IdentityZoneProvider::new()),
+                .with_provider(IdentityZoneProvider::with_resolver(arp_resolver)),
             rule_provider: RuleZoneProvider::new(),
         }
     }
@@ -50,6 +53,10 @@ mod tests {
     use crate::{dns_conf::RuntimeConfig, dns_mw::*};
     use std::net::SocketAddr;
 
+    fn test_zone_middleware() -> DnsZoneMiddleware {
+        DnsZoneMiddleware::new(Arc::new(ArpResolver::new()))
+    }
+
     async fn search_with_query(
         mw: &DnsMiddlewareHandler,
         name: &str,
@@ -72,7 +79,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let srv = mock
             .lookup_rdata("_vlmcs._tcp", RecordType::SRV)
@@ -115,7 +122,7 @@ mod tests {
     async fn test_localptr_nxdomain_for_private_ptr_not_owned() {
         // R-P1-1 隐私定调回归：私网 PTR 且无本地数据 → NXDOMAIN（不得外发上游）。
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
         let response = search_with_query(
             &mock,
             "77.1.168.192.in-addr.arpa.",
@@ -148,7 +155,7 @@ mod tests {
             .unwrap();
         let mock = DnsMockMiddleware::builder()
             .with_extra_middleware(DnsHostsMiddleware::new())
-            .with_extra_middleware(DnsZoneMiddleware::new())
+            .with_extra_middleware(test_zone_middleware())
             .build(cfg);
         let response = search_with_query(
             &mock,
@@ -176,7 +183,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
         let response = search_with_query(
             &mock,
             "hostname.bind",
@@ -197,7 +204,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
         let response = search_with_query(
             &mock,
             "server-name",
@@ -218,7 +225,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_version_and_client_ip() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let version_response = search_with_query(
             &mock,
@@ -254,7 +261,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_client_mac_for_loopback() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
         let response = search_with_query(
             &mock,
             "client_mac",
@@ -272,7 +279,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let response = search_with_query(
             &mock,
@@ -296,7 +303,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let response = search_with_query(
             &mock,
@@ -323,7 +330,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let response = search_with_query(
             &mock,
@@ -349,7 +356,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_client_fields_query() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let ip_response = search_with_query(
             &mock,
@@ -413,7 +420,7 @@ mod tests {
             .with("server-name smartdns-rs-test")
             .build()
             .unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let response = search_with_query(
             &mock,
@@ -440,7 +447,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_txt_short_name_version_alias() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let response = search_with_query(
             &mock,
@@ -462,7 +469,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_removed_hostname_alias_is_not_supported() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let mut query = Query::query("hostname".parse().unwrap(), RecordType::TXT);
         query.set_query_class(DNSClass::CH);
@@ -477,7 +484,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_removed_whoami_bind_aliases_are_not_supported() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         for name in ["whoami.bind", "whoami.mac.bind"] {
             let mut query = Query::query(name.parse().unwrap(), RecordType::TXT);
@@ -494,7 +501,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_identity_txt_in_class_is_not_intercepted() {
         let cfg = RuntimeConfig::builder().build().unwrap();
-        let mock = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let mock = DnsMockMiddleware::mock(test_zone_middleware()).build(cfg);
 
         let mut query = Query::query("version".parse().unwrap(), RecordType::TXT);
         query.set_query_class(DNSClass::IN);

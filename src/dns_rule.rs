@@ -189,11 +189,25 @@ pub trait DomainRuleGetter {
 
 impl DomainRuleGetter for DomainRuleTreeNode {
     fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T> {
-        f(self).or_else(|| self.zone().and_then(|z| f(z)))
+        let mut cur = Some(self);
+        while let Some(node) = cur {
+            if let Some(v) = f(node) {
+                return Some(v);
+            }
+            cur = node.zone().map(|z| z.as_ref());
+        }
+        None
     }
 
     fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T> {
-        f(self).or_else(|| self.zone().and_then(|z| f(z)))
+        let mut cur = Some(self);
+        while let Some(node) = cur {
+            if let Some(v) = f(node) {
+                return Some(v);
+            }
+            cur = node.zone().map(|z| z.as_ref());
+        }
+        None
     }
 }
 
@@ -209,11 +223,11 @@ impl<N: AsRef<DomainRuleTreeNode>> DomainRuleGetter for N {
 
 impl DomainRuleGetter for Option<Arc<DomainRuleTreeNode>> {
     fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T> {
-        self.as_deref().and_then(f)
+        self.as_deref().and_then(|n| n.get(f))
     }
 
     fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T> {
-        self.as_deref().and_then(f)
+        self.as_deref().and_then(|n| n.get_ref(f))
     }
 }
 
@@ -255,7 +269,10 @@ impl From<&Name> for crate::collections::TrieKey<Name> {
 mod tests {
 
     use crate::config::{AddressRule, AddressRuleValue};
-    use std::{net::{Ipv4Addr, Ipv6Addr}, ptr};
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        ptr,
+    };
 
     use super::*;
 
@@ -395,5 +412,123 @@ mod tests {
             rule1.as_ref().unwrap().zone().unwrap().as_ref(),
             rule2.unwrap().as_ref()
         ))
+    }
+
+    #[test]
+    fn parent_domain_rule_is_inherited_by_child() {
+        let domain_rules = vec![
+            ConfigForDomain {
+                domain: "example.com".parse().unwrap(),
+                config: DomainRule {
+                    no_cache: Some(true),
+                    ..Default::default()
+                },
+            },
+            ConfigForDomain {
+                domain: "www.example.com".parse().unwrap(),
+                config: DomainRule {
+                    address: Some(AddressRuleValue::Addr {
+                        v4: Some([Ipv4Addr::LOCALHOST].into()),
+                        v6: None,
+                    }),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let map = DomainRuleMap::create(
+            &mut Default::default(),
+            &domain_rules,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        let rule = map
+            .find(&"www.example.com".parse().unwrap())
+            .expect("www.example.com rule should exist");
+        assert_eq!(rule.get(|n| n.no_cache), Some(true));
+    }
+
+    #[test]
+    fn three_level_chain_inherits_from_top() {
+        let domain_rules = vec![
+            ConfigForDomain {
+                domain: "example.com".parse().unwrap(),
+                config: DomainRule {
+                    no_cache: Some(true),
+                    ..Default::default()
+                },
+            },
+            ConfigForDomain {
+                domain: "sub.example.com".parse().unwrap(),
+                config: DomainRule::default(),
+            },
+            ConfigForDomain {
+                domain: "x.sub.example.com".parse().unwrap(),
+                config: DomainRule::default(),
+            },
+        ];
+
+        let map = DomainRuleMap::create(
+            &mut Default::default(),
+            &domain_rules,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        let rule = map
+            .find(&"x.sub.example.com".parse().unwrap())
+            .expect("x.sub.example.com rule should exist");
+        assert_eq!(rule.get(|n| n.no_cache), Some(true));
+    }
+
+    #[test]
+    fn child_explicit_value_beats_parent() {
+        let domain_rules = vec![
+            ConfigForDomain {
+                domain: "example.com".parse().unwrap(),
+                config: DomainRule {
+                    rr_ttl: Some(600),
+                    ..Default::default()
+                },
+            },
+            ConfigForDomain {
+                domain: "www.example.com".parse().unwrap(),
+                config: DomainRule {
+                    rr_ttl: Some(30),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let map = DomainRuleMap::create(
+            &mut Default::default(),
+            &domain_rules,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        let rule = map
+            .find(&"www.example.com".parse().unwrap())
+            .expect("www.example.com rule should exist");
+        assert_eq!(rule.get(|n| n.rr_ttl), Some(30));
     }
 }

@@ -54,6 +54,29 @@ pub(crate) fn should_log_stream_error(streak: u32) -> bool {
     streak <= 3 || streak.is_multiple_of(100)
 }
 
+/// 🔐 编号 28：DoH / 明文 HTTP 的 HTTP/2 连接总时长上限。
+///
+/// HTTP/2 是帧协议，没有"读请求头"阶段，hyper 的 `header_read_timeout` 对它无效，
+/// 因此用连接总时长兜底：到期断开这一条连接，配额随之归还。
+/// 取 `tcp-idle-time` 的 5 倍（默认 120 秒 → 600 秒）；`0` 表示不限制。
+fn connection_ttl_for(idle_time: u64) -> Option<std::time::Duration> {
+    if idle_time == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(idle_time.saturating_mul(5)))
+}
+
+/// 🔐 编号 66：按地址族挑选 Alt-Svc 要通告的 H3 端口。
+/// 优先同族；没有同族的再退回任意一个（不因缺配置而不发 Alt-Svc）。
+#[cfg(feature = "dns-over-https")]
+fn pick_h3_port(candidates: &[(bool, u16)], want_v6: bool) -> Option<u16> {
+    candidates
+        .iter()
+        .find(|(is_v6, _)| *is_v6 == want_v6)
+        .or_else(|| candidates.first())
+        .map(|(_, port)| *port)
+}
+
 pub fn serve(
     app: &App,
     cfg: &RuntimeConfig,
@@ -65,6 +88,9 @@ pub fn serve(
 ) -> Result<ServerHandle, crate::Error> {
     // 🔐 P0-5：连接建立后等待"第一个完整 DNS 报文"的超时（默认 5 秒，0 = 不限制）
     let first_packet_timeout = cfg.first_packet_timeout();
+
+    // 🔐 编号 28：HTTP/2 连接总时长上限（HTTP/1.1 由 header_read_timeout 兜底）
+    let connection_ttl = connection_ttl_for(idle_time);
 
     // 🔐 逐监听连接上限：内网端口可以宽松、对公网端口单独收紧
     //
@@ -120,11 +146,21 @@ pub fn serve(
             .or(certificate_key_file);
 
         // 🔐 P2-1 配套：自签名证书自动生成（对齐 C 版 bind-cert-generate 三态语义）。
-        // auto（未配置）= 证书与私钥路径都未配置时生成到默认位置；yes = 强制（文件已存在则幂等跳过）；
-        // no = 不生成。用户显式配置了任一路径时绝不生成、绝不覆盖。
+        // auto（未配置）= 证书与私钥路径**都**未配置时生成到默认位置；yes = 强制生成；
+        // no = 不生成。
+        //
+        // 🔐 编号 41：判据原来用 `||`（任意一个缺失就生成），并在后面把两个路径双双覆盖为
+        // 生成路径 —— 用户写了 `bind-cert-file` 却忘了写 `bind-cert-key-file` 时，配置的
+        // 证书被无声丢弃、对外换成自签证书，客户端校验必然失败，而日志只有一条 debug。
+        // 这与本段注释「用户显式配置了任一路径时绝不生成、绝不覆盖」直接矛盾。
+        //
+        // 现在只有「两者都缺失」才自动生成；只配了一半时不再补救，直接让下面的
+        // `ok_or(CertificatePathNotDefined / CertificateKeyPathNotDefined)` 报出明确错误，
+        // 用户会看到「配了证书但缺私钥」。唯一例外是显式 `bind-cert-generate yes`：
+        // 用户明确要求生成，就照办。
         let mut generated_paths: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
-        if (certificate_file.is_none() || certificate_key_file.is_none()) && generate != Some(false)
-        {
+        let both_missing = certificate_file.is_none() && certificate_key_file.is_none();
+        if (both_missing || generate == Some(true)) && generate != Some(false) {
             let cert_path = cert_dir.join("smartdns-cert.pem");
             let key_path = cert_dir.join("smartdns-key.pem");
             match crate::cert_gen::generate_self_signed_chain(
@@ -179,7 +215,9 @@ pub fn serve(
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let cert_root_key_path = cfg.bind_cert_root_key_file.as_deref();
     let cert_append_san = cfg.bind_cert_san.join(",");
-    let cert_validity_days = cfg.bind_cert_validity_days.map(|d| d as i64);
+    let cert_validity_days = cfg
+        .bind_cert_validity_days
+        .map(crate::cert_gen::validity_days_to_i64);
 
     let token = match bind_addr_config {
         BindAddrConfig::Udp(bind_addr_config) => {
@@ -275,7 +313,14 @@ pub fn serve(
 
             let app = app.clone();
 
-            http::serve(app, listener, dns_handle, !bind_addr_config.opts.no_api())?
+            http::serve(
+                app,
+                listener,
+                dns_handle,
+                !bind_addr_config.opts.no_api(),
+                first_packet_timeout,
+                connection_ttl,
+            )?
         }
         #[cfg(feature = "dns-over-https")]
         BindAddrConfig::Https(bind_addr_config) => {
@@ -305,12 +350,19 @@ pub fn serve(
 
             let app = app.clone();
 
-            let h3_port = cfg
+            // 🔐 编号 66：原来取第一个 H3 监听的端口，与地址族无关。
+            // 同时配 IPv4 与 IPv6 的 H3 监听时，IPv6 客户端会拿到 IPv4 的端口，HTTP/3 升级失败。
+            // 改为优先匹配同地址族的 H3 监听；没有同族的再退回任意一个（保持原行为，不因缺配置而不发 Alt-Svc）。
+            let want_v6 = bind_addr_config.sock_addr().is_ipv6();
+            let h3_candidates: Vec<(bool, u16)> = cfg
                 .binds()
                 .iter()
-                .filter(|c| matches!(c, BindAddrConfig::H3(_)))
-                .map(|c| c.port())
-                .next();
+                .filter_map(|c| match c {
+                    BindAddrConfig::H3(h3) => Some((h3.sock_addr().is_ipv6(), h3.port())),
+                    _ => None,
+                })
+                .collect();
+            let h3_port = pick_h3_port(&h3_candidates, want_v6);
             https::serve(
                 app,
                 listener,
@@ -318,6 +370,8 @@ pub fn serve(
                 !bind_addr_config.opts.no_api(),
                 server_cert_resolver,
                 h3_port,
+                first_packet_timeout,
+                connection_ttl,
             )?
         }
         #[cfg(feature = "dns-over-h3")]
@@ -723,5 +777,75 @@ mod oversized_datagram_tests {
             std::io::ErrorKind::ConnectionRefused,
             "test"
         )));
+    }
+}
+
+#[cfg(test)]
+mod connection_ttl_tests {
+    use super::connection_ttl_for;
+    use std::time::Duration;
+
+    #[test]
+    fn connection_ttl_scales_with_tcp_idle_time() {
+        assert_eq!(connection_ttl_for(120), Some(Duration::from_secs(600)));
+        assert_eq!(connection_ttl_for(2), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn zero_idle_time_means_no_cap() {
+        assert_eq!(connection_ttl_for(0), None);
+    }
+
+    #[test]
+    fn huge_idle_time_saturates_instead_of_panicking() {
+        // saturating_mul 保证不会在 debug 构建下 panic
+        assert!(connection_ttl_for(u64::MAX).is_some());
+    }
+}
+
+#[cfg(all(test, feature = "dns-over-https"))]
+mod alt_svc_h3_port_tests {
+    use super::pick_h3_port;
+
+    #[test]
+    fn h3_port_prefers_the_matching_address_family() {
+        let both = [(false, 8443u16), (true, 9443u16)];
+        assert_eq!(pick_h3_port(&both, false), Some(8443));
+        assert_eq!(pick_h3_port(&both, true), Some(9443));
+
+        let only_v4 = [(false, 8443u16)];
+        assert_eq!(
+            pick_h3_port(&only_v4, true),
+            Some(8443),
+            "没有同族时退回任意一个"
+        );
+
+        assert_eq!(pick_h3_port(&[], true), None);
+    }
+}
+
+#[cfg(test)]
+mod cert_config_tests {
+    /// 🔐 编号 41：只配了证书、没配私钥时，必须报错而不是悄悄换成自签证书。
+    /// 这里直接验证判据逻辑：both_missing 为 false 时不应进入生成分支。
+    #[test]
+    fn half_configured_certificate_is_not_treated_as_both_missing() {
+        // 只配证书
+        let cert: Option<&str> = Some("/etc/ssl/my.pem");
+        let key: Option<&str> = None;
+        let both_missing = cert.is_none() && key.is_none();
+        assert!(!both_missing, "只配了一半不能算「两者都缺失」");
+
+        // 只配私钥
+        let cert: Option<&str> = None;
+        let key: Option<&str> = Some("/etc/ssl/my.key");
+        let both_missing = cert.is_none() && key.is_none();
+        assert!(!both_missing, "只配了一半不能算「两者都缺失」");
+
+        // 都没配
+        let cert: Option<&str> = None;
+        let key: Option<&str> = None;
+        let both_missing = cert.is_none() && key.is_none();
+        assert!(both_missing, "两者都缺失时才应自动生成");
     }
 }

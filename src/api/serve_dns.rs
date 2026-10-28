@@ -192,7 +192,7 @@ async fn process(
             // 🌟 核心防线：抛弃存在隐患的 FromRequest 默认提取器，直接读取底层 Body！
             // 强行施加 64KB 物理截断（DNS 协议理论最大极限），超过该字节数底层的读取器会直接抛错掐断流。
             // 这巧妙规避了 Axum `Router::merge` 会静默丢失 Layer 的深坑，精准且彻底地封死了 DoH 的 OOM 攻击面！
-            let bytes = axum::body::to_bytes(req.into_body(), 65536).await?;
+            let bytes = axum::body::to_bytes(req.into_body(), MAX_DNS_MESSAGE).await?;
             SerialMessage::binary(bytes, addr, Protocol::Https)
         }
     };
@@ -338,6 +338,10 @@ fn accepts_dns_message(accept: &str) -> bool {
     })
 }
 
+/// 🔐 编号 49：DNS 报文的最大长度（与 POST 分支的 64 KB 物理截断保持一致）。
+/// 原来 `?dns=` 分支没有上限，超长 base64 会先被完整解码进内存。
+const MAX_DNS_MESSAGE: usize = 65536;
+
 /// 🔐 问题 33：解 RFC 8484 的 `?dns=<base64url>`。
 ///
 /// RFC 8484 规定用的是 **base64url、且不带 `=` 填充**（见该 RFC 第 4.1 节）。
@@ -350,11 +354,31 @@ fn decode_dns_param(encoded: &str) -> Result<Vec<u8>, String> {
     // 容错：URL 里 `+` 有时被写成空格（表单编码的残留），顺手换回来。
     let normalized = encoded.trim().replace(' ', "+");
 
-    base64::decode_config(normalized.trim_end_matches('='), base64::URL_SAFE_NO_PAD).map_err(
-        |err| {
+    // 🔐 编号 49：解码**之前**先按 base64 长度估算上限。
+    // 先解码再检查没有意义 —— 内存那时已经分配了。
+    // base64 每 4 个字符编码 3 字节，因此解码后长度约为 `len * 3 / 4`。
+    let estimated = normalized.len() / 4 * 3;
+    if estimated > MAX_DNS_MESSAGE {
+        return Err(format!(
+            "the `dns` parameter is too large: about {estimated} bytes after decoding, \
+             the limit is {MAX_DNS_MESSAGE} bytes"
+        ));
+    }
+
+    let decoded = base64::decode_config(normalized.trim_end_matches('='), base64::URL_SAFE_NO_PAD)
+        .map_err(|err| {
             format!("invalid `dns` parameter: it must be base64url-encoded DNS wire data ({err})")
-        },
-    )
+        })?;
+
+    // 解码后再复核一次实际长度，防止估算偏差（例如填充字符的处理差异）。
+    if decoded.len() > MAX_DNS_MESSAGE {
+        return Err(format!(
+            "the `dns` parameter decodes to {} bytes; the limit is {MAX_DNS_MESSAGE} bytes",
+            decoded.len()
+        ));
+    }
+
+    Ok(decoded)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -673,5 +697,34 @@ mod tests {
         .expect("?dns= 形式没有 name，也必须能解析");
         assert!(p.name.is_none(), "?dns= 形式本就不带 name");
         assert!(p.dns.is_some(), "dns 参数应被收下");
+    }
+}
+
+#[cfg(test)]
+mod dns_param_size_tests {
+    use super::*;
+
+    /// 🔐 编号 49：超长的 `?dns=` 参数必须在解码前就被拒绝，不能先分配内存。
+    #[test]
+    fn oversized_dns_param_is_rejected() {
+        // 构造一个远超 64 KB 的 base64 串（全是 'A'，合法 base64 字符）
+        let huge = "A".repeat(200_000);
+        let err = decode_dns_param(&huge).expect_err("超长参数必须被拒绝");
+        assert!(
+            err.contains("too large") || err.contains("limit"),
+            "错误信息必须说明超限，实际: {err}"
+        );
+    }
+
+    /// 正常长度的参数必须照常解码（回归保护）。
+    #[test]
+    fn normal_dns_param_still_decodes() {
+        // 一个最小的合法 DNS 查询报文：id + flags + qdcount=1，其余为 0
+        let wire: Vec<u8> = vec![
+            0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let encoded = base64::encode_config(&wire, base64::URL_SAFE_NO_PAD);
+        let decoded = decode_dns_param(&encoded).expect("正常参数必须能解码");
+        assert_eq!(decoded, wire);
     }
 }

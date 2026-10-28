@@ -10,6 +10,11 @@ use tokio::time::{sleep, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
+// 🔐 编号 64：原来固定 1024 字节。带完整选项的 DHCP 应答常见 1200–1500 字节，
+// 超过缓冲时 `recv_from` 会**截断**（UDP 语义），`verify_reply` 解析失败后整个应答被丢弃，
+// 表现为"该网段没有 DHCP 服务器"。改为 4096 字节，覆盖以太网 MTU 内的全部 DHCP 应答。
+const DHCP_RECV_BUF: usize = 4096;
+
 pub fn find_interface_by_name(name: Option<&str>) -> Result<NetworkInterface> {
     match name {
         Some(name) => netdev::get_interfaces()
@@ -53,7 +58,7 @@ async fn send_message(
 
     udp_socket.send_to(&message.to_vec()?, dst_addr).await?;
 
-    let mut buf = vec![0; 1024];
+    let mut buf = vec![0; DHCP_RECV_BUF];
 
     // P1-3 / R-P2-12 修复：循环收包并逐包核验，丢弃一切不属于本次事务的包，
     // 直到 3 秒外层超时（discover_v4 的 timeout 包裹）或拿到合法应答为止。
@@ -61,6 +66,13 @@ async fn send_message(
     // 服务器单播地址，因此只核验来源端口与事务号，不校验来源 IP。
     loop {
         let (n, src) = udp_socket.recv_from(&mut buf[..]).await?;
+        if n == DHCP_RECV_BUF {
+            // 缓冲区被填满：应答可能更长、已被截断。解析结果不可信，跳过这一包。
+            log::warn!(
+                "dhcp: reply from {src} filled the whole {DHCP_RECV_BUF}-byte buffer and may be truncated; ignoring it"
+            );
+            continue;
+        }
         match verify_reply(&buf[..n], src, expected_xid) {
             Ok(res) => break Ok(res),
             Err(reason) => {
@@ -223,6 +235,16 @@ impl DhcpMessageExt for v4::Message {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn dhcp_recv_buffer_covers_typical_replies() {
+        // 🔐 编号 64：带完整选项的 DHCP 应答常见 1200–1500 字节，
+        // 缓冲必须大于这个范围，否则应答会被截断丢弃。
+        assert!(
+            DHCP_RECV_BUF >= 1500,
+            "buffer must hold a full-MTU DHCP reply"
+        );
+    }
 
     #[ignore = "需要局域网内存在真实 DHCP 服务器：本测试会在本机网段实际发出 DHCP DISCOVER"]
     #[tokio::test]

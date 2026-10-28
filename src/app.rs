@@ -278,8 +278,8 @@ impl App {
                     bind_addr,
                     dns_handle,
                     idle_time,
-                    certificate_file,
-                    certificate_key_file,
+                    certificate_file.as_deref(),
+                    certificate_key_file.as_deref(),
                 );
 
                 match serve_handle {
@@ -406,8 +406,8 @@ impl App {
                 &bind_addr,
                 &self.dns_handle,
                 idle_time,
-                certificate_file,
-                certificate_key_file,
+                certificate_file.as_deref(),
+                certificate_key_file.as_deref(),
             ) {
                 Ok(server) => {
                     let addr = bind_addr.sock_addr();
@@ -995,9 +995,10 @@ async fn process_inner(
                                                 // 正是问题 24 那类分叉的成因）。
                                                 let group =
                                                     handler.rule_group_name(&request, &server_opts);
+                                                // 此处只有规则组上下文，读不到域名规则级；域名规则级 rr-ttl 由 dns_mw_addr.rs 等中间件在自己的路径上处理。
                                                 let soa_ttl = handler
                                                     .cfg()
-                                                    .rr_ttl()
+                                                    .rr_ttl_in_group(&group)
                                                     .map(|v| v as u32)
                                                     .unwrap_or(60)
                                                     .min(
@@ -1197,11 +1198,14 @@ fn build_middleware(
     use crate::dns_mw_ns::NameServerMiddleware;
     use crate::dns_mw_zone::DnsZoneMiddleware;
 
+    let arp_resolver = Arc::new(crate::infra::arp::ArpResolver::new());
+
     let middleware_handler = {
         let mut builder = DnsMiddlewareBuilder::new();
+        builder = builder.with_arp_resolver(arp_resolver.clone());
 
         // 🌟 将客户端分流拦截器插在最前面
-        builder = builder.with(ClientRuleMiddleware::new()); // 🌟 挂载带有 LRU 缓存的实体实例
+        builder = builder.with(ClientRuleMiddleware::with_resolver(arp_resolver.clone()));
 
         // check if audit enabled.
         // 🔐 P3-11：`audit-num 0`＝禁用审计文件输出（对齐 C 版 tlog_open 语义：
@@ -1264,7 +1268,7 @@ fn build_middleware(
             ));
         }
 
-        builder = builder.with(DnsZoneMiddleware::new());
+        builder = builder.with(DnsZoneMiddleware::new(arp_resolver.clone()));
 
         builder = builder.with(AddressMiddleware);
 
@@ -1353,24 +1357,15 @@ mod force_no_cname_mount_tests {
     }
 }
 
-// 缓存结构：IP -> (MAC, 过期时间)
-type ArpCache = std::sync::Arc<
-    std::sync::Mutex<lru::LruCache<std::net::IpAddr, (Option<String>, std::time::Instant)>>,
->;
-
-// 🌟 终极形态：支持 IP 与 MAC 双重分流的客户端规则中间件（搭载全局 LRU 缓存防雪崩）
+// 🌟 终极形态：支持 IP 与 MAC 双重分流的客户端规则中间件（共享全局 ARP 解析器）
 struct ClientRuleMiddleware {
-    arp_cache: ArpCache,
+    arp_resolver: Arc<crate::infra::arp::ArpResolver>,
 }
 
 impl ClientRuleMiddleware {
-    fn new() -> Self {
+    pub fn with_resolver(resolver: Arc<crate::infra::arp::ArpResolver>) -> Self {
         Self {
-            // 🌟 严格设置 4096 的容量上限。即使面对极端恶意的局域网源 IP 泛洪扫描，
-            // LRU 机制也会自动淘汰旧记录，绝不引发 OOM 内存溢出。
-            arp_cache: std::sync::Arc::new(std::sync::Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(4096).unwrap(),
-            ))),
+            arp_resolver: resolver,
         }
     }
 }
@@ -1421,50 +1416,9 @@ impl
                     let mac_opt = match &client_mac {
                         Some(m) => m.clone(),
                         None => {
-                            let now = std::time::Instant::now();
-
-                            // 1. 尝试从全局 LRU 缓存中光速读取 (极低竞争的 Mutex，0 阻塞)
-                            let cached_mac = {
-                                let mut cache =
-                                    self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
-                                if let Some((mac, expire_at)) = cache.get(&arp_ip) {
-                                    if now < *expire_at {
-                                        Some(mac.clone()) // 命中且未过期
-                                    } else {
-                                        None // 已过期
-                                    }
-                                } else {
-                                    None // 未命中
-                                }
-                            };
-
-                            let m = if let Some(mac) = cached_mac {
-                                mac // 缓存命中，极速返回！
-                            } else {
-                                // 2. 缓存穿透：
-                                // 🌟 核心修复：把极耗时的系统调用（查底层 ARP 表 / 执行系统命令）扔给专属的阻塞线程池。
-                                // 彻底杜绝使用 block_in_place 导致 Tokio 核心工作线程被挂起和引发线程重建雪崩！
-                                let ip = arp_ip;
-                                let fetched_mac = tokio::task::spawn_blocking(move || {
-                                    crate::infra::arp::lookup_client_mac_from_arp(ip)
-                                })
-                                .await
-                                .unwrap_or(None);
-
-                                // 3. 将结果写回全局 LRU 缓存，并赋予它 60 秒 的生命周期
-                                let mut cache =
-                                    self.arp_cache.lock().unwrap_or_else(|e| e.into_inner());
-                                cache.put(
-                                    arp_ip,
-                                    (
-                                        fetched_mac.clone(),
-                                        now + std::time::Duration::from_secs(60),
-                                    ),
-                                );
-
-                                fetched_mac
-                            };
-
+                            // 共享解析器统一负责 60 秒缓存、同 IP 并发折叠与 spawn_blocking；
+                            // 这里仍用真实对端地址，绝不能改用可伪造的转发地址。
+                            let m = self.arp_resolver.lookup(arp_ip).await;
                             client_mac = Some(m.clone());
                             m
                         }

@@ -46,16 +46,19 @@ impl NomParser for DomainRule {
             // 🔐 Q21：`domain-rules /域/ -nftset #4:family#table#set` 与 `-ipset #4:name`
             // 语法与独立指令一致（C 版 `dns_conf/domain_rule.c:1055` 也是这两个选项）。
             // 值里不必再写域名 —— 域名就是这条规则自己的。
+            // 🔐 编号 35：一行内可重复写 `-nftset`（`one` 是 separated_list1），
+            // 原来的覆盖赋值会让前面那些静默丢失。跨行的合并由 `DomainRule::add_assign`
+            // 负责累加，一行内也必须累加，两种写法语义才一致。
             map(
                 parse_value(alt((tag_no_case("nftset"), tag("t"))), NomParser::parse),
                 |v| {
-                    rule.nftset = Some(v);
+                    rule.nftset.get_or_insert_with(Vec::new).push(v);
                 },
             ),
             map(
                 parse_value(alt((tag_no_case("ipset"), tag("p"))), NomParser::parse),
                 |v| {
-                    rule.ipset = Some(v);
+                    rule.ipset.get_or_insert_with(Vec::new).push(v);
                 },
             ),
             map(parse_value(tag_no_case("subnet"), NomParser::parse), |v| {
@@ -224,6 +227,20 @@ mod tests {
                     ..Default::default()
                 }
             ))
+        );
+    }
+
+    /// 🔐 编号 35：一行内写两个 `-nftset`，两个都必须保留（原来只留最后一个）。
+    #[test]
+    fn multiple_nftset_options_on_one_line_are_all_kept() {
+        let (_, rule) =
+            DomainRule::parse("-nftset #4:inet#t#s1 -nftset #4:inet#t#s2").expect("should parse");
+        let nftset = rule.nftset.expect("nftset should be present");
+        assert_eq!(
+            nftset.len(),
+            2,
+            "一行内两个 -nftset 都必须保留，实际 {:?}",
+            nftset
         );
     }
 }

@@ -17,29 +17,29 @@ use core::{
     time::Duration,
 };
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{hash_map::Entry, HashMap},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures_channel::mpsc;
 use futures_util::{
-    FutureExt,
     future::Future,
     ready,
     stream::{Stream, StreamExt},
+    FutureExt,
 };
 use rand::Rng;
 use tracing::debug;
 
 use crate::{
-    DnsStreamHandle,
     error::{ProtoError, ProtoErrorKind},
     op::{MessageSigner, MessageVerifier},
     runtime::Time,
     xfer::{
-        BufDnsStreamHandle, CHANNEL_BUFFER_SIZE, DnsClientStream, DnsRequest, DnsRequestSender,
-        DnsResponse, DnsResponseStream, SerialMessage, ignore_send,
+        ignore_send, BufDnsStreamHandle, DnsClientStream, DnsRequest, DnsRequestSender,
+        DnsResponse, DnsResponseStream, SerialMessage, CHANNEL_BUFFER_SIZE,
     },
+    DnsStreamHandle,
 };
 
 const QOS_MAX_RECEIVE_MSGS: usize = 100; // max number of messages to receive from the UDP socket
@@ -266,7 +266,7 @@ where
 {
     fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
-            panic!("can not send messages after stream is shutdown")
+            return ProtoError::from("can not send messages after stream is shutdown").into();
         }
 
         if self.active_requests.len() > CHANNEL_BUFFER_SIZE {
@@ -484,12 +484,11 @@ mod test {
             let id = if let Some(id) = self.id {
                 id
             } else {
-                let serial = ready!(
-                    self.receiver
-                        .as_mut()
-                        .expect("should only be polled after receiver has been set")
-                        .poll_next_unpin(cx)
-                );
+                let serial = ready!(self
+                    .receiver
+                    .as_mut()
+                    .expect("should only be polled after receiver has been set")
+                    .poll_next_unpin(cx));
                 let message = serial.unwrap().to_message().unwrap();
                 self.id = Some(message.id());
                 message.id()

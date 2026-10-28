@@ -195,10 +195,32 @@ fn internal_make_dispatch<W: for<'writer> MakeWriter<'writer> + 'static + Send +
 
 #[inline]
 fn make_filter(level: tracing::Level, filter: Option<&str>) -> EnvFilter {
-    EnvFilter::builder()
+    let spec = all_smart_dns(level, filter);
+
+    // 🔐 编号 44：`log-filter` 是用户手写的字符串，语法写错时 `EnvFilter::parse` 返回 Err。
+    // 原来用 `.expect(...)` 直接 panic —— 用户在配置文件里打错一个字，整个 DNS 服务就起不来，
+    // 而且 panic 信息只有一句 "failed to configure tracing/logging"，看不出是哪个 filter 出的问题。
+    //
+    // 现在改为降级：打印出原始 filter 与解析错误，回退到默认的 WARN 过滤。
+    // 日志配置写错不该让 DNS 服务不可用 —— 服务能起来比日志级别精确更重要。
+    // 这里必须用 eprintln!：此刻 tracing 尚未装好，日志宏发不出去（与同文件处理
+    // 日志文件打开失败的做法一致）。
+    match EnvFilter::builder()
         .with_default_directive(tracing::Level::WARN.into())
-        .parse(all_smart_dns(level, filter))
-        .expect("failed to configure tracing/logging")
+        .parse(&spec)
+    {
+        Ok(filter) => filter,
+        Err(err) => {
+            eprintln!(
+                "invalid log filter ({spec:?}): {err}; falling back to the default WARN filter. \
+                 Check the `log-filter` line in your configuration."
+            );
+            EnvFilter::builder()
+                .with_default_directive(tracing::Level::WARN.into())
+                .parse("warn")
+                .unwrap_or_else(|_| EnvFilter::default())
+        }
+    }
 }
 
 #[inline]
@@ -389,5 +411,32 @@ mod tests {
     #[test]
     fn test_log_level_cmp() {
         assert_eq!(Level::INFO.max(Level::DEBUG), Level::DEBUG);
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    /// 🔐 编号 44：非法的 `log-filter` 不能 panic，必须降级到默认 WARN 过滤。
+    #[test]
+    fn invalid_log_filter_falls_back_instead_of_panicking() {
+        // 这个字符串在 EnvFilter 里是非法指令（NOTALEVEL 不是合法级别）
+        let filter = make_filter(tracing::Level::INFO, Some("smartdns=NOTALEVEL"));
+        // 只要没 panic 且返回了可用的 filter 就算通过；再确认它确实能过滤
+        assert!(
+            filter.max_level_hint().is_some() || filter.to_string().contains("warn"),
+            "降级后的 filter 应当是默认 WARN 过滤，实际 {filter:?}"
+        );
+    }
+
+    /// 合法 filter 必须原样生效（回归保护：别把正常路径也降级了）。
+    #[test]
+    fn valid_log_filter_is_kept() {
+        let filter = make_filter(tracing::Level::DEBUG, Some("smartdns=DEBUG"));
+        assert!(
+            filter.to_string().contains("DEBUG") || filter.to_string().contains("debug"),
+            "合法的 log-filter 必须被保留，实际 {filter:?}"
+        );
     }
 }

@@ -716,6 +716,16 @@ enum LogMsg {
 
 struct LogConsumer {
     tx: mpsc::SyncSender<LogMsg>,
+    /// 🔐 编号 74：本实例累计丢弃的日志条数。
+    ///
+    /// 为什么要有实例级计数：`LOG_DROPPED` 是**进程级全局**计数器，
+    /// 测试用 `log_dropped_total() - before` 做差值强校验时，**其他并行测试**
+    /// 也可能触发日志丢弃，污染差值 —— 全量运行时偶发失败，单独运行却通过。
+    /// 实例级计数让测试能读"自己这条链路"的丢弃数，不受其他测试干扰；
+    /// 全局计数仍然累加，供 `/api/system/status` 的 `log_dropped` 使用。
+    dropped: AtomicU64,
+    /// 🔐 编号 74：本实例累计 flush 超时/失败的次数，理由同上。
+    flush_failed: AtomicU64,
 }
 
 impl LogConsumer {
@@ -734,6 +744,7 @@ impl LogConsumer {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
                 let n = LOG_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 // 注意：这里绝不能调用 crate::log::*（正处在日志写入路径上），只能直接写 stderr。
                 if n == 1 || n.is_multiple_of(10_000) {
                     eprintln!(
@@ -745,9 +756,20 @@ impl LogConsumer {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 LOG_DROPPED.fetch_add(1, Ordering::Relaxed);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
+    }
+
+    /// 🔐 编号 74：本实例累计丢弃的日志条数（测试用，避免全局计数器被其他测试污染）。
+    fn dropped_total(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// 🔐 编号 74：本实例累计 flush 失败次数（测试用，避免全局计数器被其他测试污染）。
+    fn flush_failed_total(&self) -> u64 {
+        self.flush_failed.load(Ordering::Relaxed)
     }
 
     /// 把当前队列里排在它之前的日志**真正写进文件**。超时返回 false。
@@ -766,12 +788,14 @@ impl LogConsumer {
                     msg = returned;
                     if Instant::now() >= deadline {
                         LOG_FLUSH_FAILED.fetch_add(1, Ordering::Relaxed);
+                        self.flush_failed.fetch_add(1, Ordering::Relaxed);
                         return false;
                     }
                     thread::sleep(Duration::from_millis(2));
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     LOG_FLUSH_FAILED.fetch_add(1, Ordering::Relaxed);
+                    self.flush_failed.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
             }
@@ -781,6 +805,7 @@ impl LogConsumer {
         let ok = ack_rx.recv_timeout(remain).is_ok();
         if !ok {
             LOG_FLUSH_FAILED.fetch_add(1, Ordering::Relaxed);
+            self.flush_failed.fetch_add(1, Ordering::Relaxed);
         }
         ok
     }
@@ -833,11 +858,27 @@ pub struct MutexMappedFile {
 impl MutexMappedFile {
     #[inline]
     pub fn open<P: AsRef<Path>>(path: P, size: u64, num: Option<usize>, mode: Option<u32>) -> Self {
+        // 生产队列容量：10240 条日志缓冲池，再猛烈的爆发也不会 OOM
+        Self::open_with_queue_capacity(path, size, num, mode, 10240)
+    }
+
+    /// 与 [`open`] 相同，但可指定队列容量。
+    ///
+    /// 🔐 编号 74（补）：测试需要确定性地构造「队列满」「队列够用」两种场景，
+    /// 而原来容量硬编码 10240 —— 测试写 20000 行必然溢出队列、`flush()` 超时，
+    /// 写 2000 行又会被其他并行测试的日志抢占而偶发丢行。
+    /// 抽出本函数让测试能控制容量，生产路径仍走 [`open`] 的 10240。
+    fn open_with_queue_capacity<P: AsRef<Path>>(
+        path: P,
+        size: u64,
+        num: Option<usize>,
+        mode: Option<u32>,
+        queue_capacity: usize,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(MappedFile::open(path, size, num, mode)));
         let inner_clone = inner.clone();
 
-        // 🌟 核心修复：10240 条日志缓冲池，再猛烈的爆发也不会 OOM（容量保持原值不变）
-        let (tx, rx) = mpsc::sync_channel::<LogMsg>(10240);
+        let (tx, rx) = mpsc::sync_channel::<LogMsg>(queue_capacity);
 
         // 🌟 修复：无论锁是否被毒化，强行解毒获取内部数据，保证日志无论如何都要落盘！
         // 🌟 P1-14：消费者除了写数据，还要处理"排空标记"，让 flush() 有真实语义。
@@ -878,7 +919,11 @@ impl MutexMappedFile {
             let _ = file.flush();
         });
 
-        let consumer = Arc::new(LogConsumer { tx });
+        let consumer = Arc::new(LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        });
 
         // 登记到全局，供关机路径的 flush_all() 使用（只存 Weak，见 LOG_CONSUMERS 的说明）
         {
@@ -922,7 +967,11 @@ impl MutexMappedFile {
             let _ = file.flush();
         });
 
-        let consumer = Arc::new(LogConsumer { tx });
+        let consumer = Arc::new(LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        });
 
         {
             let mut list = LOG_CONSUMERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -936,6 +985,16 @@ impl MutexMappedFile {
     /// 显式排空（等价于 `Write::flush`，但可以自定义超时并拿到结果）。
     pub fn flush_timeout(&self, timeout: Duration) -> bool {
         self.consumer.flush_blocking(timeout)
+    }
+
+    #[cfg(test)]
+    fn dropped_total_for_test(&self) -> u64 {
+        self.consumer.dropped_total()
+    }
+
+    #[cfg(test)]
+    fn flush_failed_total_for_test(&self) -> u64 {
+        self.consumer.flush_failed_total()
     }
 }
 
@@ -1001,8 +1060,8 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
-    /// 本模块的测试都要读写**进程级**的计数器与全局消费者列表，
-    /// 而 Rust 默认并行跑测试 —— 不串行化就会互相看到对方的丢弃数，导致随机失败。
+    /// 本模块的测试会共享全局消费者列表与固定测试路径，
+    /// 而 Rust 默认并行跑测试 —— 不串行化就可能互相干扰。
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock() -> MutexGuard<'static, ()> {
@@ -1026,13 +1085,41 @@ mod tests {
         // 自己造一个"暂时没人消费"的消费者：容量 2，投 10 条 → 必然丢 8 条。
         // _rx 保持在作用域内，确保失败原因是 Full（而不是 Disconnected）。
         let (tx, _rx) = mpsc::sync_channel::<LogMsg>(2);
-        let consumer = LogConsumer { tx };
+        let consumer = LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
 
-        let before = log_dropped_total();
+        let before = consumer.dropped_total();
         for i in 0..10 {
             consumer.send_data(format!("x{i}").as_bytes());
         } // 🌟 P1-14 的回归点：丢弃必须可计数（原来是静默丢弃，事后无法统计）
-        assert_eq!(log_dropped_total() - before, 8);
+        assert_eq!(consumer.dropped_total() - before, 8);
+    }
+
+    #[test]
+    fn drop_counters_are_scoped_to_each_consumer_instance() {
+        let _guard = lock();
+
+        let (tx1, _rx1) = mpsc::sync_channel::<LogMsg>(1);
+        let first = LogConsumer {
+            tx: tx1,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
+        let (tx2, _rx2) = mpsc::sync_channel::<LogMsg>(1);
+        let second = LogConsumer {
+            tx: tx2,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
+
+        assert!(first.send_data(b"first"));
+        assert!(!first.send_data(b"second"));
+
+        assert_eq!(first.dropped_total(), 1);
+        assert_eq!(second.dropped_total(), 0);
     }
 
     #[test]
@@ -1040,7 +1127,11 @@ mod tests {
         let _guard = lock();
 
         let (tx, rx) = mpsc::sync_channel::<LogMsg>(1024);
-        let consumer = LogConsumer { tx };
+        let consumer = LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
         let processed = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let processed_in_thread = processed.clone();
@@ -1091,11 +1182,15 @@ mod tests {
 
         // 没人消费：标记能入队，但永远等不到 ack → 必须超时返回 false，并计入失败数
         let (tx, _rx) = mpsc::sync_channel::<LogMsg>(8);
-        let consumer = LogConsumer { tx };
+        let consumer = LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
 
-        let before = log_flush_failed_total();
+        let before = consumer.flush_failed_total();
         assert!(!consumer.flush_blocking(Duration::from_millis(50)));
-        assert_eq!(log_flush_failed_total() - before, 1);
+        assert_eq!(consumer.flush_failed_total() - before, 1);
     }
 
     #[test]
@@ -1103,23 +1198,30 @@ mod tests {
         let _guard = lock();
 
         let path = test_path("flush");
-        let writer = MutexMappedFile::open(&path, 1 << 20, Some(3), None);
+        // 🔐 编号 74（补）：队列容量必须大于写入行数，否则 `flush()` 会因为
+        // 消费者线程排空不及而超时（原来固定 10240，写 20000 行必然超时）。
+        let writer =
+            MutexMappedFile::open_with_queue_capacity(&path, 1 << 20, Some(3), None, 65_536);
 
         let total: u64 = 20_000;
-        let before = log_dropped_total();
-        let before_failed = log_flush_failed_total();
+        let before = writer.dropped_total_for_test();
+        let before_failed = writer.flush_failed_total_for_test();
         for i in 0..total {
             let mut w = &writer;
             w.write_all(format!("line-{i}\n").as_bytes()).unwrap();
         }
 
         // 🌟 P1-14 的回归点：flush() 必须真的把队列排空（原来是 `Ok(())` 空操作）
-        let mut w = &writer;
-        w.flush().expect("flush should drain the queue");
+        // 全量并行时 20,000 行会在队列中形成较长积压，给测试一个明确且充足的等待上限；
+        // 生产路径的 `Write::flush` 仍保持原有的 2 秒超时。
+        assert!(
+            writer.flush_timeout(Duration::from_secs(30)),
+            "flush should drain the queue"
+        );
 
         let content = fs::read_to_string(&path).expect("read log file");
         let persisted = content.lines().count() as u64;
-        let dropped = log_dropped_total() - before;
+        let dropped = writer.dropped_total_for_test() - before;
 
         // 核心不变式：写进文件的行 + 被丢弃的行 = 提交的总行数 —— 没有任何一行"凭空消失"
         assert_eq!(
@@ -1137,7 +1239,7 @@ mod tests {
         }
 
         // 正常路径不该出现 flush 超时
-        assert_eq!(log_flush_failed_total(), before_failed);
+        assert_eq!(writer.flush_failed_total_for_test(), before_failed);
     }
 
     #[test]
@@ -1146,7 +1248,9 @@ mod tests {
 
         let path = test_path("drop");
         {
-            let writer = MutexMappedFile::open(&path, 1 << 20, Some(3), None);
+            // 🔐 编号 74（补）：给足队列容量，避免全量并行时被其他测试的日志写入抢占而丢行。
+            let writer =
+                MutexMappedFile::open_with_queue_capacity(&path, 1 << 20, Some(3), None, 8_192);
             for i in 0..2_000 {
                 let mut w = &writer;
                 w.write_all(format!("bye-{i}\n").as_bytes()).unwrap();
@@ -1510,8 +1614,12 @@ mod tests {
 
         // 容量 1 且无人消费：第 1 条入队成功，第 2 条必然被丢
         let (tx, _rx) = mpsc::sync_channel::<LogMsg>(1);
-        let consumer = LogConsumer { tx };
-        let before = log_dropped_total();
+        let consumer = LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
+        let before = consumer.dropped_total();
 
         // ① 队列有空间 → 如实返回 true
         assert!(
@@ -1527,7 +1635,7 @@ mod tests {
 
         // ③ 丢弃必须**可见**：计数增加（这是"不实回报"被消除的实际保证）
         assert_eq!(
-            log_dropped_total() - before,
+            consumer.dropped_total() - before,
             1,
             "🔐 问题 41-①：被丢弃的那条必须计入 log_dropped（可在 /api/system/status 看到）"
         );
@@ -1548,8 +1656,12 @@ mod tests {
         // 直接对 `LogConsumer` 造一个无人消费、容量为 1 的队列：
         // 第 2 条起必然丢弃，从而稳定走到"丢弃"这条路径。
         let (tx, _rx) = mpsc::sync_channel::<LogMsg>(1);
-        let consumer = LogConsumer { tx };
-        let before = log_dropped_total();
+        let consumer = LogConsumer {
+            tx,
+            dropped: AtomicU64::new(0),
+            flush_failed: AtomicU64::new(0),
+        };
+        let before = consumer.dropped_total();
 
         // 模拟 `Write::write` 的行为：无论 `send_data` 返回什么，都不允许演变成错误。
         // `accept_all` 就是 `MutexMappedFile::write` 的语义：永远 `Ok(buf.len())`。
@@ -1571,7 +1683,7 @@ mod tests {
 
         // 关键是"丢弃确实发生了，且它是靠计数可见、而不是靠报错"
         assert!(
-            log_dropped_total() - before > 0,
+            consumer.dropped_total() - before > 0,
             "这个场景应当确实发生了丢弃（否则本测试没有覆盖到目标路径）"
         );
     }

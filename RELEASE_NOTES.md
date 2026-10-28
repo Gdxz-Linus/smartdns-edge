@@ -1,69 +1,93 @@
 ### 概述
 
-修复 **63 个问题**，集中在解析结果的准确性、服务的稳定性与安全防御；新增自签证书自动生成、加密私钥支持等四项功能。升级无需改配置，原有配置文件可直接沿用。
+本次更新修复 **74 个问题**，覆盖解析正确性、服务稳定性、安全加固与配置行为。多数问题只在特定条件下显现，一旦发生会造成解析结果错误或服务异常。升级无需修改配置文件，有两处行为变化需要留意，见文末「升级须知」。
 
-### 新增功能
+### 解析正确性
 
-- **自签证书自动生成**：未配置证书时，TLS/HTTPS/H3 监听自动生成自签名证书链（含根 CA，默认有效期 390 天），支持 `bind-cert-generate`、`bind-cert-validity-days`、`bind-cert-san` 等参数。
-- **加密私钥支持**：TLS/HTTPS 上游与监听支持带口令的 PKCS#8 私钥；旧加密格式会给出明确的迁移提示。
-- **`-fallback` 上游标记**：被标记的上游平时不参与查询，只在同组其它上游都无法给出可用答案时启用。
+- **主域名的规则现在对子域名生效。** 此前 `domain-rules /example.com/ -rr-ttl 33` 只对 `example.com` 本身起作用，查询 `www.example.com` 时该规则不生效。现在子域名会继承主域名的设置；子域名另写规则时，以子域名为准。
+- **系统 hosts 文件此前从未被读取。** 配置了 `hosts-file` 也不生效，文件里的条目无法解析。现在正常读取。
+- **双栈查询时，一个地址族探测超时会连累另一个。** 主查询已经拿到结果，却因另一族的探测超时而返回 SERVFAIL。现在主查询不受影响。
+- **`ipv4only.arpa.` 的 AAAA 查询返回空应答。** 该域名用于探测 NAT64 前缀，空应答导致探测失败。现已修复。
+- **DNS64 的 /56 前缀合成出错。** 合成出的 IPv6 地址不正确。现已修复。
+- **同一域名配置多条 `address` 规则时只保留最后一条。** 其余规则静默丢失。现在全部生效。
+- **开启访问控制后，MAC 白名单内的客户端被全部拒绝。** 现已修复。
+- **一行内写多个 `-ipset` 或 `-nftset` 时只保留最后一个。** 现在全部写入。
+- **嵌套 `conf-file` 的通配符找错目录。** 子目录中的 `conf.d/*.conf` 匹配不到文件。现在以当前正在加载的配置文件为基准；路径含目录时，也不再退化为只按文件名查找。
+- **`bind-cert-file` 与 `bind-cert-key-file` 的相对路径找错目录。** 此前以启动时所在目录为基准，从不同目录启动会加载到不同证书，或直接加载失败。现在按配置文件所在目录解析。
+- **只配置证书或只配置私钥时，程序静默生成自签证书覆盖你的配置。** 服务照常启动，TLS 照常握手，但客户端校验必然失败。现在明确报错，指出缺少哪一项。
+- **域名集合文件支持制表符分隔。** 无法解析的行在启动时按条数告警，不再静默跳过。
+- **缓存刷新不再清零访问热度。** 此前被反复访问的域名只要遇上刷新，访问次数就掉回 1，永远达不到后台预取的门槛。现在只有后台预取才会重置。
+- **查不到记录时返回 SERVFAIL。** 程序自己构造的 SOA 记录无法还原，客户端会当成服务器故障反复重试。现在改为返回 NOERROR。
 
-### 修复
+### 服务稳定性
 
-**解析结果不对**
+- **DoQ 长连接不再在第 32 条查询后被断开。** 子流配额改为随子流结束归还。
+- **DoH 与明文 HTTP 监听增加读超时与空闲超时。** 慢速发送请求头的客户端不再能长期占用连接配额。
+- **QUIC 监听在端点关闭后不再持续占用一个处理器核心。**
+- **并发上限的检查与计数合并为一次操作。** 高并发下不再短暂突破 `max-query-limit` 的上限。
+- **ipset 写入在读取集合标志失败时不再整批失效。**
+- **netlink 连接关闭时不再无限循环。** 此前会让 ipset 写入永久卡住。
+- **DHCP 探测的收包缓冲从 1024 字节扩大到 4096 字节。** 带完整选项的应答此前被截断丢弃，表现为「该网段没有 DHCP 服务器」。
+- **UDP 上游遇到 HTTP 代理时自动改用 TCP 查询。** 此前直接报错，用户看到的是「DNS 完全不能用」。
+- **`log-filter` 写错不再导致启动失败。** 改为打印原始表达式与具体错误，然后回退到只记录警告及以上级别。
+- **SOCKS5 代理返回 `0.0.0.0:0` 中继地址时正常工作。**
+- **`max-reply-ip-num` 超出 1 至 16 时告警并取上限。**
+- **`bind-cert-validity-days` 设置超大值不再生成已过期证书。** 上限为 36500 天。
+- **ALT-SVC 通告的 HTTP/3 端口按地址族匹配。** 双栈监听时不再通告错误端口。
+- **TTL 上下限配置倒挂会引发崩溃。** 现已修复。
+- **AES-128-CBC 加密私钥解密失败。** 此前固定按 AES-256 处理。现已修复。
+- **Linux 下降权启动时遗漏 DoQ 证书预生成。** 现已修复。
+- **上游错误在并发合并时被丢弃。** 等待的查询只看到笼统失败。现在保留原始错误。
+- **HTTP/3 监听同步等待握手。** 恶意慢速客户端可阻塞整个监听。现已修复。
+- **mDNS 缺少默认端口时直接崩溃。** 现已修复。
+- **ICMPv4 差错回包固定按无选项的 IP 头解析。** 带 IP Options 的报文被丢弃。现已修复。
+- **ICMPv6 差错回包固定按无扩展报头解析。** 带扩展报头的报文被丢弃。现已修复。
+- **IPv6 mDNS 多播未绑定网卡时崩溃。** 现已修复。
+- **流关闭后并发发送消息会崩溃。** 现已修复。
+- **单个畸形 DHCP 选项导致后续合法选项全部丢弃。** 现已修复。
+- **`force-no-CNAME` 在监听与规则组配置下静默失效。** 现已修复。
 
-- 双栈优选（同时查 IPv4/IPv6 并择优）在部分场景下选错地址：缓存时间取了较慢的一方、空应答抢先返回、关闭测速后优选未随之失效、"强制 AAAA 返回 SOA"误拦了 A 记录查询。
-- DNS64 合成地址的前缀写法此前只支持 /96 一种；现按 RFC 6052 支持全部六种合法写法，写错的前缀在启动时即报错。
-- 域名中的数字转义写法（`\DDD`，如 `\067` 代表字母 C）此前按八进制解码，与 RFC 1035 不符；现改为十进制，配置解析与域名显示两端同步，超过 255 会明确报错。
-- SVCB/HTTPS 记录参数的写法在配置文件与实际查询中含义不一致；现已统一。
-- 同一条缓存记录只改了缓存时间时，更新被静默丢弃；现在会正常生效。
-- 内网设备的反向查询（PTR）此前直接返回"不存在"，hosts 文件与 DHCP 租约里的设备主机名无法反查；现已修复。
-- 带客户端子网（ECS）的缓存条目刷新时丢失子网信息，导致按地区缓存的结果被错误续期；现已修复。
+### 安全加固
 
-**稳定性**
+- **`/tmp` 下的锁文件可被他人预先放置的软链接利用。** 以 root 运行时，攻击者可借此截断任意文件。现在打开时会识别并拒绝软链接，同时校验文件属性。
+- **私钥写入存在可被读取的时间窗口。** 此前私钥先以默认权限写入、再收紧权限，这中间同机任意用户可读；权限收紧失败时也无人知晓。现在创建时即为严格权限，失败会明确报错。
+- **降权失败后不再继续以 root 运行。** 改为打印具体原因并退出。用户名写错时给出明确提示，不再输出一大段程序报错信息。
+- **管理接口的令牌校验在内部异常时不再整体崩溃。**
+- **口令失败计数表满后不再整表清空。** 此前可借此绕过限流。
+- **DoH3 与 DoH(HTTP/2) 的上游响应体增加 64 KB 上限。** 避免异常上游耗尽内存。
+- **DoH 的 `?dns=` 参数增加长度上限。** 与 POST 请求体的 64 KB 限制保持一致。
+- **DNS 报文不再按报文头声明的域名数量预分配内存。** 此前 12 字节的畸形报文可触发数兆字节的内存分配。
+- **配置写入接口不再静默截断回写内容。** 此前会丢掉文件中无法解析的其余行。
+- **Windows 下 ARP 查询的接收缓冲区越界写。** 现已修复。
+- **口令比对耗时随长度变化，可被用来推测口令。** 现已修复。
+- **DHCP 与 DHCPv6 报文解析的长度校验缺失。** 畸形报文此前可能崩溃，现在作为无效报文拒绝。
 
-- 监听端口持续出错时会空转占满处理器——现在按间隔退避，并降低日志刷屏频率。
-- 设备断开后连接配额未归还，导致新设备连不上——现已修复。
-- 上游返回"忙"时，重试没有间隔也不限次数，形成无限空转——现在重试间隔会逐步拉长，期间不再占用处理器。
-- TCP 连接上收到长度为 0 的报文时，整条连接被错误断开——现在跳过该报文、连接保持。
-- 缓存文件损坏导致反复启动失败——现在自动删除损坏文件并以空缓存重建。
-- 日志文件被外部工具轮转后，日志永久停写——现已自动恢复。
+### 配置行为
 
-**安全**
+- **拼错规则组名称现在会告警。** 此前规则静默失效。
+- **监听配置的 `enabled` 字段真正生效。** 此前写 `enabled: false` 的监听照样启动。
+- **审计日志的启用条件过于严格。** 此前强行要求 `audit-num > 0`，导致只配置控制台输出时不生效。现已修复。
+- **7 项配置的默认值与文档脱节。** 双语文档已校正，废弃的应急机制描述已清理。
 
-- 代理地址写错时，下载外部名单会跳过代理直接连网（结果可能被污染）——现在明确报错并中止。
-- 超大的 DoH 请求体现在直接拒绝，不再占用内存。
-- DoH 接口的错误提示不再包含内部地址信息（详情只进日志）。
-- 收到伪造的报文头时，程序会按头里声称的数量预占内存（最多数 MB）——现改为按实际数据逐步占用。
+### 升级须知
 
-### 服务管理
+1. **主域名的规则开始对子域名生效。** 若你的配置依赖旧行为，升级后结果会变。请检查写在主域名上的 `domain-rules`。
+2. **只配置证书或只配置私钥时会启动失败。** 此前会静默生成自签证书覆盖配置。请补齐另一项，或显式写 `bind-cert-generate yes`。
 
-- Linux 非 systemd 环境（initd）的服务脚本修正：设置/取消开机自启此前是空操作，现真正生效；默认配置文件不存在时不再卡住启动。
-
-### 其它改进
-
-- 内嵌组件的多处预防性修复：证书算法声明与实际能力不符、SOA 记录解析取错字段、参数名写法不一致、词法解析的转义与超长内容处理等。
-- 中文文档与 README 全量语言检查：去除了行话、口语与营销式措辞。
-- 配置模板修正：`ca-path` 示例拼写（/etc/ssl/certs）。
-
-### 规模与验证
-
-主仓库测试 **635 项全部通过**（Windows 实测），WSL 侧关键路径复测通过。变更规模：**40 文件 / +1323 −230**。
+其余配置无需改动。
 
 ---
 
 ## English
 
-Fixed **63 issues**, focused on resolution correctness, service stability and security; four new features including self-signed certificate auto-generation and encrypted private-key support. No config change needed to upgrade.
+This release fixes **74 issues** across resolution correctness, service stability, security hardening and configuration behaviour. Most surfaced only under specific conditions, but each could produce a wrong resolution result or a service failure. No configuration changes are required to upgrade; two behaviour changes deserve attention — see "Upgrade notes".
 
-**Resolution correctness** — dual-stack selection no longer picks wrong addresses (TTL taken from the slower side, empty answers winning races, selection staying active with speed check off, SOA override blocking A-record queries); DNS64 prefix layout is now fully RFC 6052 compliant (all six legal prefix lengths, invalid ones rejected at startup); `\DDD` escapes in names are decoded as decimal per RFC 1035 (was octal); SVCB/HTTPS key notation is now consistent between text and wire form; cache entries that differ only in TTL are no longer silently dropped; PTR queries for private addresses are no longer short-circuited, so LAN hostnames resolve again; ECS cache entries no longer lose their subnet on refresh.
+**Resolution correctness** — rules set on a parent domain now apply to its subdomains (previously `domain-rules /example.com/ -rr-ttl 33` only matched `example.com` itself); the system hosts file is now actually read, so entries in it resolve; a probe timeout in one address family no longer fails the other family's main query with SERVFAIL; `ipv4only.arpa.` AAAA queries no longer return an empty answer, so NAT64 prefix discovery works; DNS64 `/56` prefix synthesis no longer produces wrong addresses; multiple `address` rules for one name are all applied instead of only the last; MAC whitelist clients are no longer rejected wholesale when access control is enabled; multiple `-ipset` / `-nftset` entries on one line are all applied; nested `conf-file` includes resolve wildcards against the file being loaded and no longer degrade to a bare filename lookup; `bind-cert-file` / `bind-cert-key-file` relative paths are resolved against the configuration file's directory; configuring only a certificate or only a key no longer silently replaces your certificate with a self-signed one; domain-set files accept tab separators and report unparseable lines; cache refresh no longer resets the hit counter, so frequently used names still reach the prefetch threshold; a name with no records now returns NOERROR instead of SERVFAIL, so the synthesized SOA survives.
 
-**Stability** — listeners no longer spin at 100% CPU on persistent errors; upstream "busy" responses no longer cause an unthrottled retry loop; TCP connections survive zero-length packets; corrupt cache files are rebuilt instead of failing startup; log writing resumes after external rotation.
+**Stability** — DoQ connections are no longer dropped after 32 queries (substream quota is returned when a substream ends); DoH and plain HTTP listeners gained header-read and idle timeouts, so slow clients can no longer hold connection quota indefinitely; QUIC listeners no longer keep a CPU core busy after the endpoint closes; the concurrency-limit check and increment now happen as one operation, so `max-query-limit` is no longer briefly exceeded; ipset batch writes survive a failed flag read; netlink no longer loops forever when the connection closes; the DHCP receive buffer grew from 1024 to 4096 bytes so full-option replies are not truncated; UDP upstreams behind an HTTP proxy fall back to TCP instead of failing the whole query; a malformed `log-filter` no longer aborts startup; SOCKS5 `0.0.0.0:0` relay addresses are handled; `max-reply-ip-num` outside 1–16 is capped with a warning; `bind-cert-validity-days` no longer produces expired certificates on huge values; the advertised HTTP/3 port matches the client's address family; inverted TTL min/max no longer crashes; AES-128-CBC private keys decrypt correctly; DoQ certificate pre-generation is no longer skipped when dropping privileges; upstream errors are no longer discarded when concurrent queries are merged; the HTTP/3 listener no longer blocks on a slow handshake; a missing mDNS default port no longer crashes; ICMPv4 error replies no longer drop packets carrying IP options; ICMPv6 error replies no longer drop packets with extension headers; IPv6 mDNS multicast no longer panics when no interface is bound; concurrent sends after stream close no longer panic; one malformed DHCP option no longer discards the valid options that follow; `force-no-CNAME` no longer silently fails at listener and rule-group level.
 
-**Security & footprint** — oversized DoH request bodies are rejected outright; DoH error responses no longer leak internal addresses; memory is no longer pre-allocated from untrusted header counts; dropped UDP requests during load shedding are never reflected; a misconfigured proxy now fails loudly instead of downloading block lists over the direct (unproxied) connection; connection-quota accounting survives internal errors.
+**Security** — the `/tmp` lock file can no longer be exploited through a link planted in advance; private keys are created with restrictive permissions from the start instead of being written world-readable and tightened afterwards; failing to drop privileges now exits instead of continuing as root; management-interface token checks survive an internal error; the failed-passphrase counter no longer clears itself when full; DoH3 and DoH(HTTP/2) upstream response bodies are capped at 64 KB; the DoH `?dns=` parameter has a length limit matching the 64 KB POST limit; DNS messages no longer pre-allocate memory from untrusted header counts; the config-write API no longer truncates unparseable lines; the Windows ARP receive buffer no longer overflows; passphrase comparison no longer takes a length-dependent amount of time that could be used to guess it; DHCP and DHCPv6 parsers now check lengths before use, so malformed packets are rejected instead of crashing.
 
-**New features** — self-signed certificate auto-generation for TLS/HTTPS/H3 listeners (root CA included, 390-day default), with `bind-cert-generate` / `bind-cert-validity-days` / `bind-cert-san` and related options; encrypted PKCS#8 private-key support for upstreams and listeners, with clear migration hints for legacy formats; `local-domain` certificates can include the local NIS domain in their SAN (Linux); the `-fallback` upstream flag keeps a marked upstream on standby until the others fail.
+**Configuration behaviour** — misspelled rule-group names now warn instead of failing silently; the listener `enabled` field actually takes effect; the audit log no longer requires `audit-num > 0` to be enabled; seven documented defaults were corrected and stale failover descriptions removed.
 
-**Service management** — Linux initd scripts (non-systemd) now actually enable and disable autostart, and no longer hang when the default settings file is missing.
-
-**Verification**: 635 tests passing on Windows; key paths retested on WSL. 40 files / +1323 −230.
+**Upgrade notes** — (1) rules set on a parent domain now apply to its subdomains; check any rules written on a parent domain if you relied on the old behaviour. (2) Configuring only a certificate or only a key now fails at startup with a clear error; supply both, or set `bind-cert-generate yes` explicitly.

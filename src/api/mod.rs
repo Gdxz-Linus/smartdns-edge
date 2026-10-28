@@ -263,6 +263,10 @@ impl<T> From<Vec<T>> for DataListPayload<T> {
 // OnceLock 只在第一次生效，热重载改了配置里的 api-token 后新口令到不了这里，
 // 旧口令继续有效、新口令不生效，必须重启进程才能轮换（"改了不生效"类缺陷）。
 // RwLock 读路径每请求一次、无写竞争；None 表示"尚未初始化"（首次访问时按原取值顺序生成）。
+// 🔐 编号 45：这把锁是**每个 API 请求的必经路径**（`api_auth_middleware` 第一句就是
+// `api_token()`）。原来四处 `.unwrap()` 在锁中毒时会 panic，此后所有管理接口请求全部
+// panic、后台彻底不可用且只能重启进程。改为与仓库其它锁一致的
+// `unwrap_or_else(|e| e.into_inner())` —— 写入是单条赋值，即使中毒值仍完整。
 static API_TOKEN: std::sync::RwLock<Option<std::sync::Arc<String>>> = std::sync::RwLock::new(None);
 static API_TOKEN_FROM_USER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -282,14 +286,14 @@ pub fn set_configured_token(token: Option<String>) {
         API_TOKEN_FROM_USER.store(true, std::sync::atomic::Ordering::Relaxed);
         // 🔐 P2-9：热重载时这里会被再次调用 —— 口令轮换必须生效，并留一条可确认的日志。
         let rotated = {
-            let guard = API_TOKEN.read().unwrap();
+            let guard = API_TOKEN.read().unwrap_or_else(|e| e.into_inner());
             match guard.as_deref() {
                 Some(old) if old.as_str() == token.as_str() => None,
                 Some(old) => Some(old.clone()),
                 None => None,
             }
         };
-        *API_TOKEN.write().unwrap() = Some(std::sync::Arc::new(token));
+        *API_TOKEN.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(token));
         if let Some(_old) = rotated {
             crate::log::info!(
                 "management console token has been rotated (the previous token no longer works)"
@@ -309,11 +313,11 @@ pub fn has_configured_token(config_token: Option<&str>) -> bool {
 /// 当前生效的口令：配置 → 环境变量 → 随机生成（并打印一次提示）
 pub fn api_token() -> std::sync::Arc<String> {
     // 快路径：已初始化直接读（鉴权中间件每请求一次）
-    if let Some(token) = API_TOKEN.read().unwrap().clone() {
+    if let Some(token) = API_TOKEN.read().unwrap_or_else(|e| e.into_inner()).clone() {
         return token;
     }
     // 慢路径：初始化（配置口令在启动时经 set_configured_token 登记；这里兜底环境变量/随机）
-    let mut guard = API_TOKEN.write().unwrap();
+    let mut guard = API_TOKEN.write().unwrap_or_else(|e| e.into_inner());
     if let Some(token) = guard.clone() {
         return token;
     }
@@ -442,7 +446,7 @@ fn auth_record_failure(ip: std::net::IpAddr) -> u32 {
     /// 清理节流：每来这么多条失败才扫一次全表
     const PRUNE_EVERY: u64 = 64;
     /// 地图条目上限。正常部署远达不到；到了说明有人在用海量网段试探，
-    /// 此时整表作废重来（而不是无限增长），保证内存可控。
+    /// 此时淘汰最旧的一条（而不是无限增长），保证内存可控。
     const MAX_ENTRIES: usize = 4096;
 
     let key = AuthSourceKey::from_ip(ip);
@@ -454,17 +458,27 @@ fn auth_record_failure(ip: std::net::IpAddr) -> u32 {
     }
 
     if map.len() >= MAX_ENTRIES {
-        // 极端情况：地图被撑满。直接整表作废，避免内存无上限增长。
-        // 代价是被攻击期间限流精度下降，但总好过内存被吃光。
-        crate::log::warn!(
-            "the token-failure table reached {MAX_ENTRIES} entries and was reset; \
-             this suggests someone is probing from a very large number of network segments"
-        );
-        map.clear();
+        // 🔐 编号 46：原来这里 `map.clear()` 整表作废 —— 攻击者只要从足够多的不同网段
+        // 各失败一次就能把表撑满并触发清空，**包括他自己那条记录**，失败计数归零，
+        // 限流被绕过。改为只淘汰最旧的一条：内存仍有上界，而攻击者自己的记录每次失败
+        // 都会刷新 `since`，不会被自己挤掉；其它来源的计数不受影响，限流继续有效。
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, (_, since))| *since)
+            .map(|(key, _)| *key)
+        {
+            map.remove(&oldest);
+            crate::log::debug!(
+                "the token-failure table reached {MAX_ENTRIES} entries; evicted the oldest entry"
+            );
+        }
     }
 
     let entry = map.entry(key).or_insert((0, std::time::Instant::now()));
     entry.0 += 1;
+    // 每次失败都刷新时间，使容量淘汰真正按“最久未失败”进行；
+    // 持续攻击的来源不会因为最初插入得早而被自己制造的新来源挤掉。
+    entry.1 = std::time::Instant::now();
     entry.0
 }
 
@@ -787,6 +801,43 @@ mod auth_limit_tests {
         assert_eq!(auth_record_failure(ip), 1, "成功后计数应当归零");
         auth_record_success(ip);
         auth_record_success(same_seg);
+    }
+
+    /// 🔐 编号 46：失败计数表被撑满后，先前记录的来源**不能**被整表清空清零，
+    /// 否则攻击者只要用海量网段撑满表就能重置自己的失败计数、绕过限流。
+    #[test]
+    fn failure_table_full_does_not_reset_the_offending_source() {
+        // 先给目标来源记 3 次，并确保它是最新的（稍后会再记一次）
+        let victim: IpAddr = "203.0.113.77".parse().unwrap();
+        auth_record_success(victim);
+        assert_eq!(auth_record_failure(victim), 1);
+        assert_eq!(auth_record_failure(victim), 2);
+        assert_eq!(auth_record_failure(victim), 3);
+
+        // 用大量不同网段把表撑满（MAX_ENTRIES = 4096）。IPv6 /64 段各不相同，
+        // 每个地址落在独立的桶里。
+        for i in 0..5000u32 {
+            let ip: IpAddr = format!("2001:db8:{:x}::1", i).parse().unwrap();
+            auth_record_failure(ip);
+            // 模拟攻击者持续尝试：定期刷新自己的记录，避免它因长期未失败而被淘汰。
+            if i % 1000 == 999 {
+                auth_record_failure(victim);
+            }
+        }
+
+        // 目标来源的计数必须继续从 4 开始，而不是被清空后重新从 1 开始
+        let after = auth_record_failure(victim);
+        assert!(
+            after >= 4,
+            "表满后目标来源的计数必须继续累加（实际 {after}），不能被整表清空清零"
+        );
+
+        // 清理本测试插入的全局表记录，避免影响同进程内的其它测试。
+        auth_record_success(victim);
+        for i in 0..5000u32 {
+            let ip: IpAddr = format!("2001:db8:{:x}::1", i).parse().unwrap();
+            auth_record_success(ip);
+        }
     }
 }
 

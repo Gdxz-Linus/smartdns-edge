@@ -19,7 +19,7 @@
 
 ## 一、本地改动（与上游 0.0.6 的**全部**差异）
 
-只有一处功能改动，都在 `src/lib.rs`：
+功能改动都在 `src/lib.rs`：
 
 1. **新增 `PeerAcceptor` trait**（替代上游 `h3_util::server::H3Acceptor` 这个边界）。
    差别是 `accept()` 会**一并返回对端地址** `Option<SocketAddr>`。
@@ -38,6 +38,9 @@
    所以下游 Handler 照常写 `ConnectInfo<SocketAddr>` 就能拿到**真实客户端地址**，两种协议行为一致。
 3. 其余为文档注释（在文件头写清本改动）+ `Cargo.toml` 精简（去掉发布包自动生成的
    `autolib/autotests/...` 规范化开关，只保留构建需要的包信息与依赖）。
+4. **accept 错误不再终止监听循环**（2026-10-28，批次二十一 73）：原实现任何一次
+   `acceptor.accept()` 错误都 `return Err(e)`，单个 QUIC 连接握手失败或对端异常会让
+   整个服务停止接受新连接。现在记录 `warn` 后 `continue`，只跳过该次接受失败。
 
 **除此之外与上游逐字节相同** —— 想核对时，拿同版本 `.crate` 解包后与本目录 diff 即可
 （`curl -sSL https://static.crates.io/crates/axum-h3/axum-h3-0.0.6.crate | tar -xzO axum-h3-0.0.6/src/lib.rs`）。

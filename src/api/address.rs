@@ -92,20 +92,34 @@ async fn list(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Sour
     // managed 来源：直接读文件（写接口的数据源），与内存无关
     if let Some(managed_dir) = cfg.managed_dir() {
         let file = managed_dir.join("address.conf");
-        if let Ok(text) = tokio::fs::read_to_string(&file).await
-            && let Ok((_, config)) = ConfigFile::parse(&text)
-        {
-            for line in config.iter() {
-                if let ConfigLine::Config {
-                    config: ConfigItem::Address(rule),
-                    ..
-                } = line
-                {
-                    rules.push(SourcedAddressRule {
-                        source: AddressRuleSource::Managed,
-                        rule: rule.clone(),
-                    });
+        if let Ok(text) = tokio::fs::read_to_string(&file).await {
+            // 🔐 编号 30：逐行解析，遇到无法识别的行**跳过并计数**，
+            // 而不是像 `ConfigFile::parse` 那样在那一行停止、把后面全丢掉。
+            // 原实现会让列表"看不到"被截断的规则，进一步掩盖写接口的问题。
+            let mut skipped = 0usize;
+            for line in split_lines_keep_endings(&text) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
                 }
+                match crate::config::parser::parse_config(trimmed) {
+                    Ok((leftover, Some(ConfigItem::Address(rule))))
+                        if leftover.trim().is_empty() =>
+                    {
+                        rules.push(SourcedAddressRule {
+                            source: AddressRuleSource::Managed,
+                            rule,
+                        });
+                    }
+                    _ => skipped += 1,
+                }
+            }
+            if skipped > 0 {
+                crate::log::warn!(
+                    "{} contains {skipped} line(s) that are not address rules; \
+                     they are skipped in this listing but left untouched on disk",
+                    file.display()
+                );
             }
         }
     }
@@ -174,42 +188,31 @@ async fn create(
 
     if file.exists() {
         let text = tokio::fs::read_to_string(&file).await?;
-        let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
 
-        let rules = config
-            .iter()
-            .enumerate()
-            .flat_map(|(i, c)| match c {
-                ConfigLine::Config {
-                    config: ConfigItem::Address(rule),
-                    ..
-                } => Some((i, rule.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        // 🔐 编号 30：只判断"这个域名是否已存在"，不做整文件解析。
+        // 原实现用 `ConfigFile::parse` 后丢弃剩余文本，遇到无法识别的行就会
+        // 把该行及其之后的全部内容静默删除。
+        for line in split_lines_keep_endings(&text) {
+            if line_is_address_for(line, &rule.domain) {
+                // 🔐 P2：重复域名是「冲突」，回 409，不能再回 500 —— 后者会误触监控告警。
+                return Err(ApiError::Conflict(format!(
+                    "domain {} already exists",
+                    rule.domain
+                )));
+            }
+        }
 
-        let idx = rules
-            .iter()
-            .find(|r| r.1.domain == rule.domain)
-            .map(|(i, _)| *i);
+        // 追加到文件末尾，保留原有内容一个字节不动。
+        // 若原文件末尾没有换行，先补一个，避免新规则和最后一行粘在一起。
+        let mut new_text = text.clone();
+        if !new_text.is_empty() && !new_text.ends_with('\n') {
+            new_text.push('\n');
+        }
+        new_text.push_str(&format!("address {rule}\n"));
 
-        if idx.is_some() {
-            // 🔐 P2：重复域名是「冲突」，回 409，不能再回 500 —— 后者会误触监控告警。
-            return Err(ApiError::Conflict(format!(
-                "domain {} already exists",
-                rule.domain
-            )));
-        } else {
-            config.push(ConfigLine::Config {
-                config: ConfigItem::Address(rule),
-                comment: None,
-            });
-        };
-
-        safe_write_config(&file, format!("{config}")).await?;
+        safe_write_config(&file, new_text).await?;
     } else {
-        let config = ConfigItem::Address(rule);
-        safe_write_config(&file, format!("{config}")).await?;
+        safe_write_config(&file, format!("address {rule}\n")).await?;
     }
 
     // 🔐 P2-10：写入成功后立即让规则生效（原来只写文件、不触发加载，"说成功但没生效"）
@@ -253,18 +256,20 @@ async fn update(
     }
 
     let text = tokio::fs::read_to_string(&file).await?;
-    let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
 
+    // 🔐 编号 30：逐行替换，其余字节原样保留。
+    // 原实现重新序列化整个文件，而 `ConfigItem` 的 Display 对 address 之外的
+    // 所有指令都只输出 `[Unformatted Config Item]` —— 一次 PUT 就会把文件里
+    // 其它配置全部毁掉。
     let mut replaced = 0usize;
-    for line in config.iter_mut() {
-        if let ConfigLine::Config {
-            config: ConfigItem::Address(existing),
-            ..
-        } = line
-            && existing.domain == rule.domain
-        {
-            *existing = rule.clone();
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in split_lines_keep_endings(&text) {
+        if line_is_address_for(line, &rule.domain) {
+            // 保留原行的行尾，新内容用同样的行尾
+            out.push_str(&format!("address {rule}{}", line_ending_of(line)));
             replaced += 1;
+        } else {
+            out.push_str(line);
         }
     }
 
@@ -275,7 +280,7 @@ async fn update(
         )));
     }
 
-    safe_write_config(&file, format!("{config}")).await?;
+    safe_write_config(&file, out).await?;
 
     // 🔐 P2-10：写入成功后立即让规则生效
     apply_written_rules(&state).await?;
@@ -314,29 +319,24 @@ async fn delete(
 
     // 🌟 替换为异步 I/O
     let text = tokio::fs::read_to_string(&file).await?;
-    let (_, mut config) = ConfigFile::parse(&text).map_err(|err| err.to_owned())?;
 
-    let idx = config
-        .iter()
-        .enumerate()
-        .flat_map(|(i, c)| match c {
-            ConfigLine::Config {
-                config: ConfigItem::Address(rule),
-                ..
-            } if rule.domain == domain => Some(i),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    // 🔐 编号 30：逐行删除命中的规则，其余字节原样保留。
+    let mut removed = 0usize;
+    let mut out = String::with_capacity(text.len());
+    for line in split_lines_keep_endings(&text) {
+        if line_is_address_for(line, &domain) {
+            removed += 1;
+            // 整行丢弃（含行尾）
+        } else {
+            out.push_str(line);
+        }
+    }
 
-    if idx.is_empty() {
+    if removed == 0 {
         return Err(ApiError::NotFound(format!("Domain {domain} not found")));
     }
 
-    for i in idx.iter().rev() {
-        config.remove(*i);
-    }
-
-    safe_write_config(&file, format!("{config}")).await?;
+    safe_write_config(&file, out).await?;
 
     // 🔐 P2-10：删除成功后立即让变更生效
     apply_written_rules(&state).await?;
@@ -358,18 +358,10 @@ async fn main_config_has_address(
     let Ok(text) = tokio::fs::read_to_string(path).await else {
         return false;
     };
-    let Ok((_, config)) = ConfigFile::parse(&text) else {
-        return false;
-    };
-    config.iter().any(|line| {
-        matches!(
-            line,
-            ConfigLine::Config {
-                config: ConfigItem::Address(rule),
-                ..
-            } if rule.domain == *domain
-        )
-    })
+    // 🔐 编号 30：逐行判断，不依赖整文件解析（后者遇到不认识的行会提前停止）。
+    split_lines_keep_endings(&text)
+        .into_iter()
+        .any(|line| line_is_address_for(line, domain))
 }
 
 /// 🔐 P2-10：写操作成功后让规则真正进入解析链。
@@ -390,6 +382,72 @@ async fn apply_written_rules(state: &Arc<ServeState>) -> Result<(), ApiError> {
              fix the problem and POST /api/config/reload"
         ))
     })
+}
+
+/// 把文本按行切开，保留每行的行尾（`\r\n` / `\n` / 无行尾的最后一行）。
+///
+/// 为什么不能用 `str::lines()`：它会把行尾吃掉，重新拼接时无法还原原始字节
+/// （CRLF 文件会被改成 LF，导致整份文件在 diff 里全部变化）。
+fn split_lines_keep_endings(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            out.push(&text[start..=i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// 判断一行是不是 address 规则，且域名等于 `domain`。
+///
+/// 这里刻意**不复用** `ConfigFile::parse`：那条路的语义是"整份文件解析"，
+/// 遇到不认识的行就停。我们只需要判断单行，且必须对不认识的行返回 false
+/// 而不是中断。
+fn line_is_address_for(line: &str, domain: &crate::config::Domain) -> bool {
+    use crate::config::parser::NomParser as _;
+
+    let trimmed = line.trim_start();
+    // 快速排除：不是以 address 开头就不可能是
+    let Some(rest) = trimmed.strip_prefix("address") else {
+        return false;
+    };
+    // `addressxxx` 这种不算
+    if !rest.starts_with(|c: char| c.is_whitespace()) {
+        return false;
+    }
+
+    // `parse_line` 先吃掉 `address` 与规则之间的空白；单行判断也必须这样做，
+    // 因为 `AddressRule::parse` 期望输入从 `/` 开始。
+    let rest = rest.trim_start();
+
+    match crate::config::AddressRule::parse(rest) {
+        Ok((leftover, rule)) => {
+            // 必须整行消费完（允许行尾有注释或空白）
+            let tail = leftover.trim();
+            let tail_ok = tail.is_empty() || tail.starts_with('#');
+            tail_ok && rule.domain == *domain
+        }
+        Err(_) => false,
+    }
+}
+
+/// 从一行里取出行尾（`\r\n` / `\n` / 空）。
+fn line_ending_of(line: &str) -> &str {
+    if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    }
 }
 
 // 🌟 核心修复：原子化配置文件写入，杜绝断电/强杀导致的配置清零问题
@@ -614,6 +672,66 @@ mod tests {
         assert!(
             !msg.contains("-d <config-dir>"),
             "已经确定了配置目录时，不该再让用户去传 `-d`（那是无效建议）。实际: {msg}"
+        );
+    }
+
+    /// 🔐 编号 30：文件里含无法识别的行时，写接口必须保留它，而不是截断。
+    #[tokio::test]
+    async fn unrecognised_lines_survive_a_rewrite() {
+        let dir = std::env::temp_dir().join(format!("smartdns-addr-api-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("address.conf");
+
+        // 故意混入：一条 address、一条程序不认识的指令、一条注释
+        let original = "address /keep.test/1.1.1.1\n\
+                        this-is-not-a-real-directive foo bar\n\
+                        # a comment\n\
+                        address /other.test/2.2.2.2\n";
+        std::fs::write(&file, original).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+
+        // 模拟 delete 的定点操作：删掉 keep.test 那一行
+        let domain: crate::config::Domain = "keep.test".parse().unwrap();
+        let mut out = String::new();
+        for line in split_lines_keep_endings(&text) {
+            if line_is_address_for(line, &domain) {
+                continue;
+            }
+            out.push_str(line);
+        }
+
+        assert!(!out.contains("keep.test"), "the deleted rule must be gone");
+        assert!(
+            out.contains("this-is-not-a-real-directive"),
+            "an unrecognised line must survive the rewrite"
+        );
+        assert!(out.contains("# a comment"), "comments must survive");
+        assert!(
+            out.contains("address /other.test/2.2.2.2"),
+            "unrelated address rules must survive"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 编号 30：CRLF 文件被改写后行尾必须保持 CRLF。
+    #[test]
+    fn crlf_line_endings_are_preserved() {
+        let text = "address /a.test/1.1.1.1\r\naddress /b.test/2.2.2.2\r\n";
+        let domain: crate::config::Domain = "a.test".parse().unwrap();
+        let mut out = String::new();
+        for line in split_lines_keep_endings(text) {
+            if line_is_address_for(line, &domain) {
+                out.push_str(&format!("address /a.test/9.9.9.9{}", line_ending_of(line)));
+            } else {
+                out.push_str(line);
+            }
+        }
+        assert_eq!(
+            out, "address /a.test/9.9.9.9\r\naddress /b.test/2.2.2.2\r\n",
+            "CRLF must be preserved"
         );
     }
 }

@@ -60,7 +60,20 @@ impl ProtocolDefaultPort for Protocol {
             H3 => 443,
             #[cfg(feature = "dns-over-quic")]
             Quic => 853,
-            _ => unimplemented!(),
+            _ => 53,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dns_url::ProtocolConfig;
+
+    #[test]
+    fn test_protocol_default_ports() {
+        assert_eq!(Protocol::Udp.default_port(), 53);
+        assert_eq!(Protocol::Tcp.default_port(), 53);
+        assert_eq!(ProtocolConfig::System.default_port(), 0);
     }
 }

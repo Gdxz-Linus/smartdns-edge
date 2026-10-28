@@ -86,6 +86,12 @@ domain.emit(&mut name_encoder)?;
 **这是全仓库唯一一处为了适配 0.26 而改的上游代码。** 如果将来上游 dhcproto 支持了
 hickory-proto 0.26，这一处补丁就可以直接丢掉。
 
+### 3.2.1 坏选项降级（2026-10-19）
+
+`DhcpOption` 单项解析失败时降级为 `Unknown`，保留原始 code 与载荷；遇到下一个
+不同选项或 `End` 后仍会继续解析后续选项，避免一个畸形 DHCP 选项提前终止整个
+`DhcpOptions` 解析。
+
 ### 3.3 解码健壮性加固（2026-10-13，R-P1-3 + R-P2-12 附属）
 
 背景：审计发现三类畸形输入问题，全部按"构造的畸形报文单测断言不崩溃"验证：
@@ -110,6 +116,26 @@ hickory-proto 0.26，这一处补丁就可以直接丢掉。
 option 81 len=2 / 坏 magic），`cargo test`＝48 过 / 0 败（+17 文档测试全过）。
 对 smartdns 的使用无接口变化。
 
+
+### 3.4 chaddr 越界与 DHCPv6 短选项解码加固（2026-10-28，批次二十 68/70）
+
+- **`src/v4/mod.rs` `Message::chaddr()`**：`hlen` 来自报文且未经校验，原实现直接
+  `&self.chaddr[..hlen]`，当 `hlen > 16` 时切片越界 panic。改为按 `chaddr` 字段长度
+  截断，畸形 `hlen` 不再能打崩解析。
+- **`src/v6/options.rs` StatusCode / VendorClass**：补齐 `len < 2` / `len < 4` 的
+  前置校验，避免 `len - N` 在 debug 构建下溢出 panic、release 构建下回绕成巨大长度。
+- 新增 3 个单测：`chaddr` 超大 `hlen`、短 StatusCode、短 VendorClass。
+
+### 3.5 内嵌模块编码/解码加固（2026-10-28，批次二十一 71/72）
+
+- **`src/v4/options.rs` BulkLeaseQueryStatusCode（option 151）编码**：消息超过
+  254 字节时，原实现 `msg.len() as u8 + 1` 会静默截断长度字段，但实际仍写入完整
+  消息，导致解码方按错误长度读取、后续选项全部错位。现在按 254 字节截断消息本体
+  （UTF-8 字符边界安全），保证长度字段与实际写入字节数一致，并输出截断告警。
+- **`src/decoder.rs` `read_domains`**：原实现 `while let Ok(...)` 把任何解码错误都
+  当作正常结束，畸形域名之后的列表项被静默丢弃。现在区分"无剩余字节"与"解码失败"，
+  后者如实返回错误。
+- 新增 2 个单测：option 151 超长消息长度字段一致性、`read_domains` 损坏输入报错。
 
 ## 四、验证方式
 

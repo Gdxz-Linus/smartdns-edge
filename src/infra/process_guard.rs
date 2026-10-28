@@ -68,7 +68,9 @@ fn fixed_lock_path() -> PathBuf {
                 return path;
             }
         }
-        std::env::temp_dir().join("smartdns.lock")
+        // 🔐 编号 29：退到全局可写的临时目录时，路径加 uid 后缀。
+        // 一来不同用户的实例不再互抢同一个文件，二来攻击者无法预知并预置目标路径。
+        std::env::temp_dir().join(format!("smartdns.{}.lock", unsafe { libc::geteuid() }))
     }
 }
 
@@ -198,12 +200,13 @@ fn create_with_lock<P: AsRef<Path>>(
     }
 
     // 🌟 核心修复 2：彻底抛弃不靠谱的 PID 存活检测，改用原子级的文件排他锁！
-    let lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    // 🔐 编号 29：锁文件不跟随符号链接。`/tmp` 兜底路径上本地用户可预置软链，
+    // 按普通路径打开会替攻击者截断目标文件。
+    let lock_file = {
+        let f = open_for_write_no_follow(&lock_path, false)?;
+        // 需要读权限才能读回持有者 PID（fs3 的锁本身不要求读权限，但保持原行为）
+        f
+    };
 
     // 尝试非阻塞获取排他锁
     if lock_file.try_lock_exclusive().is_err() {
@@ -236,12 +239,21 @@ fn create_with_lock<P: AsRef<Path>>(
 
     // 🔐 问题 44 的配套：再写一份"与 -p 无关"的持有者 PID（紧挨着锁）。
     // 这样**任何启动方式**的第二个实例都能问出"是谁在跑"，而不必猜对第一个实例的 `-p`。
-    // 写失败只记日志：单实例保护靠的是锁，不是这份副本。
+    //
+    // 🔐 编号 29：写失败**必须告警**，不能只记 debug。
+    // 这道防护会拒绝符号链接——而符号链接出现在这里只有两种可能：
+    //   ① 有人恶意预置（试图诱使我们截断别的文件）；
+    //   ② 上一次部署留下了软链形式的 PID 文件。
+    // 两种情形管理员都需要知道：前者是安全事件，后者会导致第二个实例报不出持有者 PID。
     if let Err(err) = write_pid(&lock_owner_pid_path(&lock_path), id) {
-        crate::log::debug!(
-            "failed to write lock-owner pid file next to {}: {} (single-instance protection is unaffected)",
-            lock_path.display(),
-            err
+        crate::log::warn!(
+            "cannot write the lock-owner pid file next to {}: {err}. \
+             Single-instance protection still works (the lock is held), but a second \
+             instance will not be able to report which process owns it. \
+             If this path is a symbolic link, remove it: the program refuses to follow \
+             such links on purpose (they can be planted by other local users to make \
+             the program truncate an arbitrary file).",
+            lock_path.display()
         );
     }
 
@@ -253,20 +265,85 @@ fn create_with_lock<P: AsRef<Path>>(
     })
 }
 
+/// 打开一个用于写入的文件，**禁止跟随符号链接**，并核对打开后的确实是普通文件。
+///
+/// ## 为什么必须有这道防护
+///
+/// 锁文件与 PID 文件会落在 `/tmp`（系统级目录不可写时的兜底）。`/tmp` 全局可写，
+/// 任何本地用户都能预先在那里建一个**符号链接**指向 `/etc/shadow` 之类的 root 文件。
+/// 若我们按普通路径打开并截断，就等于替攻击者清空了那个文件 —— 本地用户由此获得
+/// 对 root 的任意文件破坏能力。
+///
+/// ## 具体做法
+///
+/// - Unix：`O_NOFOLLOW` 让内核直接拒绝符号链接（返回 ELOOP），再用 `fstat` 核对
+///   打开后的是普通文件、且属主是当前有效用户；
+/// - Windows：保持普通打开。Windows 上创建符号链接需要管理员权限或开发者模式，
+///   普通用户无法预置，风险等级不同。
+fn open_for_write_no_follow(path: &Path, truncate: bool) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(truncate);
+        // O_NOFOLLOW：路径末端是符号链接时直接失败，不跟随
+        // O_CLOEXEC：不把句柄泄漏给子进程
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+
+        let file = opts.open(path)?;
+
+        // 再核一次：必须是普通文件，且属主是当前有效用户。
+        // 这一步挡住"路径本身不是符号链接、但被换成别的特殊文件"的情形。
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to use {} as a lock/pid file: it is not a regular file",
+                    path.display()
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let owner = meta.uid();
+            let me = unsafe { libc::geteuid() };
+            if owner != me {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to use {} as a lock/pid file: it is owned by uid {owner}, \
+                     but this process runs as uid {me}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Ok(file)
+    }
+
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(truncate)
+            .open(path)
+    }
+}
+
 /// 写入 PID（先清空，避免旧的数字尾巴留下）
 fn write_pid(path: &Path, id: u32) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
+    let mut file = open_for_write_no_follow(path, true)?;
     file.write_all(id.to_string().as_bytes())?;
     file.flush()
 }
 
 /// 清空 PID 内容（退出时表示"现在没人持有"）
 fn clear_pid(path: &Path) -> io::Result<()> {
-    OpenOptions::new().write(true).truncate(true).open(path)?;
+    open_for_write_no_follow(path, true)?;
     Ok(())
 }
 
@@ -548,6 +625,47 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "可写性探测必须清理自己的探针文件，实际残留: {leftovers:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🔐 编号 29：预置符号链接指向目标文件时，必须拒绝写入，且目标文件字节不变。
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_pid_file_is_refused_and_target_untouched() {
+        use std::os::unix::fs::symlink;
+
+        let dir =
+            std::env::temp_dir().join(format!("smartdns-guard-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 目标文件：模拟"被保护的文件"
+        let target = dir.join("victim.txt");
+        std::fs::write(&target, b"do-not-truncate").unwrap();
+
+        // 攻击者预置的软链
+        let link = dir.join("smartdns.lock.pid");
+        symlink(&target, &link).unwrap();
+
+        // write_pid 必须拒绝
+        let err = write_pid(&link, 1234).expect_err("must refuse a symlinked pid file");
+
+        // 目标文件内容必须原封不动
+        let after = std::fs::read(&target).unwrap();
+        assert_eq!(
+            after, b"do-not-truncate",
+            "target file must not be truncated"
+        );
+
+        // 错误信息应指明是符号链接导致的（ELOOP 或 InvalidInput）
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Too many levels of symbolic links")
+                || msg.contains("symbolic link")
+                || err.raw_os_error() == Some(libc::ELOOP),
+            "unexpected error: {msg}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

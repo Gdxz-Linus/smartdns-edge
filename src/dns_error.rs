@@ -121,12 +121,19 @@ impl LookupError {
         None
     }
 
+    /// 🔐 编号 39：中间件链走完没有任何一层产出答案时的终端兜底。
+    ///
+    /// 语义是「名字存在，但没有该类型的记录」—— 不是服务器故障。
+    /// 原来这里把 `response_code` 写成 `ServFail`，而 `as_soa()` 只接受
+    /// `NoError | NXDomain`，于是本函数精心构造的 SOA **在任何路径上都还原不出来**，
+    /// `app.rs` 的 `(_, Some(soa)) => soa` 分支永远不命中，客户端拿到 SERVFAIL
+    /// 会当成服务器故障反复重试 —— 与本项目「对客户端一律 NOERROR + SOA」的定调相反。
     pub fn no_records_found(query: Query, ttl: u32) -> LookupError {
         let soa = Record::from_rdata(query.name().to_owned(), ttl, SOA::default_soa());
 
         let no_records = AuthorityData::new(query.into(), Some(Box::new(soa)), true, true, None);
         let mut no_records: NoRecords = no_records.into();
-        no_records.response_code = ResponseCode::ServFail;
+        no_records.response_code = ResponseCode::NoError;
 
         ProtoErrorKind::NoRecordsFound(no_records).into()
     }

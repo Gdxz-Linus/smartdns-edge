@@ -138,7 +138,7 @@ impl<P> Display for UdpClientStream<P> {
 impl<P: RuntimeProvider> DnsRequestSender for UdpClientStream<P> {
     fn send_message(&mut self, mut request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
-            panic!("can not send messages after stream is shutdown")
+            return ProtoError::from("can not send messages after stream is shutdown").into();
         }
 
         let case_randomization = request.options().case_randomization;

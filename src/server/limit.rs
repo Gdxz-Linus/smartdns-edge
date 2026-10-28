@@ -192,9 +192,13 @@ impl ConnectionLimiter {
                 return None;
             }
             *entry += 1;
+            // 🔐 编号 40：全局计数必须与上面的检查在**同一个临界区**内自增。
+            // 原来 `fetch_add` 在锁外，两个并发连接可以同时读到
+            // `current = max_connections - 1`、都通过检查、都自增，
+            // 最终 current 超出上限（并发越多超得越多）。
+            self.current.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.current.fetch_add(1, Ordering::Relaxed);
         Some(ConnectionGuard {
             limiter: self.clone(),
             key,
@@ -525,6 +529,45 @@ mod tests {
             "自动上限应在 512~16384，实际 {max}"
         );
         assert!(limiter.max_per_source >= 64);
+    }
+
+    /// 🔐 编号 40：检查与自增必须在同一临界区，并发接入不能突破 max_connections。
+    #[test]
+    fn concurrent_acquire_never_exceeds_max_connections() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let limiter = Arc::new(ConnectionLimiter::new(Some(8), Some(1024)));
+        let granted = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(64));
+
+        let mut handles = Vec::new();
+        for i in 0..64u32 {
+            let limiter = limiter.clone();
+            let granted = granted.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                // 每个线程用不同来源，排除 per-source 限制的干扰，只测全局上限
+                let ip: std::net::IpAddr = format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap();
+                if let Some(guard) = limiter.acquire(ip) {
+                    granted.fetch_add(1, Ordering::SeqCst);
+                    // 稍作停留，确保并发窗口真实存在
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    drop(guard);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            granted.load(Ordering::SeqCst),
+            8,
+            "并发接入必须恰好放行 max_connections 条"
+        );
+        let (current, _, _) = limiter.stats();
+        assert_eq!(current, 0, "全部归还后 current 必须归零");
     }
 }
 

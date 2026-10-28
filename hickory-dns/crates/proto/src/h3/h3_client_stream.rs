@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt::{self, Display};
-use core::future::{Future, poll_fn};
+use core::future::{poll_fn, Future};
 use core::pin::Pin;
 use core::str::FromStr;
 use core::task::{Context, Poll};
@@ -33,6 +33,15 @@ use crate::udp::UdpSocket;
 use crate::xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream};
 
 use super::ALPN_H3;
+
+/// 🔐 编号 52/53：DNS 报文的理论上限（TCP/UDP 长度字段 16 位）。
+/// `content_length` 缺失时，恶意上游可以无限发数据 —— 这里给累积缓冲加硬上限。
+const MAX_DNS_MESSAGE: usize = 65535;
+
+/// 🔐 编号 52/53：响应体累积上限的判断逻辑。
+fn body_exceeds_limit(len: usize) -> bool {
+    len > MAX_DNS_MESSAGE
+}
 
 /// A DNS client connection for DNS-over-HTTP/3
 #[derive(Clone)]
@@ -115,6 +124,16 @@ impl H3ClientStream {
             .transpose()
             .map_err(|e| ProtoError::from(format!("bad headers received: {e}")))?;
 
+        // 🔐 编号 52/53：`content_length` 本身超过 DNS 报文理论上限时直接拒绝，
+        // 不必等到把数据读进内存。
+        if let Some(len) = content_length {
+            if len > MAX_DNS_MESSAGE {
+                return Err(ProtoError::from(format!(
+                    "the response body declares {len} bytes, which exceeds the DNS message limit of {MAX_DNS_MESSAGE} bytes"
+                )));
+            }
+        }
+
         // TODO: what is a good max here?
         // clamp(512, 4096) says make sure it is at least 512 bytes, and min 4096 says it is at most 4k
         // just a little protection from malicious actors.
@@ -128,6 +147,14 @@ impl H3ClientStream {
         {
             debug!("got bytes: {}", partial_bytes.remaining());
             response_bytes.put(partial_bytes);
+
+            // 🔐 编号 52/53：`content_length` 缺失（chunked）时上游可以无限发数据，
+            // 这里给累积缓冲加硬上限，超限立即中断而不是继续读。
+            if body_exceeds_limit(response_bytes.len()) {
+                return Err(ProtoError::from(format!(
+                    "the response body exceeded the DNS message limit of {MAX_DNS_MESSAGE} bytes"
+                )));
+            }
 
             // assert the length
             if let Some(content_length) = content_length {
@@ -243,7 +270,7 @@ impl DnsRequestSender for H3ClientStream {
     /// ```
     fn send_message(&mut self, mut request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
-            panic!("can not send messages after stream is shutdown")
+            return ProtoError::from("can not send messages after stream is shutdown").into();
         }
 
         // per the RFC, a zero id allows for the HTTP packet to be cached better
@@ -550,12 +577,10 @@ mod tests {
             .await
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_a().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_a().is_some()));
 
         //
         // assert that the connection works for a second query
@@ -579,12 +604,10 @@ mod tests {
             .await
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_aaaa().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_aaaa().is_some()));
     }
 
     #[tokio::test]
@@ -622,12 +645,10 @@ mod tests {
             .await
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_a().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_a().is_some()));
 
         //
         // assert that the connection works for a second query
@@ -651,12 +672,10 @@ mod tests {
             .await
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_aaaa().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_aaaa().is_some()));
     }
 
     #[test]
@@ -696,12 +715,10 @@ mod tests {
             .block_on(h3.send_message(request).first_answer())
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_a().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_a().is_some()));
 
         //
         // assert that the connection works for a second query
@@ -723,12 +740,10 @@ mod tests {
             .block_on(h3.send_message(request).first_answer())
             .expect("send_message failed");
 
-        assert!(
-            response
-                .answers()
-                .iter()
-                .any(|record| record.data().as_aaaa().is_some())
-        );
+        assert!(response
+            .answers()
+            .iter()
+            .any(|record| record.data().as_aaaa().is_some()));
     }
 
     #[tokio::test]
@@ -779,5 +794,17 @@ mod tests {
             println!("join_set completed {idx}/{total}");
             idx += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod body_limit_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_response_body_is_rejected() {
+        assert!(!body_exceeds_limit(0));
+        assert!(!body_exceeds_limit(MAX_DNS_MESSAGE));
+        assert!(body_exceeds_limit(MAX_DNS_MESSAGE + 1));
     }
 }

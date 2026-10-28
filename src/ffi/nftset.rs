@@ -37,12 +37,11 @@
 //!
 //! # ⚠️ 刻意**保留**的 C 版行为（不是缺陷，是"翻译要保持一致"）
 //!
-//! * **集合没有任何标志时，超时不会归零**：C 的 `add_batch` 用 `if (flags != 0)`
-//!   决定要不要读集合标志，而"集合无标志"与"读标志失败"都得到 `flags == 0`，
-//!   于是超时属性照发 ⇒ 内核回 `EINVAL`。真机复现过（集合不带 `timeout` 标志
-//!   且开 `nftset-timeout yes` 时写入失败）。
-//!   这是 C 版的既有行为，**B-② 的目标是行为一致，不在此处顺手改**
-//!   （改了就无法判断差异是"翻译引入"还是"有意改进"）。已单独登记待定调。
+//! * **集合没有/读不到标志时，超时归零**：C 版 `add_batch` 用 `if (flags != 0)`
+//!   判断是否处理集合标志，导致"集合无标志"与"读标志失败"都跳过归零，超时属性
+//!   照发 ⇒ 内核回 `EINVAL`。真机复现过（集合不带 `timeout` 标志且开
+//!   `nftset-timeout yes` 时写入失败）。批次十六已修复为无条件调用
+//!   `process_set_flags`，读不到标志时按"不支持超时"安全降级。
 
 #![allow(dead_code)]
 
@@ -680,7 +679,10 @@ mod imp {
     fn exchange(fd: RawFd, packet: &[u8], seq: u32) -> io::Result<Vec<u8>> {
         send_all(fd, packet)?;
 
-        let mut buf = vec![0u8; 4096];
+        // 🔐 编号 50：原来固定 4096 字节，GETSET 回执较大时会被截断，
+        // 导致读不到 NFTA_SET_FLAGS（进而触发「读失败」路径）。
+        // 按请求长度动态扩容，并留出回执头部余量。
+        let mut buf = vec![0u8; (packet.len() + 4096).max(8192)];
         let mut captured: Vec<u8> = Vec::new();
 
         loop {
@@ -875,10 +877,24 @@ mod imp {
             return Ok(());
         }
 
-        // ⚠️ 忠实复刻 C 版：读标志失败时 `flags = 0`，而下面的判据是 `if (flags != 0)`，
-        //    于是"读失败"与"集合无标志"都**跳过** `process_set_flags` ——
-        //    超时因此不会被归零（既有行为，见文件头说明）。
-        let flags = get_flags(family, table, set_name).unwrap_or(0);
+        // 🔐 编号 50：`get_flags` 失败时原来 `unwrap_or(0)` 让 flags==0，
+        // 而下面的判据是 `if flags != 0` —— 于是「读失败」与「集合无标志」都跳过
+        // `process_set_flags`，超时因此不会被归零。给不支持 NFT_SET_TIMEOUT 的集合
+        // 发 NFTA_SET_ELEM_TIMEOUT 内核会回 EINVAL、**整批写入失败**，
+        // 用户侧表现为「开了 nftset-timeout 之后一条都写不进去」。
+        //
+        // 读不到标志时无法确认集合支持 timeout，归零是安全的一侧：
+        // 最坏结果是超时没生效（功能降级），而不是整批写入失败（功能失效）。
+        let flags = match get_flags(family, table, set_name) {
+            Ok(flags) => flags,
+            Err(err) => {
+                crate::log::debug!(
+                    "cannot read the flags of nftset {family_name}:{table}:{set_name} ({err}); \
+                     assuming the set does not support timeouts and writing without one"
+                );
+                0
+            }
+        };
         let mut effective_timeout = timeout;
 
         let addr_at = |i: usize| &addrs[i * addr_len..(i + 1) * addr_len];
@@ -890,11 +906,7 @@ mod imp {
             packet.extend_from_slice(&encode_batch_begin(seq));
             for i in 0..count {
                 let addr = addr_at(i);
-                let end = if flags != 0 {
-                    process_set_flags(flags, addr, 0).interval_end
-                } else {
-                    None
-                };
+                let end = process_set_flags(flags, addr, 0).interval_end;
                 append_set_elem(
                     &mut packet,
                     NFT_MSG_DELSETELEM,
@@ -922,14 +934,11 @@ mod imp {
         packet.extend_from_slice(&encode_batch_begin(seq));
         for i in 0..count {
             let addr = addr_at(i);
-            let end = if flags != 0 {
-                // C 版把 `&timeout` 传进去，可能被归零；这里逐轮同步该值
-                let p = process_set_flags(flags, addr, effective_timeout);
-                effective_timeout = p.timeout;
-                if p.overflow { None } else { p.interval_end }
-            } else {
-                None
-            };
+            // C 版把 `&timeout` 传进去，可能被归零；这里逐轮同步该值。
+            // flags == 0 时 process_set_flags 会把 timeout 归零且不生成区间结束地址。
+            let p = process_set_flags(flags, addr, effective_timeout);
+            effective_timeout = p.timeout;
+            let end = if p.overflow { None } else { p.interval_end };
             append_set_elem(
                 &mut packet,
                 NFT_MSG_NEWSETELEM,

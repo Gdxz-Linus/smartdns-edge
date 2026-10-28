@@ -148,6 +148,67 @@ fn server_params(sans: &[rcgen::SanType], days: i64) -> rcgen::CertificateParams
     params
 }
 
+/// 🔐 编号 47：以最小权限创建并写入私钥文件。
+///
+/// 原来用 `std::fs::write` 创建（权限取 `0o666 & !umask`，典型 0644），写完再
+/// `set_permissions(0o400)` —— 从写入完成到 chmod 之间，同机任意用户都能读到私钥。
+/// 根 CA 私钥有效期 10 年、可签发任意服务器证书，这个窗口不能留。
+///
+/// 现在在 `open` 时就指定 `0o600`（创建即生效，没有窗口），写完再收紧到 `0o400`，
+/// 并**检查 chmod 的返回值** —— 失败必须让用户知道，而不是静默留一个 0644 的私钥。
+#[cfg(unix)]
+fn write_private_key(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("create private key {}: {e}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| format!("write private key {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("sync private key {}: {e}", path.display()))?;
+    drop(file);
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).map_err(|e| {
+        format!(
+            "restrict permissions of private key {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    // Windows 用 ACL 而非 umask 位，本项修复针对 Unix 的 umask 语义，此处保持原行为。
+    std::fs::write(path, contents).map_err(|e| format!("write private key {}: {e}", path.display()))
+}
+
+/// `bind-cert-validity-days` 的上限：100 年。
+///
+/// 🔐 编号 58：字段是 `Option<u64>`，原来两处都用 `as i64` 转换 ——
+/// `u64::MAX as i64` 变成 -1，传给 rcgen 就是"立即过期"的证书，而配置自检照样通过。
+/// 这里用 `i64::try_from` 并在越界时夹取 + 告警。
+pub const MAX_CERT_VALIDITY_DAYS: i64 = 36500;
+
+/// 把配置里的有效天数转成 rcgen 要的 `i64`，越界时夹到 `MAX_CERT_VALIDITY_DAYS`。
+pub fn validity_days_to_i64(days: u64) -> i64 {
+    match i64::try_from(days) {
+        Ok(v) if v <= MAX_CERT_VALIDITY_DAYS => v,
+        _ => {
+            crate::log::warn!(
+                "the value {days} of bind-cert-validity-days is out of range; {MAX_CERT_VALIDITY_DAYS} days (100 years) is applied"
+            );
+            MAX_CERT_VALIDITY_DAYS
+        }
+    }
+}
+
 /// 生成自签证书链。文件已存在时直接返回（幂等，不覆盖用户文件）。
 /// `root_key_path` 缺省取私钥同目录的 root-ca.key（对齐 C 版）。
 pub fn generate_self_signed_chain(
@@ -187,14 +248,7 @@ pub fn generate_self_signed_chain(
         if let Some(parent) = root_key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&root_key_path, kp.serialize_pem())
-            .map_err(|e| format!("write root CA key: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ =
-                std::fs::set_permissions(&root_key_path, std::fs::Permissions::from_mode(0o400));
-        }
+        write_private_key(&root_key_path, &kp.serialize_pem())?;
         info!("generated root CA key: {}", root_key_path.display());
         (kp, cert)
     };
@@ -215,13 +269,20 @@ pub fn generate_self_signed_chain(
     // 证书文件：服务器证书 + CA 证书两条（对齐 C 版，客户端可直接导入 CA 段）
     let cert_pem = format!("{}{}", server_cert.pem(), ca_cert.pem());
     std::fs::write(cert_path, cert_pem).map_err(|e| format!("write certificate: {e}"))?;
-    std::fs::write(key_path, server_kp.serialize_pem())
-        .map_err(|e| format!("write private key: {e}"))?;
+    write_private_key(key_path, &server_kp.serialize_pem())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o400));
-        let _ = std::fs::set_permissions(cert_path, std::fs::Permissions::from_mode(0o444));
+        // 🔐 编号 47：证书是公开内容，权限不对不影响安全、只影响可读性，
+        // 因此失败只记 warn，不像私钥那样直接返回错误。
+        if let Err(err) =
+            std::fs::set_permissions(cert_path, std::fs::Permissions::from_mode(0o444))
+        {
+            crate::log::warn!(
+                "cannot restrict the permissions of the generated certificate {}: {err}",
+                cert_path.display()
+            );
+        }
     }
 
     info!(
@@ -299,7 +360,7 @@ pub fn ensure_cert_for_binds(
         if s.is_empty() { None } else { Some(s) }
     };
 
-    let validity_days = cfg.bind_cert_validity_days.map(|d| d as i64);
+    let validity_days = cfg.bind_cert_validity_days.map(validity_days_to_i64);
     let append_san = if cfg.bind_cert_san.is_empty() {
         None
     } else {
@@ -329,5 +390,60 @@ pub fn ensure_cert_for_binds(
             }
         }
         let _ = (uid, gid);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// 🔐 编号 47：私钥必须以 0400 落盘，证书以 0444。
+    #[test]
+    fn private_key_is_written_with_restrictive_permissions() {
+        let dir = std::env::temp_dir().join(format!("smartdns-certperm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cert = dir.join("server.crt");
+        let key = dir.join("server.key");
+        let root_key = dir.join("root-ca.key");
+
+        generate_self_signed_chain(
+            &cert,
+            &key,
+            Some(&root_key),
+            Some("localhost"),
+            None,
+            Some(1),
+        )
+        .expect("certificate generation must succeed");
+
+        let key_mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(key_mode, 0o400, "私钥必须是 0400，实际 {key_mode:o}");
+
+        let root_mode = std::fs::metadata(&root_key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            root_mode, 0o400,
+            "根 CA 私钥必须是 0400，实际 {root_mode:o}"
+        );
+
+        let cert_mode = std::fs::metadata(&cert).unwrap().permissions().mode() & 0o777;
+        assert_eq!(cert_mode, 0o444, "证书必须是 0444，实际 {cert_mode:o}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+
+    #[test]
+    fn validity_days_beyond_the_cap_are_clamped() {
+        assert_eq!(validity_days_to_i64(390), 390);
+        assert_eq!(validity_days_to_i64(36500), 36500);
+        assert_eq!(validity_days_to_i64(36501), 36500);
+        assert_eq!(validity_days_to_i64(u64::MAX), 36500);
     }
 }

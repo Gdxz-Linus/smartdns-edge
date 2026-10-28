@@ -2,7 +2,7 @@ use axum::extract::Request;
 use http::{HeaderValue, header};
 use hyper::body::Incoming;
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server,
 };
 use std::{convert::Infallible, io, net::SocketAddr, sync::Arc};
@@ -29,6 +29,8 @@ pub fn serve(
     api_enabled: bool,
     server_cert_resolver: Arc<dyn ResolvesServerCert>,
     h3_port: Option<u16>,
+    first_packet_timeout: Option<std::time::Duration>,
+    connection_ttl: Option<std::time::Duration>,
 ) -> io::Result<CancellationToken> {
     let token = CancellationToken::new();
     let cancellation_token = token.clone();
@@ -168,12 +170,39 @@ pub fn serve(
 
                 let socket = TokioIo::new(socket);
 
-                if let Err(err) = server::conn::auto::Builder::new(TokioExecutor::new())
-                    .http2()
-                    .enable_connect_protocol()
-                    .serve_connection_with_upgrades(socket, hyper_service)
-                    .await
-                {
+                // 🔐 编号 28：TLS 握手有 5 秒超时，但握手成功后交给 hyper 的连接此前
+                // 既没有 timer 也没有 header_read_timeout —— hyper 的默认 30 秒读头超时
+                // 在未设置 timer 时完全不生效（hyper-1.7.0/src/common/time.rs:63-78），
+                // 等于彻底无超时。攻击者完成握手后每几十秒发一个字节就能永久占住一条连接，
+                // 几千条即可打满 max-connections，此后所有 DoH/DoT/TCP 新连接被拒。
+                //
+                // HTTP/1.1：挂 timer + header_read_timeout，超时值复用 first-packet-timeout。
+                // HTTP/2 是帧协议，没有"读请求头"阶段，header_read_timeout 对它无效，
+                // 改用连接总时长上限（connection_ttl），到期断开这一条连接。
+                let mut builder = server::conn::auto::Builder::new(TokioExecutor::new());
+                builder.http1().timer(TokioTimer::new());
+                builder
+                    .http1()
+                    .header_read_timeout(first_packet_timeout);
+                builder.http2().timer(TokioTimer::new());
+                builder.http2().enable_connect_protocol();
+
+                let served = builder.serve_connection_with_upgrades(socket, hyper_service);
+
+                let outcome = match connection_ttl {
+                    Some(ttl) => match tokio::time::timeout(ttl, served).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            log::debug!(
+                                "HTTP connection from {src_addr} exceeded the {ttl:?} lifetime cap; closing it"
+                            );
+                            return;
+                        }
+                    },
+                    None => served.await,
+                };
+
+                if let Err(err) = outcome {
                     crate::log::warn!(
                         "HTTPS connection handling failed (the connection was dropped): {err:#}"
                     );

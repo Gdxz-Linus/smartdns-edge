@@ -46,6 +46,21 @@
 本目录 `src/` 下实际为 **8 个 `.rs` 源文件**（含 `icmp/` 子目录 3 个），首次建账时
 写"9 个"有误。
 
+### 6. `src/icmp/icmpv4.rs` 和 `src/icmp/icmpv6.rs`（差错包解码加固）
+
+- **ICMPv4**：差错包内嵌 IPv4 首部按 `IHL * 4` 计算动态偏移，并在提取 echo
+  标识符与序号前校验 ICMP 载荷完整长度；支持带 IP Options 的原始 ICMP 差错包。
+- **ICMPv6**：差错包先检查内嵌 IPv6 报文的 Next Header；存在扩展首部时不盲猜
+  可变长度，直接返回畸形载荷错误，避免错位读取。
+
+### 7. `src/client.rs`（重复 waiter 不再顶掉先登记者，2026-10-28，批次二十 69）
+
+- **改动**：`ReplyMap::new_waiter` 原实现先 `insert` 再检查返回值；重复登记时
+  旧 sender 已被替换，先登记的 waiter 永远收不到应答。改为持锁后先 `contains_key`
+  判重，确认不存在再插入。
+- **测试**：新增 `duplicate_waiter_does_not_displace_the_first_one`，确认第二次登记
+  返回错误且第一个 receiver 仍保持打开。
+
 ## 与主仓的关系
 
 | 问题 | 结论 |

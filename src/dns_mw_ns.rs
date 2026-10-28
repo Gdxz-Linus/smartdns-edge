@@ -32,8 +32,7 @@ use tokio::time::sleep; // 🌟 引入互斥锁
 pub struct NameServerMiddleware {
     client: DnsClient,
     // 🌟 新增：底层收费站复印机 (合并相同的 4 倍冗余请求)
-    inflight:
-        Arc<Mutex<HashMap<String, broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
+    inflight: Arc<Mutex<HashMap<String, broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
 }
 
 impl NameServerMiddleware {
@@ -408,21 +407,18 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             // 📌 乙类：中间那档（组级）由 `ctx.rr_ttl()` 负责（组级 > 全局）
             let rr_ttl = ctx
                 .domain_rule
-                .as_ref()
-                .and_then(|r| r.rr_ttl)
+                .get(|r| r.rr_ttl)
                 .map(|i| i as u32)
                 .or_else(|| ctx.rr_ttl().map(|i| i as u32));
 
             let rr_ttl_min = ctx
                 .domain_rule
-                .as_ref()
-                .and_then(|r| r.rr_ttl_min)
+                .get(|r| r.rr_ttl_min)
                 .map(|i| i as u32)
                 .unwrap_or_else(|| ctx.rr_ttl_min().unwrap_or(0) as u32);
             let rr_ttl_max = ctx
                 .domain_rule
-                .as_ref()
-                .and_then(|r| r.rr_ttl_max)
+                .get(|r| r.rr_ttl_max)
                 .map(|i| i as u32)
                 .unwrap_or_else(|| ctx.rr_ttl_max().unwrap_or(86400) as u32);
 

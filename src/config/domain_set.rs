@@ -140,16 +140,29 @@ impl IDomainSetProvider for DomainSetHttpProvider {
 }
 
 fn read_to_domain_set(s: &str, domain_set: &mut HashSet<WildcardName>) {
+    // 🔐 编号 63：原来用 `split(' ')`，只认单个空格。名单文件里用 Tab 分隔
+    //（从表格粘贴、或编辑器自动缩进）时，第一个"字段"是 `a.com\tb.com`，
+    // `WildcardName::from_str` 失败 ⇒ **整行静默丢弃**，用户只看到"加载成功 N 条"。
+    // 改用 `split_whitespace()` 同时认空格与 Tab；仍只取每行第一个 token（保持原语义）。
+    let mut skipped = 0usize;
     for line in s.lines() {
         let line = line.trim_start();
-        if line.starts_with('#') {
+        if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        let mut parts = line.split(' ');
-
-        if let Some(n) = parts.next().and_then(|n| WildcardName::from_str(n).ok()) {
-            domain_set.insert(n);
+        if let Some(token) = line.split_whitespace().next() {
+            match WildcardName::from_str(token) {
+                Ok(n) => {
+                    domain_set.insert(n);
+                }
+                Err(_) => skipped += 1,
+            }
         }
+    }
+    if skipped > 0 {
+        crate::log::warn!(
+            "{skipped} entries in the domain list could not be parsed and were skipped"
+        );
     }
 }
 
@@ -450,5 +463,12 @@ mod tests {
             .get_domain_set(&Default::default())
             .expect("正常 https 名单必须能下载");
         assert!(set.contains(&"ok.example.com".parse().unwrap()));
+    }
+    /// 🔐 编号 63：Tab 分隔的名单行不能被整行静默丢弃。
+    #[test]
+    fn domain_set_accepts_tab_separated_lines() {
+        let mut set = HashSet::new();
+        read_to_domain_set("example.com\t# comment\nfoo.test\n", &mut set);
+        assert!(!set.is_empty());
     }
 }

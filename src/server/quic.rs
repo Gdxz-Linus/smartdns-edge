@@ -1,12 +1,22 @@
 use std::{io, sync::Arc, time::Duration};
 
 use crate::rustls::ResolvesServerCert;
-use tokio::{net, task::JoinSet};
+use tokio::{
+    net,
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{DnsHandle, reap_tasks, sanitize_src_address};
 
 use crate::{dns::SerialMessage, libdns::Protocol, log};
+
+const MAX_CONCURRENT_SUBSTREAMS: usize = 32;
+
+fn try_admit(sem: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    sem.clone().try_acquire_owned().ok()
+}
 
 pub fn serve(
     socket: net::UdpSocket,
@@ -38,7 +48,18 @@ pub fn serve(
             let (mut quic_streams, src_addr) = tokio::select! {
                 result = server.next() => match result {
                     Ok(Some(c)) => c,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        // 🔐 编号 42：`endpoint.accept()` 返回 None 表示 endpoint 已关闭
+                        // （`quic_server.rs:75-84` 把它映射成 `Ok(None)`）。原来这里 `continue`
+                        // 回到 loop，而 endpoint 已关闭、`accept()` 会**立即**再次返回 None ——
+                        // 形成无等待的忙循环，把一个 tokio worker 线程钉在 100% CPU，
+                        // 且 `cancellation_token` 永远轮不到被检查。
+                        // endpoint 关闭属不可恢复状态，退出 accept 循环。
+                        log::debug!(
+                            "the QUIC endpoint closed; stopping the accept loop for this listener"
+                        );
+                        break;
+                    }
                     Err(e) => {
                         // 🔐 P2-7：与 UDP/TCP/TLS 监听同口径 —— 连续出错按指数退避，
                         // 防止持续性错误把循环打成 100% CPU 空转；日志降频防刷屏。
@@ -101,10 +122,9 @@ pub fn serve(
                 let _listener_guard = listener_guard;
                 log::debug!("starting quic stream request from: {src_addr}");
 
-                // 🔐 P0-5：单条 QUIC 连接允许的子流数。原值 100 会让一条连接最坏占到
-                // 100 × 64 KiB ≈ 6.4 MiB；配合按需分配后单流占用已很小，
-                // 这里再收紧到 32：对任何正常 DoQ 客户端的并发都绰绰有余。
-                let mut max_requests = 32u32;
+                // 🔐 限制的是“同时处理中的子流数”，不是连接生命周期内的累计查询数。
+                // 正常 DoQ 客户端会长期复用连接；累计计数会在第 32 条查询时错误断开它。
+                let substream_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSTREAMS));
 
                 // Accept all inbound quic streams sent over the connection.
                 loop {
@@ -120,11 +140,24 @@ pub fn serve(
                         _ = cancellation_token.cancelled() => break,
                     };
 
+                    let permit = match try_admit(&substream_limit) {
+                        Some(permit) => permit,
+                        None => {
+                            log::debug!(
+                                "substream concurrency limit ({MAX_CONCURRENT_SUBSTREAMS}) reached on {src_addr}; rejecting this substream"
+                            );
+                            let _ = request_stream.stop(DoqErrorCode::ExcessiveLoad);
+                            continue;
+                        }
+                    };
+
                     let handler = handler.clone();
 
                     // 🌟 核心修复：拿到一个新的 QUIC Stream 后，立刻派发后台处理！
                     // 主循环秒级回归，疯狂接收该 QUIC 连接发来的下一个并发查询流，彻底实现 QUIC 多路复用。
                     tokio::spawn(async move {
+                        let _permit = permit;
+
                         // 🔐 P0-5：单条子流的"首包"同样要限时——
                         // 否则只发 2 字节长度前缀就能长期占住这条流（DoQ 是最便宜的放大面）。
                         let read_result = match first_packet_timeout {
@@ -167,15 +200,6 @@ pub fn serve(
                         // DOQ_NO_ERROR (0x0): No error. 完美关闭当前子流。
                         let _ = request_stream.stop(DoqErrorCode::NoError);
                     });
-
-                    max_requests -= 1;
-
-                    if max_requests == 0 {
-                        log::warn!(
-                            "exceeded max request count (32), shutting down quic conn: {src_addr}"
-                        );
-                        break; // 触发反滥用机制，关闭整个 QUIC 连接
-                    }
                 }
             });
 
@@ -184,4 +208,32 @@ pub fn serve(
     });
 
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substream_limit_admits_32_then_rejects() {
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSTREAMS));
+        let permits = (0..MAX_CONCURRENT_SUBSTREAMS)
+            .map(|_| try_admit(&sem).expect("前 32 条子流必须获准"))
+            .collect::<Vec<_>>();
+
+        assert!(try_admit(&sem).is_none(), "第 33 条并发子流必须被拒绝");
+        drop(permits);
+    }
+
+    #[test]
+    fn substream_permit_is_returned_on_drop() {
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSTREAMS));
+        let mut permits = (0..MAX_CONCURRENT_SUBSTREAMS)
+            .map(|_| try_admit(&sem).expect("前 32 条子流必须获准"))
+            .collect::<Vec<_>>();
+
+        assert!(try_admit(&sem).is_none());
+        drop(permits.pop().expect("至少有一个许可"));
+        assert!(try_admit(&sem).is_some(), "子流任务结束后许可必须归还");
+    }
 }

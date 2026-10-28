@@ -10,7 +10,9 @@ use crate::{
 
 use hickory_proto::{
     rr::Name,
-    serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder, EncodeMode, NameEncoding},
+    serialize::binary::{
+        BinDecodable, BinDecoder, BinEncodable, BinEncoder, EncodeMode, NameEncoding,
+    },
 };
 use ipnet::Ipv4Net;
 #[cfg(feature = "serde")]
@@ -745,7 +747,13 @@ impl Decodable for DhcpOption {
                 let code = opt_decoder.read_u8()?.into();
                 let _len = opt_decoder.read_u8()?; // throw out potentially invalid len
 
-                decode_inner(code, opt_decoder.buffer().len(), &mut opt_decoder)
+                match decode_inner(code, opt_decoder.buffer().len(), &mut opt_decoder) {
+                    Ok(opt) => Ok(opt),
+                    Err(_) => Ok(DhcpOption::Unknown(UnknownOption {
+                        code: code.into(),
+                        data: self.buf[2..].to_vec(),
+                    })),
+                }
             }
             // can't implement Decodable b/c of lifetime issues
             fn decode(dec: &mut Decoder<'a>) -> DecodeResult<Self> {
@@ -1074,6 +1082,24 @@ impl Encodable for DhcpOption {
             }
             O::BulkLeaseQueryStatusCode(status_code, msg) => {
                 e.write_u8(code.into())?;
+                // 🔐 编号 71：DHCPv4 选项长度字段是 1 字节（最大 255），
+                // 而 `msg.len() as u8` 在超过 255 字节时**静默截断** ——
+                // 长度字段与实际写入字节数不符，解码方按截断后的长度读，后续选项全部错位。
+                // 这里按 254 截断消息本体（留 1 字节给 status code），保证长度字段与实际一致。
+                const MAX_MSG: usize = u8::MAX as usize - 1; // 254
+                let mut msg = msg.as_str();
+                if msg.len() > MAX_MSG {
+                    let mut end = MAX_MSG;
+                    while !msg.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    eprintln!(
+                        "BulkLeaseQueryStatusCode message is {} bytes, longer than the {} the option length field can express; truncating",
+                        msg.len(),
+                        MAX_MSG
+                    );
+                    msg = &msg[..end];
+                }
                 let msg = msg.as_bytes();
                 e.write_u8(msg.len() as u8 + 1)?;
                 e.write_u8((*status_code).into())?;
@@ -1378,6 +1404,28 @@ mod tests {
         )?;
         Ok(())
     }
+
+    #[test]
+    fn test_bad_option_fallback_to_unknown_keeps_following_options() -> Result<()> {
+        let input = vec![81, 2, 1, 2, 6, 4, 192, 168, 0, 1, 255];
+        let opts = DhcpOptions::decode(&mut Decoder::new(&input))?;
+
+        assert_eq!(opts.len(), 2);
+        assert_eq!(
+            opts.get(OptionCode::DomainNameServer),
+            Some(&DhcpOption::DomainNameServer(vec![
+                "192.168.0.1".parse::<Ipv4Addr>()?
+            ]))
+        );
+
+        let fallback = opts.get(OptionCode::Unknown(81)).unwrap();
+        let DhcpOption::Unknown(unknown) = fallback else {
+            panic!("expected malformed option 81 to fall back to Unknown");
+        };
+        assert_eq!(unknown.code(), OptionCode::ClientFQDN);
+        assert_eq!(unknown.data(), [1, 2]);
+        Ok(())
+    }
     #[test]
     fn test_str() -> Result<()> {
         test_opt(
@@ -1454,6 +1502,24 @@ mod tests {
 
         Ok(())
     }
+    #[test]
+    fn bulk_lease_status_code_length_matches_the_written_bytes() {
+        // 300 字节的消息超过 u8 长度字段能表达的上限
+        let long = "x".repeat(300);
+        let opt = DhcpOption::BulkLeaseQueryStatusCode(bulk_query::Code::Success, long);
+        let mut buf = Vec::new();
+        opt.encode(&mut Encoder::new(&mut buf)).unwrap();
+
+        // 编码结果必须是：code(1) + len(1) + status(1) + msg(N)
+        let len_field = buf[1] as usize;
+        assert_eq!(
+            buf.len(),
+            2 + len_field,
+            "长度字段必须与实际写入字节数一致（len_field={len_field}, total={}）",
+            buf.len()
+        );
+    }
+
     #[test]
     fn test_status() -> Result<()> {
         let msg = "message".to_string();
@@ -1643,23 +1709,31 @@ mod tests {
 
     /// option 151（BulkLeaseQueryStatusCode）长度为 0：修复前 release 下静默截断、debug 下 panic。
     #[test]
-    fn test_bulk_lease_query_status_code_len0_is_error() -> Result<()> {
+    fn test_bulk_lease_query_status_code_len0_falls_back_to_unknown() -> Result<()> {
         // code=151, len=0
         let data = [151u8, 0];
         let mut dec = Decoder::new(&data);
         let opt = DhcpOption::decode(&mut dec);
-        assert!(opt.is_err(), "len=0 option 151 must be an error");
+        let DhcpOption::Unknown(unknown) = opt? else {
+            panic!("len=0 option 151 must fall back to Unknown");
+        };
+        assert_eq!(unknown.code(), OptionCode::BulkLeaseQueryStatusCode);
+        assert!(unknown.data().is_empty());
         Ok(())
     }
 
     /// option 81（ClientFQDN）长度不足 3：修复前下溢。
     #[test]
-    fn test_client_fqdn_len2_is_error() -> Result<()> {
+    fn test_client_fqdn_len2_falls_back_to_unknown() -> Result<()> {
         // code=81, len=2, 数据 2 字节（不够 flags+rcode1+rcode2 的 3 字节）
         let data = [81u8, 2, 0, 0];
         let mut dec = Decoder::new(&data);
         let opt = DhcpOption::decode(&mut dec);
-        assert!(opt.is_err(), "len<3 option 81 must be an error");
+        let DhcpOption::Unknown(unknown) = opt? else {
+            panic!("len<3 option 81 must fall back to Unknown");
+        };
+        assert_eq!(unknown.code(), OptionCode::ClientFQDN);
+        assert_eq!(unknown.data(), [0, 0]);
         Ok(())
     }
 
@@ -1673,7 +1747,11 @@ mod tests {
                 .collect(),
         );
         let mut bytes = msg.to_vec()?;
-        println!("total len: {}, bytes[236..240] = {:?}", bytes.len(), &bytes[236..240]);
+        println!(
+            "total len: {}, bytes[236..240] = {:?}",
+            bytes.len(),
+            &bytes[236..240]
+        );
         // 破坏 magic cookie（字节 236..240）
         bytes[236] ^= 0xff;
         let res = crate::v4::Message::from_bytes(&bytes);

@@ -283,7 +283,9 @@ impl Message {
 
     /// Get the message's chaddr.
     pub fn chaddr(&self) -> &[u8] {
-        &self.chaddr[..(self.hlen as usize)]
+        // 🔐 编号 68：`hlen` 来自报文且未经校验，可被设成 255，而 `chaddr` 只有 16 字节
+        // ⇒ 切片越界 panic。DHCPv4 的硬件地址字段固定 16 字节，超出部分不存在。
+        &self.chaddr[..(self.hlen as usize).min(self.chaddr.len())]
     }
 
     /// Set the message's chaddr. `chaddr` can only up to 16 bytes in length
@@ -634,6 +636,13 @@ mod tests {
         msg.set_chaddr(&[0, 1, 2, 3, 4, 5]);
         assert_eq!(msg.chaddr().len(), 6);
         Ok(())
+    }
+
+    #[test]
+    fn chaddr_does_not_panic_on_oversized_hlen() {
+        let mut msg = Message::default();
+        msg.hlen = 255;
+        assert_eq!(msg.chaddr().len(), 16);
     }
 
     #[cfg(feature = "serde")]

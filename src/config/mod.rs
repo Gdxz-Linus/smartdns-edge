@@ -40,6 +40,24 @@ pub fn sanitize_ttl(name: &str, v: u64) -> u64 {
     }
 }
 
+/// `max-reply-ip-num` 的文档声明范围（见本文件 `max_reply_ip_num` 字段注释）。
+pub const MAX_REPLY_IP_NUM_MAX: u8 = 16;
+
+/// 把 `max-reply-ip-num` 收进文档声明的 1..=16。
+///
+/// 🔐 编号 57：原来解析直接吃 `u8`（0-255），注释与文档写的是 1~16，但从不校验 ——
+/// 写 200 与写 16 都"合法"却行为不同，用户无从判断哪个才对。
+/// 这里夹到文档声明的范围并告警，与 `sanitize_ttl` 同构。
+pub fn sanitize_max_reply_ip_num(v: u8) -> u8 {
+    let clamped = v.clamp(1, MAX_REPLY_IP_NUM_MAX);
+    if clamped != v {
+        crate::log::warn!(
+            "the value {v} of max-reply-ip-num is outside the documented range 1..={MAX_REPLY_IP_NUM_MAX}; {clamped} is applied"
+        );
+    }
+    clamped
+}
+
 mod acl;
 mod audit;
 mod bind_addr;
@@ -323,14 +341,6 @@ pub struct Config {
     /// 🔐 Q4：同上，nftables 那一半（`nftset-timeout`）
     pub nftset_timeout: Option<bool>,
 
-    /// 🔐 Q3：`ipset-no-speed`。**本实现一律把解析出的地址全部写入集合**，
-    /// 也就是"本来就等于开着这个开关"（C 版默认是"先测速、只写最快那一个"）。
-    /// 存下来只为"这行配置我认了"，运行时不改变行为 —— 启动时会明确说明一次，不让用户以为白配。
-    pub ipset_no_speed: Option<bool>,
-
-    /// 🔐 Q5：同上，nftables 那一半（`nftset-no-speed`）
-    pub nftset_no_speed: Option<bool>,
-
     /// 🔐 Q6：`nftset-debug` —— 打开往防火墙集合写地址时的详细日志
     pub nftset_debug: Option<bool>,
 
@@ -489,10 +499,7 @@ impl AddressRuleValue {
     pub fn merge(&mut self, rhs: Self) {
         use AddressRuleValue::*;
         match (self, rhs) {
-            (
-                Addr { v4: l_v4, v6: l_v6 },
-                Addr { v4: r_v4, v6: r_v6 },
-            ) => {
+            (Addr { v4: l_v4, v6: l_v6 }, Addr { v4: r_v4, v6: r_v6 }) => {
                 if let Some(r4) = r_v4 {
                     let mut list = l_v4.as_ref().map(|v| v.to_vec()).unwrap_or_default();
                     for ip in r4.iter() {
@@ -642,3 +649,17 @@ macro_rules! impl_from_str {
 }
 
 impl_from_str!(AddressRule, Domain, AddressRuleValue, BindAddr);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_reply_ip_num_is_clamped_to_the_documented_range() {
+        assert_eq!(sanitize_max_reply_ip_num(0), 1);
+        assert_eq!(sanitize_max_reply_ip_num(1), 1);
+        assert_eq!(sanitize_max_reply_ip_num(16), 16);
+        assert_eq!(sanitize_max_reply_ip_num(17), 16);
+        assert_eq!(sanitize_max_reply_ip_num(200), 16);
+    }
+}

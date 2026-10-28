@@ -16,7 +16,7 @@ use std::{io, net::SocketAddr};
 
 use futures_util::{future::FutureExt, stream::Stream};
 use quinn::{
-    ClientConfig, Connection, Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig,
+    crypto::rustls::QuicClientConfig, ClientConfig, Connection, Endpoint, TransportConfig, VarInt,
 };
 use tokio::time::timeout;
 
@@ -25,7 +25,7 @@ use crate::{
     quic::quic_stream::{DoqErrorCode, QuicStream},
     rustls::client_config,
     udp::UdpSocket,
-    xfer::{CONNECT_TIMEOUT, DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream},
+    xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream, CONNECT_TIMEOUT},
 };
 
 use super::{quic_config, quic_stream};
@@ -161,7 +161,7 @@ impl DnsRequestSender for QuicClientStream {
     /// ```
     fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
-            panic!("can not send messages after stream is shutdown")
+            return ProtoError::from("can not send messages after stream is shutdown").into();
         }
 
         Box::pin(Self::inner_send(self.quic_connection.clone(), request)).into()

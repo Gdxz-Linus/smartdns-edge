@@ -629,10 +629,17 @@ impl Decodable for DhcpOption {
                 DhcpOption::Authentication(Authentication::decode(&mut dec)?)
             }
             OptionCode::ServerUnicast => DhcpOption::ServerUnicast(decoder.read::<16>()?.into()),
-            OptionCode::StatusCode => DhcpOption::StatusCode(StatusCode {
-                status: decoder.read_u16()?.into(),
-                msg: decoder.read_string(len - std::mem::size_of::<u16>())?,
-            }),
+            OptionCode::StatusCode => {
+                // 🔐 编号 70：`len` 来自报文，小于 2 时 `len - 2` 整数下溢
+                //（debug 构建 panic，release 构建变成巨大长度）。先判长度。
+                if len < 2 {
+                    return Err(DecodeError::NotEnoughBytes);
+                }
+                DhcpOption::StatusCode(StatusCode {
+                    status: decoder.read_u16()?.into(),
+                    msg: decoder.read_string(len - 2)?,
+                })
+            }
             OptionCode::RapidCommit => DhcpOption::RapidCommit,
             OptionCode::UserClass => {
                 let buf = decoder.read_slice(len)?;
@@ -641,6 +648,10 @@ impl Decodable for DhcpOption {
                 })
             }
             OptionCode::VendorClass => {
+                // 🔐 编号 70：同上，`len` 小于 4 时 `len - 4` 下溢。
+                if len < 4 {
+                    return Err(DecodeError::NotEnoughBytes);
+                }
                 let num = decoder.read_u32()?;
                 let buf = decoder.read_slice(len - 4)?;
                 DhcpOption::VendorClass(VendorClass {
@@ -1101,5 +1112,21 @@ mod tests {
 
         assert_eq!(opts, expected_opts);
         assert_eq!(buffer.as_slice(), raw);
+    }
+
+    #[test]
+    fn short_status_code_option_is_rejected() {
+        // code=13, len=1，小于 u16 的 2 字节
+        let raw = [0x00, 0x0d, 0x00, 0x01, 0x00];
+        let mut dec = Decoder::new(&raw);
+        assert!(DhcpOption::decode(&mut dec).is_err());
+    }
+
+    #[test]
+    fn short_vendor_class_option_is_rejected() {
+        // code=16, len=3，小于 u32 的 4 字节
+        let raw = [0x00, 0x10, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let mut dec = Decoder::new(&raw);
+        assert!(DhcpOption::decode(&mut dec).is_err());
     }
 }

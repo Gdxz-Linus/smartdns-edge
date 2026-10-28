@@ -1,14 +1,11 @@
-use std::{
-    borrow::Borrow,
-    net::IpAddr,
-    sync::{Arc, RwLock},
-};
+use std::{borrow::Borrow, net::IpAddr, sync::Arc};
 
 use crate::libdns::proto::{
     op::Query,
     rr::{IntoName, RecordType},
 };
 
+use crate::infra::arp::ArpResolver;
 use crate::{
     config::ServerOpts,
     dns::{DnsContext, DnsError, DnsRequest, DnsResponse},
@@ -17,21 +14,6 @@ use crate::{
 };
 
 pub type DnsMiddlewareHost = MiddlewareHost<DnsContext, DnsRequest, DnsResponse, DnsError>;
-
-type ArpLookupFn = fn(IpAddr) -> Option<String>;
-static TEST_ARP_LOOKUP: RwLock<Option<ArpLookupFn>> = RwLock::new(None);
-
-#[cfg(test)]
-pub fn set_test_arp_lookup(lookup: Option<ArpLookupFn>) {
-    *TEST_ARP_LOOKUP.write().unwrap() = lookup;
-}
-
-fn lookup_client_mac_from_arp(client_ip: IpAddr) -> Option<String> {
-    if let Some(test_lookup) = *TEST_ARP_LOOKUP.read().unwrap() {
-        return test_lookup(client_ip);
-    }
-    crate::infra::arp::lookup_client_mac_from_arp(client_ip)
-}
 
 /// IPv6 的 v4-mapped 地址先归一成 IPv4 —— 否则同一个设备会因为"用了哪种写法"
 /// 落到不同的客户端规则上（`::ffff:192.168.1.5` 与 `192.168.1.5` 必须同组）。
@@ -50,6 +32,7 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 pub struct DnsMiddlewareHandler {
     cfg: Arc<RuntimeConfig>,
     host: DnsMiddlewareHost,
+    arp_resolver: Arc<ArpResolver>,
 }
 
 impl DnsMiddlewareHandler {
@@ -165,7 +148,7 @@ impl DnsMiddlewareHandler {
                 .iter()
                 .any(|s| matches!(s.client, crate::dns_conf::Client::Mac(_)))
         {
-            if let Some(mac) = lookup_client_mac_from_arp(client_ip) {
+            if let Some(mac) = self.arp_resolver.lookup(client_ip).await {
                 matched_rule = client_rules.iter().find(|s| s.match_mac(&mac));
             }
         }
@@ -212,12 +195,14 @@ impl DnsMiddlewareHandler {
 
 pub struct DnsMiddlewareBuilder {
     builder: MiddlewareBuilder<DnsContext, DnsRequest, DnsResponse, DnsError>,
+    arp_resolver: Arc<ArpResolver>,
 }
 
 impl DnsMiddlewareBuilder {
     pub fn new() -> Self {
         Self {
             builder: MiddlewareBuilder::new(DnsDefaultHandler),
+            arp_resolver: Arc::new(ArpResolver::new()),
         }
     }
 
@@ -229,10 +214,16 @@ impl DnsMiddlewareBuilder {
         self
     }
 
+    pub fn with_arp_resolver(mut self, resolver: Arc<ArpResolver>) -> Self {
+        self.arp_resolver = resolver;
+        self
+    }
+
     pub fn build(self, cfg: Arc<RuntimeConfig>) -> DnsMiddlewareHandler {
         DnsMiddlewareHandler {
             host: self.builder.build(),
             cfg,
+            arp_resolver: self.arp_resolver,
         }
     }
 }
@@ -570,18 +561,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn acl_enable_allows_matched_mac_client() {
         use crate::config::ServerOpts;
-        use std::sync::{Mutex, OnceLock};
-
-        fn test_arp_lock() -> &'static Mutex<()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(()))
-        }
+        use crate::infra::arp::{set_test_arp_lookup, test_arp_lock};
 
         fn test_arp_lookup(_client_ip: IpAddr) -> Option<String> {
             Some("01:23:45:67:89:ab".to_string())
         }
 
-        let _arp_guard = test_arp_lock().lock().unwrap();
+        let _arp_guard = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
         set_test_arp_lookup(Some(test_arp_lookup));
 
         let name = "acl-mac.example.com";
@@ -663,5 +649,29 @@ mod tests {
         let err = res.unwrap_err();
 
         assert!(err.is_soa());
+
+        // 🔐 编号 39：光断言 `is_soa()` 不够 —— 它只看 `soa.is_some()`，测不出
+        // 「response_code 写成 ServFail 导致 as_soa() 永远还原不出来」这个矛盾。
+        // 这里必须验证 as_soa() 真的能产出一个带 SOA 的 NOERROR 应答。
+        let query = Query::query("baidu.com".parse().unwrap(), RecordType::A);
+        let restored = err
+            .as_soa(&query)
+            .expect("终端兜底的 SOA 必须能被 as_soa() 还原（否则客户端会收到 SERVFAIL）");
+        assert_eq!(
+            restored.response_code(),
+            crate::libdns::proto::op::ResponseCode::NoError,
+            "兜底应答必须是 NOERROR，不能是 SERVFAIL"
+        );
+        assert!(
+            !restored.authorities().is_empty(),
+            "还原出的应答必须在 Authority 区带 SOA"
+        );
+        assert!(
+            restored
+                .authorities()
+                .iter()
+                .any(|r| r.record_type() == RecordType::SOA),
+            "Authority 区必须含 SOA 记录"
+        );
     }
 }
