@@ -36,19 +36,3 @@ nftset /example.com/#4:inet#router#dns4_set,#6:inet#router#dns6_set
 ipset-timeout yes
 nftset-timeout yes
 ```
-
-> ⚠️ **关于 `ipset-no-speed` / `nftset-no-speed`**：这两个是**布尔开关**（`yes` / `no`），
-> **不带集合名**。
->
-> 它们的作用是"**测速失败的 IP 是否也写进集合**"，而本程序**一律把所有解析出的地址
-> 都写进集合**（已等同开启），所以这两行**配不配都一样**。
->
-> 本程序仍然**认得**这两行（不会报"未识别配置行"），但会在启动时提示它们无需配置 ——
-> 免得你配了之后怀疑"是不是没生效"。
-
-```shell
-# 这两行可以原样保留，不必删；
-# 本程序一律写入全部地址，它们不会改变行为
-ipset-no-speed yes
-nftset-no-speed yes
-```

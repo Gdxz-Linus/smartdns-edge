@@ -28,7 +28,7 @@
 | bind-cert-key-file | SSL证书KEY文件路径 | smartdns-key.pem | 合法路径字符串 | bind-cert-key-file key.pem |
 | bind-cert-key-pass | SSL证书KEY文件密码（私钥为 PKCS#8 加密格式时用于解密；全局一个，作用于全部加密监听） | 无 | 字符串 | bind-cert-key-pass password |
 | bind-cert-generate | 未配置证书时是否自动生成自签名证书链 | auto | auto（证书与私钥路径都未配置时生成）\|yes\|no | bind-cert-generate auto |
-| bind-cert-validity-days | 自动生成的服务器证书有效期（天） | 390 | 整数 | bind-cert-validity-days 390 |
+| bind-cert-validity-days | 自动生成的服务器证书有效期（天） | 390 | 整数，上限 36500 天（100 年）。超出上限会在启动时告警并夹到 36500 | bind-cert-validity-days 390 |
 | bind-cert-san | 自动生成证书时追加的名称条目（可重复；写 IP 则生成 IP 类型 SAN） | 无 | 域名或 IP，可重复 | bind-cert-san dns.test |
 | server-name | DNS 服务器名称 | 操作系统主机名 / smartdns | 符合主机名规格的字符串 | server-name smartdns |
 | cache-size | 域名结果缓存个数 | 512 | 大于等于 0 的数字（0 表示关闭缓存）。<br />缓存内部分为 64 个分片，**实际容量会向上取整到 64 的倍数**，启动日志会打印实际值 | cache-size 512 |
@@ -41,7 +41,7 @@
 | rr-ttl-max | 允许的最大 TTL 值 | 未配置时取 `rr-ttl` | 大于 0 的数字。**未配置时回落到 `rr-ttl`**。可写在 `group-begin` 规则组里（组级 > 全局） | rr-ttl-max 600 |
 | rr-ttl-reply-max | 允许返回给客户端的最大 TTL 值 | 远程查询结果 | 大于 0 的数字。可写在 `group-begin` 规则组里（组级 > 全局） | rr-ttl-reply-max 60 |
 | local-ttl | 本地HOST，address的TTL值 | rr-ttl-min | 大于 0 的数字。可写在 `group-begin` 规则组里（组级 > 全局） | local-ttl  60 |
-| max-reply-ip-num | 允许返回给客户的最大IP数量 | IP数量 | 大于 0 的数字。可写在 `group-begin` 规则组里（组级 > 全局） | max-reply-ip-num 1 |
+| max-reply-ip-num | 允许返回给客户的最大IP数量 | 无（不截断） | 1~16 的整数。超出范围会在启动时告警并夹到 16。可写在 `group-begin` 规则组里（组级 > 全局） | max-reply-ip-num 1 |
 | max-query-limit | 整机同时处理的查询数上限，超过回 `REFUSED` | 65535 | 整数，0 = 不限。超过时每 120 秒最多告警一次 | max-query-limit 1000 |
 | log-level | 设置日志级别 | error | off、fatal、error、warn、notice、info 或 debug | log-level error |
 | log-file | 日志文件路径 | /var/log/smartdns/smartdns.log | 合法路径字符串 | log-file /var/log/smartdns/smartdns.log |
@@ -85,13 +85,11 @@
 | nameserver | 指定域名使用 server 组解析 | 无 | nameserver /domain/[group\|-], group 为组名，- 表示忽略此规则，配套 server 中的 -group 参数使用 | nameserver /www.example.com/office |
 | ipset | 域名 ipset | 无 | ipset [/domain/][ipset\|-\|#[4\|6]:[ipset\|-][,#[4\|6]:[ipset\|-]]] <br />把该域名解析出的地址写进指定的 **ipset 集合**（Linux 的 netfilter 集合，常用来做域名分流：防火墙按集合决定这些流量走哪条线）。<br />`-` 表示这一族不写；集合名上限 31 个字符。<br />**只在 Linux 上有效**（其它平台启动时会明确提示"已忽略"）。<br />写不进去（集合不存在、权限不足、名字太长）会在日志里**明确报出原因，只提示一次** —— 不会静默失效。<br />默认不给条目设过期时间（要过期时间请在建集合时用 `timeout`）。 | ipset /www.example.com/#4:dns4,#6:- |
 | ipset-timeout | 写进 ipset 的条目是否带过期时间 | no | [yes\|no]。过期时间 = 应答 TTL 的 3 倍，多地址时取最小 TTL。可写在 `group-begin` 规则组里（组级 > 全局） | ipset-timeout yes |
-| ipset-no-speed | 无需设置：本实现一律把解析出的地址全部写入 ipset（已等同开启） | 无 | [yes\|no] | ipset-no-speed yes |
 | nftset | 域名 nftset | 无 | nftset [/domain/][#4\|#6\|-]:[family#nftable#nftset\|-]<br />ipv4 的 family 只支持 inet 和 ip，ipv6 支持 inet 和 ip6。| nftset /www.example.com/#4:inet#tab#dns4,#6:- <br />同一域名可配置多条 nftset，会**全部合并生效**（不会互相覆盖） |
 | nftset-timeout | 写进 nftset 的条目是否带过期时间 | no | [yes\|no]。过期时间 = 应答 TTL 的 3 倍，多地址时取最小 TTL。可写在 `group-begin` 规则组里（组级 > 全局） | nftset-timeout yes |
-| nftset-no-speed | 无需设置：本实现一律把地址全部写入 nftset | 无 | [yes\|no] | nftset-no-speed yes |
 | nftset-debug | 往 nftset 写地址时打详细日志 | no | [yes\|no] | nftset-debug yes |
 | domain-rules | 一次给某个域名设多项规则 | 无 | domain-rules /domain/ [-rules...]<br />可选参数参考 speed-check-mode, address, nameserver, ipset, nftset 等。<br />`-ipset [#4\|#6]:集合名` / `-nftset [#4\|#6]:family#table#set`：命中的域名解析出的地址写进这些集合（值里不用再写域名）。| domain-rules /www.example.com/ -speed-check-mode none |
-| domain-set | 远程或本地域名集合文件 | 无 | domain-set [options...]<br />[-n\|-name]：域名集合名称 <br />[-t\|-type]：域名集合类型 (list)<br />[-f\|-file]：**本地**域名集合文件路径<br />[-u\|-url]：远程域名集合地址（HTTP/HTTPS，与 -file 二选一）<br />[-i\|-interval]：自动刷新周期（秒），到期后重新读取文件 / 重新下载远程名单，不配置则不自动刷新<br />[-p\|-proxy]：指定代理服务器下载远程规则集文件 | domain-set -name set -url https://x.com/list -proxy clash |
+| domain-set | 远程或本地域名集合文件 | 无 | domain-set [options...]<br />[-n\|-name]：域名集合名称 <br />[-t\|-type]：域名集合类型 (list)<br />[-f\|-file]：**本地**域名集合文件路径<br />[-u\|-url]：远程域名集合地址（HTTP/HTTPS，与 -file 二选一）<br />[-i\|-interval]：自动刷新周期（秒），到期后重新读取文件 / 重新下载远程名单，不配置则不自动刷新<br />[-p\|-proxy]：指定代理服务器下载远程规则集文件<br />文件格式：每行一个域名，行首 `#` 为注释；域名与注释之间可用**空格或 Tab** 分隔。无法解析的行会在启动时按条数告警，不再静默跳过 | domain-set -name set -url https://x.com/list -proxy clash |
 | client-rules | 按来源把客户端归到规则组 | 无 | [ip-set\|ip/subnet\|mac address] [-g\|group group-name] [-rules...]<br />设置客户端规则和规则组。 | client-rules 192.168.1.1 -g oversea |
 | bogus-nxdomain | 假冒 IP 地址过滤 | 无 | [ip/subnet]，可重复 | bogus-nxdomain 1.2.3.4/16 |
 | ignore-ip | 忽略 IP 地址 | 无 | [ip/subnet]，可重复 | ignore-ip 1.2.3.4/16 |

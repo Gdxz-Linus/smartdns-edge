@@ -129,6 +129,11 @@ global**. `force-no-CNAME` and `force-AAAA-SOA` also support listener level, i.e
 Nested groups follow the same rule: a value set in the inner group wins, and only unset values are
 inherited from the outer group.
 
+**Inside the domain-rule level**: a parameter set on a parent domain is inherited by its
+subdomains, and a value set explicitly on the subdomain wins. For example,
+`domain-rules /example.com/ -no-cache` also applies to `www.example.com`; if
+`www.example.com` sets the opposite, the subdomain wins.
+
 > ⚠️ Group parameters and the **cache**: the same domain may have different answers in
 > different rule groups, so the rule group is already part of the cache key — groups never
 > borrow each other's answers.

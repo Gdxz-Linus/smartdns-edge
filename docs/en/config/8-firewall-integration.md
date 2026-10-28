@@ -37,21 +37,3 @@ To prevent firewall sets from accumulating too many stale IPs and degrading rout
 ipset-timeout yes
 nftset-timeout yes
 ```
-
-> ⚠️ **About `ipset-no-speed` / `nftset-no-speed`**: these are **boolean switches**
-> (`yes` / `no`) and take **no set name**.
->
-> Their purpose is to control whether IPs that fail the speed check are still written
-> to the set. This program **always writes every resolved address** (i.e. equivalent to
-> on), so these two lines **change nothing either way**.
->
-> They are still **accepted** (you will not get an "unrecognised config line" warning),
-> but startup prints a notice saying they are unnecessary — so that configuring them
-> does not leave you wondering whether they took effect.
-
-```shell
-# These two lines can stay as they are;
-# this program always writes all addresses, so they change nothing
-ipset-no-speed yes
-nftset-no-speed yes
-```
