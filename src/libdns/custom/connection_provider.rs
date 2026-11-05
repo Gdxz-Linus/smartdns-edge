@@ -426,15 +426,17 @@ async fn new_connection(
             // 🔐 编号 65：HTTP 代理不支持 UDP 转发（协议限制）。
             // 原来 `handshake_udp` 直接返回错误，整条查询链路失败，用户看到的是"DNS 完全不能用"。
             // DNS over TCP 可以过 HTTP CONNECT，所以这里降级为 TCP —— 查询能通，用户无感。
-            ProtocolConfig::Udp => {
-                if udp_over_http_requires_tcp(&ProtocolConfig::Udp, runtime_proviver.proxy.as_ref())
-                {
-                    crate::log::warn!(
-                        "UDP upstream {} cannot go through an HTTP proxy (HTTP proxies do not forward UDP); querying over TCP instead",
-                        server.host()
-                    );
-                    effective_proto = ProtocolConfig::Tcp;
-                }
+            ProtocolConfig::Udp
+                if udp_over_http_requires_tcp(
+                    &ProtocolConfig::Udp,
+                    runtime_proviver.proxy.as_ref(),
+                ) =>
+            {
+                crate::log::warn!(
+                    "UDP upstream {} cannot go through an HTTP proxy (HTTP proxies do not forward UDP); querying over TCP instead",
+                    server.host()
+                );
+                effective_proto = ProtocolConfig::Tcp;
             }
             _ => {}
         }

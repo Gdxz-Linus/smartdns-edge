@@ -263,10 +263,10 @@ fn system_hosts_paths() -> Vec<String> {
 
 fn hosts_paths(hosts_file_pattern: Option<&str>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(pattern) = hosts_file_pattern {
-        if let Ok(entries) = glob::glob(pattern) {
-            paths.extend(entries.flatten());
-        }
+    if let Some(pattern) = hosts_file_pattern
+        && let Ok(entries) = glob::glob(pattern)
+    {
+        paths.extend(entries.flatten());
     }
     paths.extend(system_hosts_paths().into_iter().map(PathBuf::from));
     paths.sort();

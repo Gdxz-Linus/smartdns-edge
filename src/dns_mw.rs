@@ -147,10 +147,9 @@ impl DnsMiddlewareHandler {
             && client_rules
                 .iter()
                 .any(|s| matches!(s.client, crate::dns_conf::Client::Mac(_)))
+            && let Some(mac) = self.arp_resolver.lookup(client_ip).await
         {
-            if let Some(mac) = self.arp_resolver.lookup(client_ip).await {
-                matched_rule = client_rules.iter().find(|s| s.match_mac(&mac));
-            }
+            matched_rule = client_rules.iter().find(|s| s.match_mac(&mac));
         }
         if !server_opts.is_background
             && (cfg.acl_enable() || server_opts.acl())
@@ -559,6 +558,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // 测试需要独占全局 ARP 桩，锁必须活到测试结束；这是刻意的，不是漏放。
+    #[allow(clippy::await_holding_lock)]
     async fn acl_enable_allows_matched_mac_client() {
         use crate::config::ServerOpts;
         use crate::infra::arp::{set_test_arp_lookup, test_arp_lock};

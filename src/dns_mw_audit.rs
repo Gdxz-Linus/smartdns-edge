@@ -73,13 +73,13 @@ impl DnsAuditMiddleware {
 
         tokio::spawn(async move {
             // 🔐 P3：先把审计档的目录准备好 —— 同上，不再依赖"构建时顺手建出来的 ./logs"。
-            if let Some(audit_file) = &audit_path {
-                if let Err(err) = crate::infra::mapped_file::ensure_parent_dir(audit_file) {
-                    crate::log::error!(
-                        "cannot create the audit directory ({}): {err}; audit output may not reach the file",
-                        audit_file.display()
-                    );
-                }
+            if let Some(audit_file) = &audit_path
+                && let Err(err) = crate::infra::mapped_file::ensure_parent_dir(audit_file)
+            {
+                crate::log::error!(
+                    "cannot create the audit directory ({}): {err}; audit output may not reach the file",
+                    audit_file.display()
+                );
             }
             let mut audit_file = audit_path
                 .as_ref()

@@ -236,15 +236,10 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
-    #[test]
-    fn dhcp_recv_buffer_covers_typical_replies() {
-        // 🔐 编号 64：带完整选项的 DHCP 应答常见 1200–1500 字节，
-        // 缓冲必须大于这个范围，否则应答会被截断丢弃。
-        assert!(
-            DHCP_RECV_BUF >= 1500,
-            "buffer must hold a full-MTU DHCP reply"
-        );
-    }
+    // 🔐 编号 64：带完整选项的 DHCP 应答常见 1200–1500 字节，
+    // 缓冲必须大于这个范围，否则应答会被截断丢弃。
+    // 用编译期断言：常量之间的关系在编译时就能定论，不需要运行时测试。
+    const _: () = assert!(DHCP_RECV_BUF >= 1500);
 
     #[ignore = "需要局域网内存在真实 DHCP 服务器：本测试会在本机网段实际发出 DHCP DISCOVER"]
     #[tokio::test]

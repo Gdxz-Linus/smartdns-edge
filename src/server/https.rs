@@ -22,6 +22,9 @@ use crate::{
     rustls::{ResolvesServerCert, tls_server_config},
 };
 
+/// 参数较多是监听启动路径的固有形状：每项都来自配置且不能合并成一个结构体，
+/// 否则调用方反而要在多处重复组装。
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     app: App,
     listener: net::TcpListener,

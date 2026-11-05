@@ -726,6 +726,12 @@ struct LogConsumer {
     dropped: AtomicU64,
     /// 🔐 编号 74：本实例累计 flush 超时/失败的次数，理由同上。
     flush_failed: AtomicU64,
+    /// 下线时排空队列的超时。
+    ///
+    /// 生产固定 500 毫秒：进程退出不能无限等。测试传入更长值 ——
+    /// 全量并行运行时消费者线程会被抢占，500 毫秒写不完积压的行，
+    /// `flush_blocking` 超时返回后 Drop 结束，测试立刻读文件就少行。
+    flush_on_drop: Duration,
 }
 
 impl LogConsumer {
@@ -816,7 +822,7 @@ impl Drop for LogConsumer {
         // 消费者要下线了（例如日志热重载）：尽力把已入队的日志先写完。
         // 之后 tx 随之释放，消费线程会把队列里剩下的内容处理干净再退出
         // （mpsc 的 recv 只在"队列空且发送端全没了"时才报错），所以不需要 join。
-        let _ = self.flush_blocking(Duration::from_millis(500));
+        let _ = self.flush_blocking(self.flush_on_drop);
     }
 }
 
@@ -859,7 +865,7 @@ impl MutexMappedFile {
     #[inline]
     pub fn open<P: AsRef<Path>>(path: P, size: u64, num: Option<usize>, mode: Option<u32>) -> Self {
         // 生产队列容量：10240 条日志缓冲池，再猛烈的爆发也不会 OOM
-        Self::open_with_queue_capacity(path, size, num, mode, 10240)
+        Self::open_with_queue_capacity(path, size, num, mode, 10240, Duration::from_millis(500))
     }
 
     /// 与 [`open`] 相同，但可指定队列容量。
@@ -874,6 +880,7 @@ impl MutexMappedFile {
         num: Option<usize>,
         mode: Option<u32>,
         queue_capacity: usize,
+        flush_on_drop: Duration,
     ) -> Self {
         let inner = Arc::new(Mutex::new(MappedFile::open(path, size, num, mode)));
         let inner_clone = inner.clone();
@@ -923,6 +930,7 @@ impl MutexMappedFile {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop,
         });
 
         // 登记到全局，供关机路径的 flush_all() 使用（只存 Weak，见 LOG_CONSUMERS 的说明）
@@ -971,6 +979,7 @@ impl MutexMappedFile {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         });
 
         {
@@ -1089,6 +1098,7 @@ mod tests {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
 
         let before = consumer.dropped_total();
@@ -1107,12 +1117,14 @@ mod tests {
             tx: tx1,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
         let (tx2, _rx2) = mpsc::sync_channel::<LogMsg>(1);
         let second = LogConsumer {
             tx: tx2,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
 
         assert!(first.send_data(b"first"));
@@ -1131,6 +1143,7 @@ mod tests {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
         let processed = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -1186,6 +1199,7 @@ mod tests {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
 
         let before = consumer.flush_failed_total();
@@ -1200,8 +1214,14 @@ mod tests {
         let path = test_path("flush");
         // 🔐 编号 74（补）：队列容量必须大于写入行数，否则 `flush()` 会因为
         // 消费者线程排空不及而超时（原来固定 10240，写 20000 行必然超时）。
-        let writer =
-            MutexMappedFile::open_with_queue_capacity(&path, 1 << 20, Some(3), None, 65_536);
+        let writer = MutexMappedFile::open_with_queue_capacity(
+            &path,
+            1 << 20,
+            Some(3),
+            None,
+            65_536,
+            Duration::from_secs(30),
+        );
 
         let total: u64 = 20_000;
         let before = writer.dropped_total_for_test();
@@ -1249,8 +1269,14 @@ mod tests {
         let path = test_path("drop");
         {
             // 🔐 编号 74（补）：给足队列容量，避免全量并行时被其他测试的日志写入抢占而丢行。
-            let writer =
-                MutexMappedFile::open_with_queue_capacity(&path, 1 << 20, Some(3), None, 8_192);
+            let writer = MutexMappedFile::open_with_queue_capacity(
+                &path,
+                1 << 20,
+                Some(3),
+                None,
+                8_192,
+                Duration::from_secs(30),
+            );
             for i in 0..2_000 {
                 let mut w = &writer;
                 w.write_all(format!("bye-{i}\n").as_bytes()).unwrap();
@@ -1618,6 +1644,7 @@ mod tests {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
         let before = consumer.dropped_total();
 
@@ -1660,6 +1687,7 @@ mod tests {
             tx,
             dropped: AtomicU64::new(0),
             flush_failed: AtomicU64::new(0),
+            flush_on_drop: Duration::from_millis(500),
         };
         let before = consumer.dropped_total();
 

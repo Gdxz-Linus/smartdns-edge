@@ -1378,6 +1378,7 @@ mod bootstrap {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait 宏会为返回 Result 的方法重复加 #[must_use]
 pub trait GenericResolver {
     fn options(&self) -> &ResolverOpts;
 
@@ -1399,6 +1400,7 @@ pub trait GenericResolver {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // 同上
 pub trait GenericResolverExt {
     /// Performs a dual-stack DNS lookup for the IP for the given hostname.
     ///

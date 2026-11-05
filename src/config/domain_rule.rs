@@ -42,13 +42,13 @@ impl std::ops::AddAssign for DomainRule {
             self.nameserver = rhs.nameserver;
         }
 
-        if rhs.address.is_some() {
-            if let Some(rhs_addr) = rhs.address {
-                if let Some(ref mut lhs_addr) = self.address {
-                    lhs_addr.merge(rhs_addr);
-                } else {
-                    self.address = Some(rhs_addr);
-                }
+        if rhs.address.is_some()
+            && let Some(rhs_addr) = rhs.address
+        {
+            if let Some(ref mut lhs_addr) = self.address {
+                lhs_addr.merge(rhs_addr);
+            } else {
+                self.address = Some(rhs_addr);
             }
         }
 

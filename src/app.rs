@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1214,7 +1213,7 @@ fn build_middleware(
         let has_output = cfg.audit_console() || cfg.audit_syslog();
         if cfg.audit_enable() && (has_file || has_output) {
             builder = builder.with(DnsAuditMiddleware::new(
-                cfg.audit_file().map(PathBuf::from),
+                cfg.audit_file(),
                 cfg.audit_size(),
                 cfg.audit_num(),
                 cfg.audit_file_mode().into(),

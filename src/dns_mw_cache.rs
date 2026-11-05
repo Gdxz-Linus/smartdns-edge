@@ -46,18 +46,23 @@ pub struct CacheKey {
     pub opts: AnswerAffectingOpts,
 }
 
+/// 进行中的同名查询：缓存键 → 广播发送端。
+///
+/// 用别名收口这段嵌套较深的类型，避免中间件与守卫结构各写一遍。
+type InflightMap = Arc<
+    Mutex<
+        std::collections::HashMap<
+            CacheKey,
+            tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>,
+        >,
+    >,
+>;
+
 pub struct DnsCacheMiddleware {
     cfg: Arc<RuntimeConfig>,
     cache: Arc<DnsCache>,
     client: DnsHandle,
-    inflight: Arc<
-        Mutex<
-            std::collections::HashMap<
-                CacheKey,
-                tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>,
-            >,
-        >,
-    >,
+    inflight: InflightMap,
 }
 
 impl DnsCacheMiddleware {
@@ -2156,14 +2161,7 @@ impl Drop for PrefetchGuard {
 }
 
 struct InflightCacheGuard {
-    inflight: Arc<
-        Mutex<
-            std::collections::HashMap<
-                CacheKey,
-                tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>,
-            >,
-        >,
-    >,
+    inflight: InflightMap,
     key: CacheKey,
     done: bool,
 }

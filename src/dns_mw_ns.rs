@@ -29,10 +29,15 @@ use std::sync::Mutex;
 use tokio::sync::broadcast; // 🌟 引入广播频道
 use tokio::time::sleep; // 🌟 引入互斥锁
 
+/// 进行中的同名查询：域名 → 广播发送端。
+///
+/// 用别名收口这段嵌套较深的类型，避免每个字段与守卫结构里重复书写一遍。
+type NsInflightMap = Arc<Mutex<HashMap<String, broadcast::Sender<Result<DnsResponse, DnsError>>>>>;
+
 pub struct NameServerMiddleware {
     client: DnsClient,
     // 🌟 新增：底层收费站复印机 (合并相同的 4 倍冗余请求)
-    inflight: Arc<Mutex<HashMap<String, broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
+    inflight: NsInflightMap,
 }
 
 impl NameServerMiddleware {
@@ -1512,8 +1517,7 @@ mod tests {
 // 🌟 制造对讲机工牌：防止 NS 底层带头大哥半路阵亡导致全网死等
 // ==========================================
 struct InflightNsGuard {
-    inflight:
-        Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Result<DnsResponse, DnsError>>>>>,
+    inflight: NsInflightMap,
     cache_key: String,
     done: bool,
 }

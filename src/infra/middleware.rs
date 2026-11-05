@@ -4,6 +4,7 @@ use futures::future::{BoxFuture, FutureExt};
 use std::result::Result;
 
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait 宏会为返回 Result 的方法重复加 #[must_use]
 pub trait Middleware<TCtx: Send, TReq: Sync, TRes, TErr>: Send + Sync {
     #[inline]
     async fn handle(
@@ -39,6 +40,7 @@ where
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // 同上
 pub trait MiddlewareDefaultHandler<TCtx, TReq, TRes, TErr>: Send + Sync {
     async fn handle(&self, ctx: &mut TCtx, req: &TReq) -> Result<TRes, TErr>;
 }

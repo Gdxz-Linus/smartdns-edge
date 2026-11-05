@@ -469,6 +469,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // 测试需要独占全局 ARP 桩，锁必须活到测试结束；这是刻意的，不是漏放。
+    #[allow(clippy::await_holding_lock)]
     async fn resolver_caches_a_miss() {
         let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
         let _hooks = TestArpHookGuard::new(counting_miss_lookup);
@@ -498,6 +500,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // 测试需要独占全局 ARP 桩，锁必须活到测试结束；这是刻意的，不是漏放。
+    #[allow(clippy::await_holding_lock)]
     async fn resolver_folds_concurrent_lookups_for_the_same_ip() {
         let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
         let _hooks = TestArpHookGuard::new(slow_lookup);
@@ -564,6 +568,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // 测试需要独占全局 ARP 桩，锁必须活到测试结束；这是刻意的，不是漏放。
+    #[allow(clippy::await_holding_lock)]
     async fn resolver_caches_a_hit() {
         let _lock = test_arp_lock().lock().unwrap_or_else(|e| e.into_inner());
         let _hooks = TestArpHookGuard::new(counting_hit_lookup);
