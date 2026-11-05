@@ -124,7 +124,8 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
                 return Ok(None);
             };
 
-            let conn = match tokio::time::timeout(std::time::Duration::from_secs(5), incoming).await {
+            let conn = match tokio::time::timeout(std::time::Duration::from_secs(5), incoming).await
+            {
                 Ok(Ok(conn)) => conn,
                 Ok(Err(err)) => {
                     log::debug!("QUIC handshake failed: {err}");
@@ -139,44 +140,44 @@ impl axum_h3::PeerAcceptor for QuinnPeerAcceptor {
             {
                 let peer = conn.remote_address();
 
-                    // 🔐 A6（2026-09-17）：连接数上限。DoH3 以前是**唯一没有闸门**的监听，
-                    // 攻击者可以无限开 QUIC 连接；现在与其它五条监听同口径：
-                    // ① 全局限额（按物理内存自动推算，家庭小机器自动收紧、企业机器自动放宽）
-                    // ② 该监听单独配置的那一份（`bind-h3 ... -max-connections N`）
-                    // 超出就丢弃这次新连接，**不影响已有连接**（与 DoQ/DoT/DoH 一致）。
-                    // 计数位置也与 DoQ 一致：握手完成之后才占名额，没握完的不算。
-                    let Some(conn_guard) = crate::server::limit::global().acquire(peer.ip()) else {
-                        log::debug!(
-                            "DoH3 global connection limit reached; refusing the new connection from {peer}"
-                        );
-                        continue;
-                    };
-                    let listener_guard = match self.listener_limiter.as_ref() {
-                        Some(limiter) => match limiter.acquire(peer.ip()) {
-                            Some(guard) => Some(guard),
-                            None => {
-                                log::debug!(
-                                    "DoH3 per-listener connection limit reached; refusing the new connection from {peer}"
-                                );
-                                continue; // 全局限额随作用域结束自动归还
-                            }
-                        },
-                        None => None,
-                    };
+                // 🔐 A6（2026-09-17）：连接数上限。DoH3 以前是**唯一没有闸门**的监听，
+                // 攻击者可以无限开 QUIC 连接；现在与其它五条监听同口径：
+                // ① 全局限额（按物理内存自动推算，家庭小机器自动收紧、企业机器自动放宽）
+                // ② 该监听单独配置的那一份（`bind-h3 ... -max-connections N`）
+                // 超出就丢弃这次新连接，**不影响已有连接**（与 DoQ/DoT/DoH 一致）。
+                // 计数位置也与 DoQ 一致：握手完成之后才占名额，没握完的不算。
+                let Some(conn_guard) = crate::server::limit::global().acquire(peer.ip()) else {
+                    log::debug!(
+                        "DoH3 global connection limit reached; refusing the new connection from {peer}"
+                    );
+                    continue;
+                };
+                let listener_guard = match self.listener_limiter.as_ref() {
+                    Some(limiter) => match limiter.acquire(peer.ip()) {
+                        Some(guard) => Some(guard),
+                        None => {
+                            log::debug!(
+                                "DoH3 per-listener connection limit reached; refusing the new connection from {peer}"
+                            );
+                            continue; // 全局限额随作用域结束自动归还
+                        }
+                    },
+                    None => None,
+                };
 
-                    // 配额要活到这条连接结束为止：accept() 之后连接就交给 axum-h3 了，
-                    // 我们拿不到 Drop 时机，所以克隆一份 quinn 连接、起个守护任务等它关闭 ——
-                    // 连接一关（对端断开或 endpoint 关闭），两份配额自动归还。
-                    {
-                        let watcher = conn.clone();
-                        tokio::spawn(async move {
-                            let _conn_guard = conn_guard;
-                            let _listener_guard = listener_guard;
-                            let _ = watcher.closed().await;
-                        });
-                    }
+                // 配额要活到这条连接结束为止：accept() 之后连接就交给 axum-h3 了，
+                // 我们拿不到 Drop 时机，所以克隆一份 quinn 连接、起个守护任务等它关闭 ——
+                // 连接一关（对端断开或 endpoint 关闭），两份配额自动归还。
+                {
+                    let watcher = conn.clone();
+                    tokio::spawn(async move {
+                        let _conn_guard = conn_guard;
+                        let _listener_guard = listener_guard;
+                        let _ = watcher.closed().await;
+                    });
+                }
 
-                    return Ok(Some((h3_quinn::Connection::new(conn), Some(peer))));
+                return Ok(Some((h3_quinn::Connection::new(conn), Some(peer))));
             }
         }
     }

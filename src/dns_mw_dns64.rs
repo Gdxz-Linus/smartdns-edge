@@ -102,9 +102,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for Dns64Middlewa
                         resp.add_answer(crate::dns::Record::from_rdata(
                             name.clone(),
                             ttl,
-                            crate::dns::RData::AAAA(crate::libdns::proto::rr::rdata::AAAA(
-                                ipv6,
-                            )),
+                            crate::dns::RData::AAAA(crate::libdns::proto::rr::rdata::AAAA(ipv6)),
                         ));
                     }
                     return Ok(resp);
@@ -378,10 +376,7 @@ mod tests {
             .collect();
         ipv6_addresses.sort();
 
-        assert_eq!(
-            ipv6_addresses,
-            vec!["64:ff9b::c000:aa", "64:ff9b::c000:ab"]
-        );
+        assert_eq!(ipv6_addresses, vec!["64:ff9b::c000:aa", "64:ff9b::c000:ab"]);
     }
 
     /// 🔐 P2-5 补齐：未配 dns64 前缀的组不拦截 ipv4only.arpa（原样穿透到内层）。

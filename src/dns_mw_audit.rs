@@ -371,10 +371,10 @@ fn record_audit_to_file(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::{RData, RecordType};
     use std::io::Read;
+    use std::path::Path;
     use std::str::FromStr;
 
     use super::*;
